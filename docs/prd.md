@@ -23,6 +23,41 @@ An MCP server that:
 - Provides minimal, structured output focused on failures
 - Exposes status endpoints for monitoring
 
+---
+
+## Product Structure
+
+This product consists of two distinct layers:
+
+### Layer 1: Core MCP Server (Primary Focus)
+
+The MCP server is the main product. It provides programmatic test orchestration capabilities for AI agents and CI systems.
+
+**Key characteristics:**
+- Programmatic interface only (no direct human interaction)
+- Optimized for CI/CD workflows
+- Intelligent test selection based on coverage
+- Real-time test result streaming
+- Reliable error reporting
+
+**Target users:** AI agents, CI/CD pipelines, automated testing infrastructure
+
+### Layer 2: Human UI (Secondary Enhancement)
+
+A simple web interface built on top of the MCP server for human developers to monitor test runs.
+
+**Key characteristics:**
+- Visual status representation
+- Manual trigger controls
+- History viewer
+- Simple failure inspection
+
+**Target users:** Human developers who want visibility without CLI
+
+**Relationship:** The UI is optional convenience - all functionality is available through the MCP. The UI cannot function without the MCP backend.
+
+---
+
 ## User Stories
 
 ### Epic 1: Core Infrastructure
