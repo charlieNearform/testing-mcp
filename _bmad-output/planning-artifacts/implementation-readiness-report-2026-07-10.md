@@ -153,7 +153,7 @@ None.
 
 ### Watch Items (non-blocking)
 
-1. **Coverage-map build is the core technical risk** (per PRD/architecture and `spike/coverage-map/FINDINGS.md`). Mitigated by the single-pass + setup-baseline + always-run design, and by **vendoring `testpick`'s MIT attribution algorithm** (decision 2026-07-10) rather than rebuilding it — keep the spike harness as a regression check when implementing Epic 3, and include testpick's MIT license notice.
+1. **Coverage-map build is the core technical risk** (per PRD/architecture and `docs/coverage-spike-findings.md`). Mitigated by the single-pass + setup-baseline + always-run design, and by **vendoring `testpick`'s MIT attribution algorithm** (decision 2026-07-10) rather than rebuilding it — keep the spike harness as a regression check when implementing Epic 3, and include testpick's MIT license notice.
    - **Positioning (PRFAQ 2026-07-10):** coverage selection is table-stakes (competitors `testpick`/`vitest-agent`/`vitest-affected`/native `--stale`); the differentiator is the daemon + project-local version isolation + transparent state. Ship the wedge fast. See `prfaq-test-server-mcp.md`.
 2. **Vitest version coupling** — the `vitest/node` advanced API differs 3.x↔4.x; Story 2.1 must pin and resolve from the project (target repo 4.1.9).
 3. **UX for Epic 5** — add a light UX spec before Phase 2 UI stories.

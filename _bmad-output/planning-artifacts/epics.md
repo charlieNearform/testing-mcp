@@ -53,7 +53,7 @@ NFR8: Reverse coverage map buildable within one full instrumented (single-pass) 
 - Vitest access via `vitest/node` (`startVitest`/`createVitest`); pin the version (advanced API differs 3.x↔4.x; target repo pins 4.1.9).
 - Per-project workers via `child_process.fork`; daemon↔worker over IPC.
 - Standardized error envelope `{code, message, details?}`; UUID v4 for IDs except `projectId` (path hash).
-- Coverage engine is single-pass (serial snapshot-diff), validated by `spike/coverage-map/FINDINGS.md` against a large frontend app. The attribution algorithm is ported/vendored from `testpick` (MIT) into the worker; retain its license notice. Differentiator is the daemon/isolation delivery, not coverage selection (table-stakes).
+- Coverage engine is single-pass (serial snapshot-diff), validated by `docs/coverage-spike-findings.md` against a large frontend app. The attribution algorithm is ported/vendored from `testpick` (MIT) into the worker; retain its license notice. Differentiator is the daemon/isolation delivery, not coverage selection (table-stakes).
 
 ### UX Design Requirements
 

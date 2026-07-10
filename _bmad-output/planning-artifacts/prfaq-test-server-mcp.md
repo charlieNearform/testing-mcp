@@ -10,7 +10,7 @@ inputs:
   - docs/architecture.md
   - _bmad-output/planning-artifacts/prd/prd-test-server-mcp-2026-07-10/SPEC.md
   - _bmad-output/planning-artifacts/architecture/architecture-test-server-mcp-2026-07-10/ARCHITECTURE-SPINE.md
-  - spike/coverage-map/FINDINGS.md
+  - docs/coverage-spike-findings.md
 ---
 
 # Your AI coding agent can run only the tests your change can actually break — across every project on your machine, from one always-on server.
@@ -48,7 +48,7 @@ Open source under a permissive license. Install the CLI, run `test-mcp register`
 A: Honestly — the *core selection idea is no longer unique*, and you should know that before adopting. `testpick` already does single-pass, sharded, V8 precise-coverage delta attribution with an `explain` command and a deliberate "err toward running more" bias — essentially our coverage engine. `vitest-agent` already ships a Vitest plugin + MCP server + SQLite persistence + failure history. `vitest-affected` does ~5ms runtime reverse-map selection aimed at parallel agents. So our defensible wedge is *not* "coverage-based selection." It is: (1) **one always-on daemon serving many projects** over Streamable HTTP, rather than a per-call stdio wrapper or a per-project plugin; (2) **project-local execution** — each project runs under its own installed Vitest version in an isolated worker, so a monorepo or a machine with mismatched versions doesn't break; (3) **transparent, repo-local state** you can read and diff in `.test-mcp/`, not a hidden SQLite file; and (4) **setup-file baseline subtraction** as a first-class correctness feature, because in real suites a global `setup.ts` otherwise makes every source look like it triggers the whole suite. If those four don't matter to you, `testpick` or `vitest-agent` today are the pragmatic choice.
 
 ### Q: Will it ever skip a test that my change actually broke?
-A: The whole design is built to avoid that, and we're explicit about the trade: we prioritize recall over precision. On any uncertainty — a file the map has never seen, a module only reached via global setup, or a test we couldn't measure (timeout/crash) — we run the full suite. You lose some speed in those cases; you don't lose the failure. We validated this on a real app (`spike/coverage-map/FINDINGS.md`): the design holds, but the honest caveat is that a coverage map can't see a branch a recorded run never executed — which is why the static `--changed` graph is unioned in as a second signal.
+A: The whole design is built to avoid that, and we're explicit about the trade: we prioritize recall over precision. On any uncertainty — a file the map has never seen, a module only reached via global setup, or a test we couldn't measure (timeout/crash) — we run the full suite. You lose some speed in those cases; you don't lose the failure. We validated this on a real app (`docs/coverage-spike-findings.md`): the design holds, but the honest caveat is that a coverage map can't see a branch a recorded run never executed — which is why the static `--changed` graph is unioned in as a second signal.
 
 ### Q: Why do I need a daemon at all? A plugin or a stdio MCP wrapper is simpler to install.
 A: For a single project, a plugin *is* simpler and you should probably use one. The daemon earns its keep when you have several projects and/or several agents at once: the coverage map and history stay warm in memory, one process coordinates runs instead of N cold starts, and version isolation is enforced per project. If you only ever touch one repo, that's overhead you may not want.

@@ -364,7 +364,7 @@ worker; setup-baseline subtraction is added by us.
    When the map is built
    Then that test is recorded as "unknown deps" and always selected on any relevant change (never silently dropped)
 
-> **Spike note (`spike/coverage-map/FINDINGS.md`):** validated on the target repo. The map
+> **Spike note (`docs/coverage-spike-findings.md`):** validated on the target repo. The map
 > is built **single-pass** (serial, one process, snapshot-diff) — naive per-file was ~6×
 > slower. Setup-baseline subtraction is what makes selection useful: without it a common-lib
 > edit re-runs the whole suite; with it, ~6% (unit) / ~18% (integration) of the suite.

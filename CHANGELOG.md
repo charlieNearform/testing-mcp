@@ -26,8 +26,10 @@ Security**, referencing the GitHub issue (`#123`) where applicable.
   epics & stories (`epics.md` — 5 epics / 18 stories), PRFAQ + distillate, and an
   implementation-readiness report (status: READY).
 - Source-of-truth docs: `docs/prd.md`, `docs/architecture.md`, `docs/patterns.md`.
-- Coverage-mapping spike (`spike/coverage-map/`) validating the single-pass V8
-  snapshot-diff + setup-baseline-subtraction approach against a real target project.
+- Coverage-mapping spike harness (`spike/coverage-map/build-map.mjs`) validating the
+  single-pass V8 snapshot-diff + setup-baseline-subtraction approach against a real target
+  project; findings written up in `docs/coverage-spike-findings.md`. Generated spike output
+  (`spike/**/out/`) is git-ignored, not tracked.
 - `THIRD_PARTY_LICENSES.md` recording testpick (MIT) attribution for the coverage
   attribution algorithm to be vendored in Epic 3.
 

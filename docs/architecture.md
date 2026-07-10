@@ -189,7 +189,7 @@ executes exactly that plan (re-derives if the plan expired).
    a test that could not be measured → run the **full suite**.
 5. Otherwise run `A ∪ B`.
 
-> Validated by the coverage-map spike (`spike/coverage-map/FINDINGS.md`) against the
+> Validated by the coverage-map spike (`docs/coverage-spike-findings.md`) against the
 > real target repo: without setup-baseline exclusion, editing a common lib re-runs the
 > *entire* suite; with it, incremental selection drops to ~6% (unit) / ~18% (integration)
 > of the suite.
@@ -235,7 +235,7 @@ coverage in a **single pass** (serially in one process), snapshot cumulative cov
 after each file, diff to attribute execution → source→test-file map. Granularity is
 **test-file level**. Incremental: hash each test file; re-measure only changed/new files.
 
-Validated by the spike (`spike/coverage-map/FINDINGS.md`) on the real target repo. Two
+Validated by the spike (`docs/coverage-spike-findings.md`) on the real target repo. Two
 mandatory refinements came out of it:
 
 1. **Subtract the setup baseline.** `setupFiles` (e.g. `vitest.setup.ts`) run before every
