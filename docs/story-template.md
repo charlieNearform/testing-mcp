@@ -16,7 +16,7 @@ Every story follows this shape. Inconsistent story input is the single largest s
 Link or quote the original functional requirement, design reference, or bug report.
 
 - Requirement: {link/quote}
-- Context pack: {link to `_bmad-output/implementation-artifacts/epic-<N>-context.md`, if available}
+- Context pack: {link to `_bmad/output/implementation-artifacts/epic-<N>-context.md`, if available}
 - Related story: {link, if applicable}
 
 ### Acceptance criteria

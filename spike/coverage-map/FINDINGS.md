@@ -1,0 +1,48 @@
+# Coverage-Map Spike — Findings
+
+**Date:** 2026-07-10
+**Target (real-world):** a large frontend app (Vitest 4.1.9, `@vitest/coverage-v8` 4.1.9, Vite 8, React 19, jsdom, Node 26). 286 test files, 362 source files.
+**Goal:** de-risk Epic 3 — prove we can build a source→test-file reverse map from V8 coverage using the project's *own* Vitest, and measure cost + selection benefit.
+**Constraint honoured:** no tracked files changed in the target repo (only git-ignored `coverage/` and `node_modules/.vite`). All spike output kept in this repo under `spike/coverage-map/out/`.
+
+## Verdict: FEASIBLE, with two mandatory design additions
+
+The core mechanism works and delivers the intended benefit on this real project — **but only after** subtracting the setup-file baseline, and only with single-pass measurement (not naive per-file). Both are now folded into the architecture/PRD.
+
+## Evidence
+
+Reproduce: `node spike/coverage-map/build-map.mjs --filter <glob> --limit N [--baseline]`
+
+### 1. Feasibility — PASS
+Driving the project's own Vitest per test file and reading `coverage-final.json` produced a correct source→test map. 0 parse failures across all *measurable* tests (34 measured). `button.test.tsx` → `src/ui/button.tsx` (+ setup-induced modules, see below): correct.
+
+### 2. Naive per-file is too slow → single-pass is mandatory
+22 UI test files: **77.4s** measured one-at-a-time vs **13.0s** for a single combined run (**~6×** overhead). Per-file startup dominates. Confirms the architecture's single-pass V8 snapshot-diffing (run files serially in one process, snapshot cumulative coverage after each, diff) rather than one process per file. Map *accuracy* is identical either way.
+
+### 3. Setup-file coverage pollution — the decisive finding
+`vitest.setup.ts` runs before every test, so its transitive imports get attributed to **every** test file. ~8–9 modules (`src/lib/i18n.ts`, `observability/*`, `env.ts`, `utils.ts`, `string.ts`, `date.ts`, `auth/api/queryKeys.ts`, …) appear in ≥80% of tests.
+
+Impact on selection benefit (test files selected when one source file changes):
+
+| Subset | Raw avg (ratio) | Raw max | After subtracting setup baseline |
+|--------|-----------------|---------|----------------------------------|
+| 22 UI component tests | 5.95 (27%) | **22 = whole suite** | **1.27 (5.8%)**, max 2 |
+| 12 feature/calendar tests | 3.10 (26%) | 11 | 2.22 (18.5%), max 6 |
+
+Without the fix, editing a common lib (e.g. `i18n.ts`) re-runs the **entire suite** — defeating the product's purpose. With setup-baseline subtraction, incremental selection drops to ~6% (unit) / ~18% (integration) of the suite. Integration tests legitimately touch more modules (e.g. `BulkEditSlideOut` → 62 source files), so wider selection there is correct, not noise.
+
+**Design consequence:** measure a setup-only baseline (coverage of a no-op/empty test) and subtract it from every test's attribution, OR classify setup-loaded modules as "full-suite triggers." The map builder must do this explicitly.
+
+### 4. Heavy tests can be unmeasurable under coverage
+`src/features/calendar/__tests__/CalendarPage.test.tsx` (mounts real AG Grid Enterprise) **exceeded the 120s guard under coverage instrumentation and produced no coverage** (project config already flags AG Grid tests as CPU-heavy with a 30s `testTimeout`).
+
+**Design consequence:** the Coverage Engine must (a) use a generous, configurable per-file measurement budget; (b) treat any test it cannot measure (timeout/crash/no coverage) as **always-run** — never silently drop it (matches invariant 5, correctness over cleverness); (c) single-pass amortizes startup but heavy tests stay heavy, so map *refresh* for such files should be incremental/opt-outable.
+
+## Plan adjustments made from this spike
+- **Architecture** (`docs/architecture.md`): added setup-baseline subtraction and unmeasurable-test handling to the Coverage Engine + selection algorithm; reinforced single-pass with the 6× figure; added both to Open Risks.
+- **PRD** (`docs/prd.md`): Epic 3 gains acceptance criteria for setup-baseline handling and conservative fallback on unmeasurable tests; selection-benefit success metric reframed to a realistic ~6–20% of suite (project-dependent) rather than a flat number.
+- The project already ships `test:changed` (`vitest run --changed origin/main`), so the git-delta pass is validated against their existing workflow.
+
+## Files
+- `build-map.mjs` — the spike harness (naive per-file map builder + setup-baseline + selection analysis).
+- `out/coverage-map.json`, `out/per-test.json`, `out/summary.json` — last run's artifacts.

@@ -9,8 +9,7 @@ wheels/
 # Virtual environments
 .venv
 
-# BMAD output
-_bmad-output/
+# BMAD output — planning/implementation/test artifacts are tracked (source of truth mirrors docs/)
 
 # IDE
 .vscode/

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP Test Runner Brainstorm</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --text-main: #f1f5f9;
+            --text-muted: #94a3b8;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            color: var(--text-main);
+            line-height: 1.6;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        h1 { font-size: 2.5rem; margin-bottom: 0.5rem; background: linear-gradient(90deg, #3b82f6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        p.subtitle { color: var(--text-muted); font-size: 1.1rem; }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid #334155;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .card:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
+
+        .card h2 { color: var(--accent); margin-bottom: 1rem; font-size: 1.25rem; }
+        .card ul { list-style: none; padding-left: 0; }
+        .card li { padding: 0.5rem 0; border-bottom: 1px solid #334155; padding-left: 1rem; position: relative; }
+        .card li:last-child { border-bottom: none; }
+        .card li::before { content: "•"; color: var(--accent); position: absolute; left: 0; font-weight: bold; }
+
+        .section { margin-bottom: 2.5rem; }
+        .section h2 { font-size: 1.5rem; margin-bottom: 1rem; color: var(--text-main); border-bottom: 2px solid var(--accent); padding-bottom: 0.5rem; }
+
+        .priority-tag {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .priority-must { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+        .priority-should { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
+        .priority-could { background: rgba(59, 130, 246, 0.2); color: #3b82f6; }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .metric {
+            background: var(--card-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .metric-value { font-size: 2rem; font-weight: bold; color: var(--success); }
+        .metric-label { color: var(--text-muted); font-size: 0.875rem; margin-top: 0.25rem; }
+
+        footer { text-align: center; margin-top: 3rem; color: var(--text-muted); font-size: 0.875rem; }
+
+        @media (max-width: 768px) {
+            .metrics-grid { grid-template-columns: 1fr; }
+            h1 { font-size: 1.75rem; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>MCP Test Runner Brainstorm</h1>
+        <p class="subtitle">Intelligent test orchestration for JavaScript/TypeScript projects</p>
+    </header>
+
+    <div class="section">
+        <h2>Performance Philosophy</h2>
+        <div class="metrics-grid">
+            <div class="metric">
+                <div class="metric-value">Minimal</div>
+                <div class="metric-label">Feedback Cycles</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">Focused</div>
+                <div class="metric-label">Incremental Runs</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">Reliable</div>
+                <div class="metric-label">Test Selection</div>
+            </div>
+        </div>
+        <p style="margin-top: 1rem; color: var(--text-muted); font-size: 0.9rem; text-align: center;">
+            Minimize feedback cycles through intelligent test selection.<br>
+            Only re-run tests affected by code changes.<br>
+            Keep incremental runs fast enough for interactive development.
+        </p>
+    </div>
+
+    <div class="section">
+        <h2>Feature Categories</h2>
+        <div class="grid">
+            <div class="card">
+                <h2>Test Priority Engine</h2>
+                <ul>
+                    <li>Prioritize by git recency, failure history, business impact</li>
+                    <li>Dynamic priority adjustment based on time/context</li>
+                    <li>Auto-skip low-priority tests when constrained</li>
+                    <li>Priority view showing top failures first</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h2>Delta Testing</h2>
+                <ul>
+                    <li>Git-aware delta: only tests touching changed commits</li>
+                    <li>AST-level delta: detect behavior-affecting changes</li>
+                    <li>"Dry run" mode showing what WOULD run</li>
+                    <li>Fallback to full suite when delta fails</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h2>Test Health Dashboard</h2>
+                <ul>
+                    <li>Reliability score: pass rate over time</li>
+                    <li>Speed score: p50/p95/p99 duration</li>
+                    <li>Flakiness detector: intermittent failures</li>
+                    <li>Health trend charts</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h2>Smart Retry Logic</h2>
+                <ul>
+                    <li>Retry isolation: fresh process per attempt</li>
+                    <li>Backoff strategy: exponential with jitter</li>
+                    <li>Retry budget controls</li>
+                    <li>Automatic flaky test flagging</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h2>Dependency Graph</h2>
+                <ul>
+                    <li>Build-time graph generation</li>
+                    <li>Circular dependency detection</li>
+                    <li>Impact analysis: show what breaks on change</li>
+                    <li>Graph export in DOT format</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h2>Progressive Disclosure</h2>
+                <ul>
+                    <li>Level 1: Pass/fail counts + top 3 failures</li>
+                    <li>Level 2: Add stack traces</li>
+                    <li>Level 3: Add full stdout/stderr</li>
+                    <li>Level 4: Raw JSON access</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h2>Cost Analysis</h2>
+                <ul>
+                    <li>Per-test timing: min/avg/max/p95/p99</li>
+                    <li>Cost ranking: top slowest tests</li>
+                    <li>Parallelization efficiency metrics</li>
+                    <li>Cost prediction before execution</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h2>CI-First Mode</h2>
+                <ul>
+                    <li>Pre-flight checks: git status, disk space</li>
+                    <li>Skip decision engine</li>
+                    <li>Shard optimization</li>
+                    <li>Artifact upload hints</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Feature Priority Matrix</h2>
+        <div style="display: flex; flex-wrap: wrap; gap: 1rem;">
+            <div style="flex: 1; min-width: 250px;">
+                <h3 style="color: var(--danger); margin-bottom: 0.5rem;">MUST Have</h3>
+                <ul style="font-size: 0.9rem; color: var(--text-muted);">
+                    <li>Core MCP infrastructure</li>
+                    <li>Vitest integration via API</li>
+                    <li>Test isolation guarantees</li>
+                    <li>Fixture/setuptime tracking</li>
+                    <li>Ordering dependency detection</li>
+                    <li>Resource contention handling</li>
+                </ul>
+            </div>
+            <div style="flex: 1; min-width: 250px;">
+                <h3 style="color: var(--warning); margin-bottom: 0.5rem;">SHOULD Have</h3>
+                <ul style="font-size: 0.9rem; color: var(--text-muted);">
+                    <li>Dry run mode: queue tests without executing, run after iteration complete</li>
+                    <li>Delta testing with transparent preview</li>
+                    <li>Basic health dashboard</li>
+                    <li>Priority scoring</li>
+                    <li>Smart retry logic</li>
+                    <li>Progressive disclosure format</li>
+                </ul>
+            </div>
+            <div style="flex: 1; min-width: 250px;">
+                <h3 style="color: var(--accent); margin-bottom: 0.5rem;">COULD Have</h3>
+                <ul style="font-size: 0.9rem; color: var(--text-muted);">
+                    <li>Advanced dependency graph</li>
+                    <li>Priority-based sharding</li>
+                    <li>IDE integration</li>
+                    <li>Trend analytics</li>
+                    <li>Suggested fixes</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        Generated from brainstorming session • July 2026
+    </footer>
+</body>
+</html>
