@@ -19,12 +19,12 @@ So that later stories can add daemon/MCP/registry behaviour without restructurin
 **When** the implementer follows `docs/scaffold-spec.md`
 **Then** every path in the spec's directory tree exists with the prescribed module boundaries (`cli/`, `daemon/`, `mcp/`, `registry/`, `orchestrator/`, `selection/`, `worker/`, `types/).
 
-**Given** `npm install` has been run
-**When** `npm run typecheck` and `npm run build` are executed
+**Given** `pnpm install` has been run
+**When** `pnpm run typecheck` and `pnpm run build` are executed
 **Then** both exit 0 and `dist/cli/main.js` exists.
 
 **Given** the package is built
-**When** `npm test` is executed
+**When** `pnpm test` is executed
 **Then** all tests in `test/` pass (smoke + CLI `--help` test per spec).
 
 **Given** the CLI is installed locally
@@ -74,10 +74,10 @@ So that later stories can add daemon/MCP/registry behaviour without restructurin
 - [ ] Create `test/cli-main.test.ts`
 
 ### Verification
-- [ ] Run `npm install`
-- [ ] Run `npm run typecheck`
-- [ ] Run `npm run build`
-- [ ] Run `npm test`
+- [ ] Run `pnpm install`
+- [ ] Run `pnpm run typecheck`
+- [ ] Run `pnpm run build`
+- [ ] Run `pnpm test`
 - [ ] Run `node bin/test-mcp.mjs --help`
 - [ ] Run `node bin/test-mcp.mjs start` (expect exit 1)
 
@@ -85,12 +85,12 @@ So that later stories can add daemon/MCP/registry behaviour without restructurin
 
 - [x] [Review][Patch] Revert contracts.ts Zod schemas to placeholder `z.object({})` stubs per spec §contracts.ts (real schemas land in Story 1.2) [src/types/contracts.ts]
 - [x] [Review][Patch] Add placeholder `CoverageDelta` type + `coverageDelta?` field to `FromWorker.result` to match `docs/architecture.md:224` [src/types/ipc.ts]
-- [x] [Review][Patch] Add `"pretest": "npm run build"` so `npm test` passes on a clean checkout [package.json]
+- [x] [Review][Patch] Add `"pretest": "pnpm build"` so `pnpm test` passes on a clean checkout [package.json]
 - [x] [Review][Patch] Stale `.gitignore` comment above active `node_modules/` rule [.gitignore]
 - [x] [Review][Defer] Non-async stubs typed `Promise<...>` throw synchronously [src/daemon/index.ts:1,5,9; src/mcp/server.ts:3; src/worker/index.ts:1] — deferred, replaced in Story 1.1/1.2
 - [x] [Review][Defer] Zod schema hardening (NaN/negative/non-integer counts, `total` ≠ passed+failed+skipped, `expiresAt` not `.datetime()`) [src/types/contracts.ts:26-52] — deferred to Story 1.2 (real schemas)
 - [x] [Review][Defer] bin `await import()` has no try/catch → raw `ERR_MODULE_NOT_FOUND` when `dist/` missing [bin/test-mcp.mjs:8] — deferred, DX polish
-- [x] [Review][Defer] No `files` whitelist / `.npmignore` → `npm publish` ships src/test/config [package.json] — deferred, publish hygiene (out of scope)
+- [x] [Review][Defer] No `files` whitelist → `pnpm publish` ships src/test/config [package.json] — resolved: `files: ["dist/","bin/"]` added
 - [x] [Review][Defer] No coverage provider/thresholds in vitest.config [vitest.config.ts] — deferred, coverage out of scope for Story 1.0
 - [x] [Review][Defer] CLI with no subcommand prints nothing and exits 0 (no default help) [src/cli/main.ts:45] — deferred, UX polish
 
@@ -168,10 +168,10 @@ Will follow the scaffold-spec literally:
 
 ### Completion Notes
 Story 1.0 complete. All verification checklist items passed:
-- npm install: succeeded
-- npm run typecheck: passed (exit 0)
-- npm run build: passed (exit 0); dist/cli/main.js exists
-- npm test: 2 tests passed
+- pnpm install: succeeded
+- pnpm run typecheck: passed (exit 0)
+- pnpm run build: passed (exit 0); dist/cli/main.js exists
+- pnpm test: 2 tests passed
 - node bin/test-mcp.mjs --help: prints usage with all subcommands
 - node bin/test-mcp.mjs start: exits 1 with "not implemented" message
 - node bin/test-mcp.mjs (no args): prints help

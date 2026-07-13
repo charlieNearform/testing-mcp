@@ -125,12 +125,12 @@ So that later stories can add daemon/MCP/registry behaviour without restructurin
 **When** the implementer follows `docs/scaffold-spec.md`
 **Then** every path in the spec's directory tree exists with the prescribed module boundaries (`cli/`, `daemon/`, `mcp/`, `registry/`, `orchestrator/`, `selection/`, `worker/`, `types/`).
 
-**Given** `npm install` has been run
-**When** `npm run typecheck` and `npm run build` are executed
+**Given** `pnpm install` has been run
+**When** `pnpm run typecheck` and `pnpm run build` are executed
 **Then** both exit 0 and `dist/cli/main.js` exists.
 
 **Given** the package is built
-**When** `npm test` is executed
+**When** `pnpm test` is executed
 **Then** all tests in `test/` pass (smoke + CLI `--help` test per spec).
 
 **Given** the CLI is installed locally
@@ -151,7 +151,7 @@ So that later stories can add daemon/MCP/registry behaviour without restructurin
 
 **Verification (copy-paste):**
 ```bash
-npm install && npm run typecheck && npm run build && npm test
+pnpm install && pnpm run typecheck && pnpm run build && pnpm test
 node bin/test-mcp.mjs --help
 node bin/test-mcp.mjs start   # expect exit 1 + not-implemented message
 ```
