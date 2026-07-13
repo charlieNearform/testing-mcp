@@ -35,5 +35,11 @@ coverage/
 # Spike generated output (harness stays tracked; its output does not)
 spike/**/out/
 
-# Node modules (optional - uncomment if not already gitignored globally)
-# node_modules/
+# Node modules
+node_modules/
+
+# Build outputs
+dist/
+
+# Test server MCP state
+.test-mcp/

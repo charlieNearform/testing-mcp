@@ -1,0 +1,88 @@
+# generated: 2026-07-13
+# last_updated: 2026-07-13
+# project: test-server-mcp
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: {project-root}/_bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; sprint-status surfaces open ones
+
+generated: 2026-07-13
+last_updated: 2026-07-13
+project: test-server-mcp
+project_key: NOKEY
+tracking_system: file-system
+story_location: "{project-root}/_bmad-output/implementation-artifacts"
+
+development_status:
+  # Epic 1: Core Daemon & Project Registration (Phase 1)
+  epic-1: in-progress
+  1-0-greenfield-project-scaffold: done
+  1-1-singleton-daemon-lifecycle-cli: backlog
+  1-2-mcp-server-over-streamable-http-secured: backlog
+  1-3-project-registration-via-test-mcp-register: backlog
+  1-4-registry-persistence-rehydration: backlog
+  epic-1-retrospective: optional
+
+  # Epic 2: Test Execution via Project-Local Vitest (Phase 1)
+  epic-2: backlog
+  2-1-run-tests-via-project-local-worker: backlog
+  2-2-structured-results-failure-detail: backlog
+  2-3-test-isolation-verification: backlog
+  epic-2-retrospective: optional
+
+  # Epic 3: Intelligent Test Selection (Phase 1)
+  epic-3: backlog
+  3-1-git-aware-delta-selection: backlog
+  3-2-coverage-reverse-map-build-persist: backlog
+  3-3-setup-baseline-subtraction: backlog
+  3-4-always-run-unmeasurable-tests: backlog
+  3-5-smart-re-run-decision-union-fallback: backlog
+  3-6-watch-incremental-mode: backlog
+  epic-3-retrospective: optional
+
+  # Epic 4: Agent Workflow — Dry Run, Output & Status (Phase 1)
+  epic-4: backlog
+  4-1-dry-run-plan-commit: backlog
+  4-2-status-progress: backlog
+  4-3-minimal-failure-focused-output: backlog
+  epic-4-retrospective: optional
+
+  # Epic 5: Human Monitoring UI (Phase 2)
+  epic-5: backlog
+  5-1-http-status-ui: backlog
+  5-2-real-time-updates-resilience: backlog
+  epic-5-retrospective: optional

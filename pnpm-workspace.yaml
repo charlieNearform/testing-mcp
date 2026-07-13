@@ -1,0 +1,4 @@
+# Anchors the pnpm workspace root to this repo.
+# Without this, pnpm walks up to ~/pnpm-workspace.yaml and installs the wrong root.
+packages:
+  - .
