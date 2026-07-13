@@ -1,0 +1,303 @@
+# Scaffold Spec — Story 1.0
+
+**Audience:** implementer (follow literally; do not invent structure).  
+**Authority:** this file + `docs/architecture.md` + `_bmad-output/planning-artifacts/epics.md` Story 1.0.  
+**Goal:** a compiling, testable Node 20+ TypeScript monorepo package with stub modules and a `test-mcp` CLI bin. **No daemon logic, no MCP server, no Vitest worker** — those are later stories.
+
+---
+
+## Hard rules
+
+1. **Use ESM** (`"type": "module"` in `package.json`).
+2. **Use TypeScript** compiled to `dist/`; run via `node dist/...`.
+3. **Pin exact dependency versions** shown below — do not use `^` or `~`.
+4. **Create every file and directory** in the tree below. Missing paths = story incomplete.
+5. **Stub bodies only** — export types/functions that compile; throw `new Error("Not implemented: Story X.Y")` or return safe defaults. Do **not** implement daemon, MCP, registry, or worker behaviour.
+6. **Do not** add React, Express, databases, or extra dependencies beyond the list below.
+7. **Do not** rename paths or invent alternate layouts.
+
+---
+
+## Directory tree (create exactly)
+
+```
+test-server-mcp/
+├── package.json
+├── tsconfig.json
+├── vitest.config.ts
+├── .gitignore                    # merge entries below into existing file
+├── bin/
+│   └── test-mcp.mjs              # thin launcher → dist/cli/main.js
+├── src/
+│   ├── cli/
+│   │   └── main.ts               # commander entry: start|stop|status|register|init
+│   ├── daemon/
+│   │   └── index.ts              # export stub startDaemon/stopDaemon (Story 1.1)
+│   ├── mcp/
+│   │   └── server.ts             # export stub createMcpServer (Story 1.2)
+│   ├── registry/
+│   │   └── project-registry.ts   # export stub ProjectRegistry class (Story 1.3–1.4)
+│   ├── orchestrator/
+│   │   └── index.ts              # export stub Orchestrator (Epic 2)
+│   ├── selection/
+│   │   └── index.ts              # export stub SelectionEngine (Epic 3)
+│   ├── worker/
+│   │   └── index.ts              # export stub forkWorker (Epic 2)
+│   ├── types/
+│   │   ├── errors.ts             # AppError + error codes enum
+│   │   ├── ipc.ts                # ToWorker / FromWorker types (from architecture)
+│   │   └── contracts.ts          # TestResult, TestPlan, tool I/O types
+│   └── index.ts                  # package public API re-exports (minimal)
+└── test/
+    ├── smoke.test.ts             # vitest smoke test
+    └── cli-main.test.ts          # asserts --help prints usage
+```
+
+---
+
+## package.json (exact shape)
+
+```json
+{
+  "name": "test-server-mcp",
+  "version": "0.0.0",
+  "description": "MCP daemon for intelligent Vitest orchestration",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "test-mcp": "./bin/test-mcp.mjs"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.12.1",
+    "commander": "13.1.0",
+    "zod": "3.24.4"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.21",
+    "typescript": "5.8.3",
+    "vitest": "4.1.9"
+  }
+}
+```
+
+> **Note:** `vitest` is a **devDependency** only — the daemon must never import a consumer project's Vitest at install time (architecture invariant 2). Epic 2 loads Vitest from the **registered project's** `node_modules` inside the worker.
+
+---
+
+## tsconfig.json (exact shape)
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "test"]
+}
+```
+
+---
+
+## bin/test-mcp.mjs
+
+```javascript
+#!/usr/bin/env node
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const main = pathToFileURL(join(here, "..", "dist", "cli", "main.js")).href;
+await import(main);
+```
+
+Make executable: `chmod +x bin/test-mcp.mjs`.
+
+---
+
+## src/cli/main.ts (stub — Story 1.0)
+
+Use `commander`. Register subcommands: `init`, `register`, `start`, `stop`, `status`.
+
+Each subcommand handler must:
+- print a one-line message: `test-mcp <cmd>: not implemented (Story X.Y)`
+- exit code `1` for `start|stop|status|register` (not yet implemented)
+- `init` may exit `0` after printing that project scaffold already exists (this repo IS the package)
+
+`--help` / `-h` must work without building daemon logic.
+
+Example structure (implement, do not leave as pseudocode):
+
+```typescript
+import { Command } from "commander";
+
+const program = new Command();
+program.name("test-mcp").description("MCP test orchestration daemon").version("0.0.0");
+
+program.command("init").description("Initialize .test-mcp in a consumer project (Story 1.3)");
+program.command("register").description("Register project with daemon (Story 1.3)");
+program.command("start").description("Start singleton daemon (Story 1.1)");
+program.command("stop").description("Stop daemon (Story 1.1)");
+program.command("status").description("Daemon status (Story 1.1)");
+
+// attach action handlers that print not-implemented + exit 1 (init → exit 0)
+
+program.parse();
+```
+
+---
+
+## src/types/errors.ts
+
+```typescript
+export type ErrorCode =
+  | "UnknownProject"
+  | "InvalidConfig"
+  | "WorkerFailure"
+  | "PlanExpired"
+  | "ValidationError"
+  | "DaemonUnavailable";
+
+export interface AppError {
+  code: ErrorCode;
+  message: string;
+  details?: unknown;
+}
+```
+
+Export helper `toAppError(code, message, details?)`.
+
+---
+
+## src/types/contracts.ts
+
+Copy the `TestResult` and `TestPlan` interfaces verbatim from `docs/architecture.md` § MCP Tool Contracts. Add Zod schemas as **type-only placeholders** (empty `z.object({})` stubs are OK in Story 1.0) — real schemas come in Story 1.2.
+
+---
+
+## src/types/ipc.ts
+
+Copy `ToWorker` and `FromWorker` discriminated unions verbatim from `docs/architecture.md` § Daemon ↔ Worker IPC.
+
+---
+
+## Stub modules
+
+| File | Export | Stub behaviour |
+|------|--------|----------------|
+| `src/daemon/index.ts` | `startDaemon()`, `stopDaemon()`, `getDaemonStatus()` | throw `Error("Not implemented: Story 1.1")` |
+| `src/mcp/server.ts` | `createMcpServer()` | throw `Error("Not implemented: Story 1.2")` |
+| `src/registry/project-registry.ts` | `class ProjectRegistry` with `load()`, `save()`, `register()`, `list()`, `unregister()` | methods throw `Error("Not implemented: Story 1.3")` |
+| `src/orchestrator/index.ts` | `class Orchestrator` | throw on any method — Story 2.1 |
+| `src/selection/index.ts` | `class SelectionEngine` | throw — Epic 3 |
+| `src/worker/index.ts` | `forkWorker(projectRoot)` | throw — Story 2.1 |
+| `src/index.ts` | re-export `SCHEMA_VERSION = 1` constant | compiles |
+
+---
+
+## vitest.config.ts
+
+```typescript
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["test/**/*.test.ts"],
+    environment: "node",
+  },
+});
+```
+
+---
+
+## test/smoke.test.ts
+
+```typescript
+import { describe, it, expect } from "vitest";
+import { SCHEMA_VERSION } from "../src/index.ts";
+
+describe("scaffold", () => {
+  it("exports SCHEMA_VERSION", () => {
+    expect(SCHEMA_VERSION).toBe(1);
+  });
+});
+```
+
+---
+
+## test/cli-main.test.ts
+
+Spawn `node bin/test-mcp.mjs --help` via `child_process.execFile` and assert stdout contains `test-mcp` and `start`.
+
+---
+
+## .gitignore additions
+
+Append (do not remove existing entries):
+
+```
+node_modules/
+dist/
+.test-mcp/
+```
+
+---
+
+## Verification checklist (all must pass)
+
+Run from repo root after `npm install`:
+
+```bash
+npm run typecheck    # exit 0
+npm run build        # exit 0; dist/ populated
+npm test             # exit 0; 2 tests pass
+node bin/test-mcp.mjs --help   # prints usage
+node bin/test-mcp.mjs start    # exit 1; prints "not implemented (Story 1.1)"
+```
+
+---
+
+## Out of scope for Story 1.0
+
+- Daemon process, lockfile, port binding
+- MCP Streamable HTTP transport
+- Project registration or `~/.test-mcp/` writes
+- Worker subprocess / Vitest execution
+- Coverage map / selection engine
+- CI workflow (optional follow-up)
+
+Story 1.1 builds on this scaffold — **do not delete or relocate** the paths above.

@@ -48,7 +48,7 @@ NFR8: Reverse coverage map buildable within one full instrumented (single-pass) 
 
 ### Additional Requirements
 
-- No starter template — greenfield TypeScript/Node 20+ project; Epic 1 Story 1 stands up the project scaffold itself.
+- No starter template — greenfield TypeScript/Node 20+ project; **Epic 1 Story 1.0** stands up the project scaffold per `docs/scaffold-spec.md` (literal file tree, pinned deps, stub modules). Story 1.1+ add behaviour on top — do not relocate paths.
 - MCP SDK: official `@modelcontextprotocol/sdk` v1 (`McpServer`, `StreamableHTTPServerTransport`); v2 is beta and out of scope.
 - Vitest access via `vitest/node` (`startVitest`/`createVitest`); pin the version (advanced API differs 3.x↔4.x; target repo pins 4.1.9).
 - Per-project workers via `child_process.fork`; daemon↔worker over IPC.
@@ -81,10 +81,12 @@ FR17: Epic 5 (Phase 2) — human web UI with real-time push
 
 NFR coverage: NFR3/NFR5/NFR6 → Epic 1; NFR4/NFR7 → Epic 2; NFR2/NFR8 → Epic 3; NFR1 → Epic 4.
 
+Performance NFR acceptance criteria: NFR1 → Story 4.1 (dry-run plan <5s target) and Story 3.6 (incremental single-file run <15s, aspirational per PRD Success Metrics); NFR7 → Story 2.1 (worker/daemon overhead surfaced in run metadata; monitored, not hard-gated).
+
 ## Epic List
 
 ### Epic 1: Core Daemon & Project Registration (Phase 1)
-Stand up the always-on singleton daemon and let an AI agent register, list, and unregister any vitest/vite project by `projectId` — so from then on all test activity is addressable through MCP instead of shelling out to `vitest`. Delivers a usable, secure, restart-durable multi-project daemon end-to-end (even before intelligent selection exists).
+Stand up the always-on singleton daemon and let an AI agent register, list, and unregister any vitest/vite project by `projectId` — so from then on all test activity is addressable through MCP instead of shelling out to `vitest`. **Story 1.0** creates the greenfield scaffold (`docs/scaffold-spec.md`); stories 1.1–1.4 add daemon, MCP, registration, and persistence.
 **FRs covered:** FR1, FR2, FR3, FR16 (NFR3, NFR5, NFR6)
 
 ### Epic 2: Test Execution via Project-Local Vitest (Phase 1)
@@ -107,7 +109,58 @@ A convenience web UI over the daemon for human developers — visual status, man
 
 Stand up the always-on singleton daemon and let an AI agent register/list/unregister any vitest project by `projectId`, securely and durably across restarts. (FR1, FR2, FR3, FR16; NFR3, NFR5, NFR6)
 
+> **Implementation order:** 1.0 → 1.1 → 1.2 → 1.3 → 1.4. Story 1.0 is a hard prerequisite — do not start 1.1 until 1.0 verification checklist passes.
+
+### Story 1.0: Greenfield Project Scaffold
+
+As a developer (or implementer agent),
+I want a compiling TypeScript package with the prescribed directory layout, CLI bin, and stub modules,
+So that later stories can add daemon/MCP/registry behaviour without restructuring the repo.
+
+**Authority:** follow `docs/scaffold-spec.md` literally. That document is the copy-paste contract (file tree, `package.json`, `tsconfig.json`, stub exports, tests). This story adds no runtime behaviour beyond `--help` and not-implemented stubs.
+
+**Acceptance Criteria:**
+
+**Given** a clean checkout with no `package.json` / `src/` / `dist/`
+**When** the implementer follows `docs/scaffold-spec.md`
+**Then** every path in the spec's directory tree exists with the prescribed module boundaries (`cli/`, `daemon/`, `mcp/`, `registry/`, `orchestrator/`, `selection/`, `worker/`, `types/`).
+
+**Given** `npm install` has been run
+**When** `npm run typecheck` and `npm run build` are executed
+**Then** both exit 0 and `dist/cli/main.js` exists.
+
+**Given** the package is built
+**When** `npm test` is executed
+**Then** all tests in `test/` pass (smoke + CLI `--help` test per spec).
+
+**Given** the CLI is installed locally
+**When** `node bin/test-mcp.mjs --help` runs
+**Then** stdout lists subcommands `init`, `register`, `start`, `stop`, `status`.
+
+**Given** any runtime subcommand (`start`, `stop`, `status`, `register`)
+**When** invoked before Story 1.1+
+**Then** it prints a clear `not implemented (Story X.Y)` message and exits non-zero (`init` may exit 0).
+
+**Given** stub modules in `src/daemon/`, `src/mcp/`, `src/registry/`, etc.
+**When** imported
+**Then** they compile and export the named symbols from the spec; they must **not** bind ports, spawn daemons, or write `~/.test-mcp/` yet.
+
+**Given** `docs/scaffold-spec.md` Hard rules
+**When** reviewing the PR
+**Then** ESM + Node 20+, pinned dependency versions (no `^`), Vitest only in `devDependencies`, and no extra undeclared dependencies.
+
+**Verification (copy-paste):**
+```bash
+npm install && npm run typecheck && npm run build && npm test
+node bin/test-mcp.mjs --help
+node bin/test-mcp.mjs start   # expect exit 1 + not-implemented message
+```
+
 ### Story 1.1: Singleton Daemon Lifecycle & CLI
+
+**Prerequisite:** Story 1.0 complete (`docs/scaffold-spec.md` verification checklist passes).
+
+**Scope:** replace stubs in `src/daemon/index.ts` and wire `src/cli/main.ts` `start`/`stop`/`status` — do **not** rename or move scaffold paths.
 
 As an AI agent (via the developer's toolchain),
 I want a single always-on daemon I can start, stop, and inspect,
@@ -133,6 +186,8 @@ So that exactly one instance manages all projects and I never race competing ser
 
 ### Story 1.2: MCP Server over Streamable HTTP (secured)
 
+**Prerequisite:** Story 1.1 complete (daemon starts/stops). Implement in `src/mcp/server.ts` — do not relocate.
+
 As an AI agent,
 I want to connect to the daemon over MCP and discover its tools,
 So that I can drive test activity through a validated, secure interface.
@@ -152,6 +207,8 @@ So that I can drive test activity through a validated, secure interface.
 **Then** the server returns a structured error envelope `{code, message, details?}` and runs nothing.
 
 ### Story 1.3: Project Registration via `test-mcp register`
+
+**Prerequisite:** Story 1.2 complete (MCP server running). Implement in `src/registry/project-registry.ts` + CLI `register`/`init` — do not relocate.
 
 As an AI agent,
 I want to register a project (auto-booting the daemon if needed) and later list/unregister it,
@@ -180,6 +237,8 @@ So that one daemon can serve many projects addressed by `projectId`.
 **Then** `list_projects` returns each `projectId`, path, and last-known status; `unregister_project` removes it from the active registry (project `.test-mcp/` state retained unless a purge flag is set).
 
 ### Story 1.4: Registry Persistence & Rehydration
+
+**Prerequisite:** Story 1.3 complete. Extend `src/registry/project-registry.ts` — `schemaVersion` on all persisted JSON per architecture.
 
 As an AI agent,
 I want registered projects to survive daemon restarts,
@@ -222,6 +281,10 @@ So that results reflect the project's real config/version, not the daemon's.
 **Given** a worker crashes or fails to resolve `vitest/node`
 **When** the run is attempted
 **Then** the daemon returns a structured error for that `projectId` and stays healthy for other projects.
+
+**Given** a run executes via the per-project worker (NFR7 — minimal overhead)
+**When** results are returned
+**Then** run metadata reports daemon/worker overhead relative to test execution time, keeping added overhead observable and minimal (monitored, not a hard gate).
 
 ### Story 2.2: Structured Results & Failure Detail
 
@@ -363,6 +426,10 @@ So that iterative development stays fast.
 **When** a run occurs
 **Then** coverage collection runs alongside tests.
 
+**Given** an incremental single-file change in watch mode (NFR1 — interactive latency)
+**When** affected tests re-run
+**Then** the run completes fast enough for interactive development (<15s aspirational target per PRD Success Metrics; recorded for tuning, not a hard gate).
+
 ## Epic 4: Agent Workflow — Dry Run, Output & Status (Phase 1)
 
 Give agents the interaction loop: plan before committing, poll status/progress, and consume minimal failure-focused output. (FR6, FR7, FR8; NFR1)
@@ -386,6 +453,10 @@ So that I never run tests I didn't intend to.
 **Given** an expired or unknown `planId`
 **When** commit is attempted
 **Then** the server returns a `PlanExpired` error and the agent re-plans.
+
+**Given** a typical project (NFR1 — dry-run latency)
+**When** a dry-run plan is computed
+**Then** the plan is returned in under 5s; if exceeded, the plan is still returned and the latency is recorded in the plan metadata for tuning.
 
 ### Story 4.2: Status & Progress
 
