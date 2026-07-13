@@ -42,6 +42,7 @@
 
 generated: 2026-07-13
 last_updated: 2026-07-13
+# 1-1 moved backlog → ready-for-dev on 2026-07-13
 project: test-server-mcp
 project_key: NOKEY
 tracking_system: file-system
@@ -51,7 +52,7 @@ development_status:
   # Epic 1: Core Daemon & Project Registration (Phase 1)
   epic-1: in-progress
   1-0-greenfield-project-scaffold: done
-  1-1-singleton-daemon-lifecycle-cli: backlog
+  1-1-singleton-daemon-lifecycle-cli: ready-for-dev
   1-2-mcp-server-over-streamable-http-secured: backlog
   1-3-project-registration-via-test-mcp-register: backlog
   1-4-registry-persistence-rehydration: backlog
