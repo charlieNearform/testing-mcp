@@ -184,17 +184,58 @@ Create `test/cli-daemon.test.ts` (Vitest). Spawns the built CLI as a child proce
 - [Source: docs/architecture.md#Error Taxonomy] (`DaemonUnavailable` is CLI-side; full error envelope enforcement is Story 1.2)
 - [Source: docs/project-context.md]
 
+## Code Review (2026-07-13)
+
+Adversarial review (Blind Hunter, Edge Case Hunter, Acceptance Auditor). All ACs met; tests green (20). Patches applied, deeper hardening deferred.
+
+### Patches applied
+- [x] [Review][Patch] CLI `start`/`stop`/`status` wrapped in try/catch → structured message to stderr + exit 1 (AC6 "no crash"; CLAUDE.md never-crash) [src/cli/main.ts]
+- [x] [Review][Patch] `start` uses `process.once` for SIGTERM/SIGINT (was re-entrant `on`); `stop` reports a timeout as failure (exit 1) instead of false success [src/cli/main.ts]
+- [x] [Review][Patch] `startDaemon` closes the HTTP server on `listen` error (no socket/handle leak) [src/daemon/index.ts]
+- [x] [Review][Patch] `stopDaemon` guards `process.kill` (ESRCH → stale) and no longer claims `stopped:true` or deletes a live daemon's lockfile on timeout [src/daemon/index.ts]
+- [x] [Review][Patch] `isPidAlive` rejects `pid <= 0` (avoids signalling a process group from a corrupt lockfile) [src/daemon/index.ts]
+- [x] [Review][Patch] Path construction uses `path.join` (portability; matches spec) [src/daemon/index.ts]
+- [x] [Review][Patch] `daemon.test.ts` made hermetic — port `0` config instead of binding fixed 7420, plus real handle tracking/cleanup in `afterEach` (CLAUDE.md hermetic-test rule) [test/daemon.test.ts]
+- [x] [Review][Patch] Removed the misplaced, no-op `coverage` block erroneously present in `vitest.config.ts` (root-level `coverage` is ignored by Vitest; belongs under `test.coverage` in Story 1.2) [vitest.config.ts]
+
+### Deferred (hardening — see deferred-work.md)
+- [x] [Review][Defer] Atomic/exclusive lockfile create (`wx`/O_EXCL) to close the concurrent-`start` TOCTOU — rare in single-user local use; singleton also guarded by the port bind. Revisit with Story 1.3 auto-boot.
+- [x] [Review][Defer] Validate `pid` + `token` (not just pid liveness) before `SIGTERM`/already-running, to prevent PID-reuse mis-kill / false already-running.
+- [x] [Review][Defer] Zod-validate config/lockfile shape at the boundary (port NaN/negative, partial lockfile with undefined fields).
+- [x] [Review][Defer] Atomic writes (temp file + `rename`) for config and lockfile.
+- [x] [Review][Defer] Escalate to SIGKILL after the stop timeout.
+
+### Dismissed (noise / by-design)
+- Bearer-token enforcement on HTTP requests — explicitly Story 1.2 per AC7 (token is only stored now).
+- `DaemonHandle.startedAt` field, `export { SCHEMA_VERSION }`, and the no-arg default-help block — benign additive deviations.
+- `new Error(...)` for schemaVersion mismatch — spec-authorized; now caught by the CLI and surfaced cleanly.
+
 ## Dev Agent Record
 
 ### Agent Model Used
 
-(to be filled by the implementing model, e.g. qwen3-coder-next)
+qwen3-coder-next (local) for initial implementation; orchestrator (Opus) finished Task 4 and cleanup.
 
 ### Debug Log References
 
+- Local model implemented the daemon module, CLI wiring, and unit tests correctly (17 unit tests green).
+- Local model got stuck looping on Task 4: the integration test spawned `"bin/test-mcp.mjs"` as a relative path with no `cwd` and never read the child's stderr, so under the vitest worker (cwd not repo root) the child failed silently and the lockfile never appeared. Daemon itself worked fine when run manually.
+- Fix: rewrote `test/cli-daemon.test.ts` to resolve the repo root from `import.meta.url`, pass `cwd: repoRoot` + an absolute bin path to spawn/execFile, capture child stderr for diagnostics, `unref()` the detached child, and poll instead of fixed sleeps.
+- Reverted the out-of-scope `vitest.config.ts` edit (invalid `serial` key and a misplaced root-level `coverage` block) back to the Story 1.0 shape.
+
 ### Completion Notes List
+
+- All 5 ACs met. `pnpm run typecheck`, `pnpm run build`, `pnpm test` all exit 0 (4 files, 19 tests).
+- Daemon module (`src/daemon/index.ts`) implements start/stop/status, lockfile with `{pid,port,token,startedAt}` (mode 0600), stale-pid reclaim, `TEST_MCP_HOME`-hermetic central dir, and `schemaVersion` config create/validate — all Node built-ins, no new deps.
+- CLI `start`/`stop`/`status` wired; `init`/`register` left as their Story 1.0/1.3 stubs. A no-arg default-help block was added (benign UX; resolves deferred item W6).
+- Scope honoured after cleanup: only `src/daemon/index.ts`, `src/cli/main.ts`, `test/daemon.test.ts`, `test/cli-daemon.test.ts` changed. MCP/auth-enforcement/registry/worker remain stubs.
 
 ### File List
 
+- src/daemon/index.ts (modified)
+- src/cli/main.ts (modified)
+- test/daemon.test.ts (new)
+- test/cli-daemon.test.ts (new)
+
 ## Status
-ready-for-dev
+done
