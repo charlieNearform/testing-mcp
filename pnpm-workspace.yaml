@@ -2,3 +2,16 @@
 # Without this, pnpm walks up to ~/pnpm-workspace.yaml and installs the wrong root.
 packages:
   - .
+
+# Dependency overrides. pnpm v10.6+ reads overrides from HERE (not package.json's
+# "pnpm.overrides") when a pnpm-workspace.yaml exists.
+#
+# The @modelcontextprotocol/sdk depends on zod-to-json-schema ^3.24.1, which floats
+# to 3.25.x. 3.25.x imports the `zod/v3` subpath and expects zod's 3.25 dist layout,
+# which zod 3.24.4 does not provide (ERR_PACKAGE_PATH_NOT_EXPORTED './v3'). Pinning it
+# to the last 3.24.x keeps it compatible with our pinned zod. Forcing zod to a single
+# version also dedupes it across the tree — multiple zod copies make the SDK's
+# registerTool generics blow up with TS2589 "type instantiation is excessively deep".
+overrides:
+  zod: 3.24.4
+  zod-to-json-schema: 3.24.6

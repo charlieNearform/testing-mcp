@@ -4,6 +4,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as http from "node:http";
 import { SCHEMA_VERSION } from "../index.js";
+import { createMcpRequestListener } from "../mcp/server.js";
 
 export { SCHEMA_VERSION };
 
@@ -124,10 +125,7 @@ export async function startDaemon(): Promise<DaemonHandle> {
   const cfg = loadOrCreateConfig();
   const token = crypto.randomBytes(32).toString("hex");
 
-  const server = http.createServer((_req, res) => {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", daemon: "test-mcp" }));
-  });
+  const server = http.createServer(createMcpRequestListener({ token }));
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", (err) => {

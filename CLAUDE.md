@@ -24,6 +24,25 @@ Deeper project facts live in `docs/project-context.md` — load it too.
     delete the workspace anchor (a `pnpm-workspace.yaml` in `$HOME` will hijack installs
     without it).
 
+## Dependencies & install config (do NOT touch without explicit approval)
+
+The following are OFF-LIMITS during story implementation. Changing them is never part of a
+story unless the story text explicitly says so — if you think you need to, STOP and hand
+back to the orchestrator with the exact error instead of editing:
+
+- **Do not change dependency versions** in `package.json` (they are pinned exact on purpose),
+  and do not add/remove dependencies.
+- **Do not edit `pnpm-lock.yaml`, `pnpm-workspace.yaml`, or create/edit `.npmrc`.** Do not
+  add `overrides`, `shamefully-hoist`, `public-hoist-pattern`, a custom `registry`, or any
+  other install tuning.
+- **Do not run** `pnpm add`, `pnpm up`, `pnpm install <pkg>`, or delete `node_modules` /
+  the lockfile to "fix" a resolution problem.
+- A build/typecheck error that looks dependency-related (`ERR_PACKAGE_PATH_NOT_EXPORTED`,
+  `Cannot find module`, `TS2589 type instantiation is excessively deep`, missing `dist`,
+  peer-dependency warnings) is almost always a dependency-tree issue for the orchestrator to
+  resolve — NOT something to patch by bumping versions or hoisting packages. Report it and
+  stop; do not thrash.
+
 ## Code standards
 
 - Node 20+, **ESM only**, TypeScript `strict`, compiled to `dist/` via `tsc`.

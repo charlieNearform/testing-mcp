@@ -4,7 +4,8 @@ export type ErrorCode =
   | "WorkerFailure"
   | "PlanExpired"
   | "ValidationError"
-  | "DaemonUnavailable";
+  | "DaemonUnavailable"
+  | "NotImplemented";
 
 export interface AppError {
   code: ErrorCode;
