@@ -41,8 +41,11 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-13
-last_updated: 2026-07-13
+last_updated: 2026-07-14
 # 1-1 moved backlog → ready-for-dev on 2026-07-13
+# 1-2 moved ready-for-dev → done on 2026-07-14
+# 1-2 moved done → in-progress on 2026-07-14 (code review findings)
+# 1-2 moved in-progress → done on 2026-07-14 (review patches applied)
 project: test-server-mcp
 project_key: NOKEY
 tracking_system: file-system
@@ -53,8 +56,8 @@ development_status:
   epic-1: in-progress
   1-0-greenfield-project-scaffold: done
   1-1-singleton-daemon-lifecycle-cli: done
-  1-2-mcp-server-over-streamable-http-secured: backlog
-  1-3-project-registration-via-test-mcp-register: backlog
+  1-2-mcp-server-over-streamable-http-secured: done
+  1-3-project-registration-via-test-mcp-register: ready-for-dev
   1-4-registry-persistence-rehydration: backlog
   epic-1-retrospective: optional
 
