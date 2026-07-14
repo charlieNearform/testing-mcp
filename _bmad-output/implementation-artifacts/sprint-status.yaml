@@ -69,8 +69,8 @@ development_status:
 
   # Epic 2: Test Execution via Project-Local Vitest (Phase 1)
   epic-2: in-progress
-  2-1-run-tests-via-project-local-worker: ready-for-dev
-  2-2-structured-results-failure-detail: backlog
+  2-1-run-tests-via-project-local-worker: done
+  2-2-structured-results-failure-detail: ready-for-dev
   2-3-test-isolation-verification: backlog
   epic-2-retrospective: optional
 
