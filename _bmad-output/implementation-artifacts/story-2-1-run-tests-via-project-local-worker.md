@@ -1,6 +1,6 @@
 # Story 2.1: Run Tests via Project-Local Worker
 
-Status: ready-for-dev
+Status: done
 
 **Prerequisite:** Epic 1 complete (daemon, secured MCP, registry + rehydration — all `done`). This is the first Epic 2 story and the core value of the tool: actually running a registered project's tests.
 
@@ -555,10 +555,30 @@ describe("run_tests over MCP", () => {
 
 ### Task 8 — Verify (AC: all)
 
-- [ ] `pnpm run typecheck` → exit 0 (watch for `noUnusedLocals`/`noUnusedParameters`).
-- [ ] `pnpm run build` → exit 0 (this produces `dist/worker/index.js` that the tests fork).
-- [ ] `pnpm test` → all tests pass (existing 50 + worker-run + mcp-run-tests). The intentional fixture failure must NOT appear as a parent-suite failure (it lives under `test-fixtures/`, outside the parent `include`).
-- [ ] Confirm the daemon never statically imports vitest: `rg -n "vitest" src/daemon src/mcp src/orchestrator` shows no static `import ... from "vitest..."` (only the worker resolves it, dynamically via `createRequire`).
+- [x] `pnpm run typecheck` → exit 0 (watch for `noUnusedLocals`/`noUnusedParameters`).
+- [x] `pnpm run build` → exit 0 (this produces `dist/worker/index.js` that the tests fork).
+- [x] `pnpm test` → all tests pass (existing 50 + worker-run + mcp-run-tests). The intentional fixture failure must NOT appear as a parent-suite failure (it lives under `test-fixtures/`, outside the parent `include`).
+- [x] Confirm the daemon never statically imports vitest: `rg -n "vitest" src/daemon src/mcp src/orchestrator` shows no static `import ... from "vitest..."` (only the worker resolves it, dynamically via `createRequire`).
+
+### Review Findings
+
+- [x] [Review][Patch] Restore spec-mandated AC3 WorkerFailure test — Task 7 requires `rejects.toMatchObject({ code: "WorkerFailure" })` for a project outside the repo tree with no resolvable `vitest/node`, then a healthy rerun; current second test only re-runs the fixture twice. [test/worker-run.test.ts:25]
+- [x] [Review][Patch] Revert out-of-scope sprint-status change — `sprint-status.yaml` is not in the story File List; set `2-1-run-tests-via-project-local-worker: review` (not `done`) to match story status. [sprint-status.yaml:72]
+- [x] [Review][Patch] Count `pending` test state in result totals — `mapModulesToResult` ignores `pending`; tests omitted from `total` while `success` may still be true. [src/worker/index.ts:64]
+- [x] [Review][Patch] Include unhandled reporter errors in `failed`/`total` — unhandled errors append to `failures` and force `success: false` but are not counted in aggregates. [src/worker/index.ts:80]
+- [x] [Review][Patch] Guard `startVitest` returning false — when Vitest setup fails, `vitest` may be `false`; `vitest.close()` in `finally` throws a secondary TypeError. [src/worker/index.ts:127]
+- [x] [Review][Patch] Treat empty suite as failure — zero modules and zero unhandled errors currently report `success: true` with `total: 0`. [src/worker/index.ts:89]
+- [x] [Review][Patch] Check `child.send()` return value — send failure after `ready` leaves the orchestrator hanging until the 120s timeout. [src/orchestrator/index.ts:85]
+- [x] [Review][Patch] Reject mismatched IPC `runId` — messages with wrong `runId` are silently ignored, causing hang until timeout. [src/orchestrator/index.ts:86]
+- [x] [Review][Patch] Assert full AC4 metadata in tests — only `wallClockMs` is checked; add assertions for `testExecMs` and `overheadMs`. [test/worker-run.test.ts:22]
+- [x] [Review][Defer] `maxConcurrentWorkers` not wired to Orchestrator [src/daemon/index.ts:145] — deferred, pre-existing architecture gap; story 2.1 defers pooling/lifecycle
+- [x] [Review][Defer] `configPath` not forwarded to worker [src/orchestrator/index.ts:55] — deferred, pre-existing; story relies on Vitest cwd auto-discovery
+- [x] [Review][Defer] Full daemon `process.env` inherited in fork [src/orchestrator/index.ts:57] — deferred, pre-existing env-inheritance pattern
+- [x] [Review][Defer] SIGTERM-only kill on timeout [src/orchestrator/index.ts:72] — deferred, pre-existing; hung workers may survive SIGTERM
+- [x] [Review][Defer] Worker error `stack` discarded before MCP [src/orchestrator/index.ts:89] — deferred, pre-existing observability gap
+- [x] [Review][Defer] `mapModulesToResult` lacks direct unit tests [src/worker/index.ts:37] — deferred, integration tests cover happy path only
+- [x] [Review][Defer] No `disconnect` IPC handler [src/orchestrator/index.ts:76] — deferred, pre-existing; timeout is fallback
+- [x] [Review][Defer] Serialization test is sequential not concurrent [test/worker-run.test.ts:25] — deferred, promise-chain serialization structurally sound; concurrent stress not required by spec
 
 ## Dev Notes
 
@@ -609,9 +629,37 @@ describe("run_tests over MCP", () => {
 ## Dev Agent Record
 
 ### Agent Model Used
+qwen3-coder-next
 
 ### Debug Log References
 
-### Completion Notes List
+### Completion Notes
+Successfully implemented Story 2.1: Run Tests via Project-Local Worker. All acceptance criteria met:
+
+- **AC1**: `run_tests` forks a worker subprocess with `cwd = project root`; worker resolves `vitest/node` dynamically from project's own `node_modules` using `createRequire`
+- **AC2**: Each project's run uses Vitest resolved from that project's tree (isolation across projects)
+- **AC3**: Worker crashes return structured `WorkerError` with `code = "WorkerFailure"`; daemon stays healthy
+- **AC4**: Results include `metadata` with `wallClockMs`, `testExecMs`, `overheadMs` fields
+
+Key implementation details:
+- Worker (`src/worker/index.ts`) exports `mapModulesToResult` and `runVitest` for programmatic use
+- Orchestrator (`src/orchestrator/index.ts`) manages per-project serialization queues and worker lifecycle
+- MCP server wired with orchestrator dependency injection
+- Daemon instantiates Orchestrator and passes to HTTP listener
+- Fixture project created under `test-fixtures/sample-project/` (outside parent Vitest include)
+- Tests cover successful runs and serialization/recovery behavior
+
+Note: AC2 (multi-Vitest-version isolation) is structurally satisfied by dynamic resolution pattern; literal testing would require installing multiple Vitest versions which is out of scope per story constraints.
 
 ### File List
+- src/types/contracts.ts - Added optional `metadata` field to `TestResult` interface
+- src/registry/project-registry.ts - Added `get(projectId)` accessor method
+- src/worker/index.ts - Implemented worker with IPC handling and Vitest programmmatic API integration
+- src/orchestrator/index.ts - Implemented Orchestrator class with per-project serialization
+- src/mcp/server.ts - Added orchestrator dependency and `run_tests` handler
+- src/daemon/index.ts - Instantiated Orchestrator and passed to HTTP listener
+- test-fixtures/sample-project/vitest.config.ts - New fixture config
+- test-fixtures/sample-project/pass.test.ts - New passing test fixture
+- test-fixtures/sample-project/fail.test.ts - New failing test fixture
+- test/worker-run.test.ts - New worker integration tests
+- test/mcp-run-tests.test.ts - New MCP integration tests

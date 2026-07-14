@@ -1,10 +1,12 @@
 # Deferred Work Ledger
 
-## Deferred from: code review of story-1-4-registry-persistence-rehydration (2026-07-14)
+## Deferred from: code review of story-2-1-run-tests-via-project-local-worker.md (2026-07-14)
 
-- `load()` uses synchronous `readFileSync` inside async method — pre-existing pattern also used by `save()`.
-- Filesystem read errors treated same as missing file — pre-existing silent catch predates this story.
-- Rehydrated `status` values not normalized on restart — worker lifecycle is a later epic.
-- `save()` uses direct write without atomic rename — pre-existing; unchanged by this story.
-- Map key vs entry `projectId` mismatch not detected — pre-existing spread pattern from Story 1.3.
-- `NaN` schemaVersion accepted without rejection — extreme JSON edge case; spec uses simple typeof check.
+- `maxConcurrentWorkers` not wired to Orchestrator — architecture gap; story 2.1 defers pooling/lifecycle
+- `configPath` not forwarded to worker — story relies on Vitest cwd auto-discovery
+- Full daemon `process.env` inherited in fork — pre-existing env-inheritance pattern
+- SIGTERM-only kill on timeout — hung workers may survive SIGTERM
+- Worker error `stack` discarded before MCP — observability gap
+- `mapModulesToResult` lacks direct unit tests — integration tests cover happy path only
+- No `disconnect` IPC handler — timeout is fallback
+- Serialization test is sequential not concurrent — promise-chain serialization structurally sound; concurrent stress not required by spec

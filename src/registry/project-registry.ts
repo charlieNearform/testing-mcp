@@ -99,6 +99,10 @@ export class ProjectRegistry {
     return this.projects.has(projectId);
   }
 
+  get(projectId: string): RegisteredProject | undefined {
+    return this.projects.get(projectId);
+  }
+
   /** Rehydrate the in-memory registry from registry.json. Migrates older files forward and
    *  re-persists them; throws RegistryError on a corrupt/newer file (the daemon catches it). */
   async load(): Promise<void> {

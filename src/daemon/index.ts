@@ -6,6 +6,7 @@ import * as http from "node:http";
 import { SCHEMA_VERSION } from "../index.js";
 import { createMcpRequestListener } from "../mcp/server.js";
 import { ProjectRegistry } from "../registry/project-registry.js";
+import { Orchestrator } from "../orchestrator/index.js";
 
 export { SCHEMA_VERSION };
 
@@ -141,7 +142,8 @@ export async function startDaemon(): Promise<DaemonHandle> {
         `starting with an empty registry\n`,
     );
   }
-  const server = http.createServer(createMcpRequestListener({ token, registry }));
+  const orchestrator = new Orchestrator();
+  const server = http.createServer(createMcpRequestListener({ token, registry, orchestrator }));
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", (err) => {

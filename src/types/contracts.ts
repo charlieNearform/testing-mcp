@@ -18,6 +18,12 @@ export interface TestResult {
     reason: string;
     files: string[];
   };
+  /** Timing breakdown so daemon/worker overhead is observable (NFR7). Optional; added in Story 2.1. */
+  metadata?: {
+    wallClockMs: number;
+    testExecMs: number;
+    overheadMs: number;
+  };
 }
 
 export interface TestPlan {

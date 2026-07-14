@@ -7,10 +7,13 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { toAppError, type AppError } from "../types/errors.js";
 import { ProjectRegistry, RegistryError } from "../registry/project-registry.js";
+import { Orchestrator } from "../orchestrator/index.js";
 
 export interface McpServerDeps {
   /** Shared project registry (owned by the daemon). Absent in bare unit tests. */
   registry?: ProjectRegistry;
+  /** Test-run orchestrator (owned by the daemon). Absent in bare unit tests. */
+  orchestrator?: Orchestrator;
 }
 
 export interface McpListenerDeps extends McpServerDeps {
@@ -25,6 +28,7 @@ function errorResult(err: AppError) {
 /** Build a configured McpServer with all Phase-1 tools registered (discoverable). */
 export function createMcpServer(deps: McpServerDeps = {}): McpServer {
   const registry = deps.registry;
+  const orchestrator = deps.orchestrator;
   const isRegistered = (projectId: string) => registry?.has(projectId) ?? false;
   const server = new McpServer({ name: "test-mcp", version: "0.0.0" });
 
@@ -101,7 +105,21 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
         planId: z.string().optional().describe("Execute a previously computed plan"),
       },
     },
-    async ({ projectId }) => requireRegisteredProject(projectId),
+    async ({ projectId, files }) => {
+      const project = registry?.get(projectId);
+      if (!project) return unknownProject(projectId);
+      if (!orchestrator) {
+        return errorResult(toAppError("NotImplemented", "orchestrator unavailable"));
+      }
+      try {
+        const result = await orchestrator.runTests(project, { files });
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      } catch (err) {
+        return errorResult(
+          toAppError("WorkerFailure", err instanceof Error ? err.message : String(err)),
+        );
+      }
+    },
   );
 
   server.registerTool(
