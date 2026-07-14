@@ -1,6 +1,10 @@
 # Deferred Work Ledger
 
-## Deferred from: code review of story-1-3-project-registration-via-test-mcp-register.md (2026-07-14)
+## Deferred from: code review of story-1-4-registry-persistence-rehydration (2026-07-14)
 
-- In-memory registry empty after daemon restart until Story 1.4 `load()` — intentional scope boundary; `status` reads disk so counts can disagree with MCP tools until 1.4
-- Non-atomic `registry.json` write — crash mid-write can corrupt file; address with Story 1.4 persistence hardening
+- `load()` uses synchronous `readFileSync` inside async method — pre-existing pattern also used by `save()`.
+- Filesystem read errors treated same as missing file — pre-existing silent catch predates this story.
+- Rehydrated `status` values not normalized on restart — worker lifecycle is a later epic.
+- `save()` uses direct write without atomic rename — pre-existing; unchanged by this story.
+- Map key vs entry `projectId` mismatch not detected — pre-existing spread pattern from Story 1.3.
+- `NaN` schemaVersion accepted without rejection — extreme JSON edge case; spec uses simple typeof check.

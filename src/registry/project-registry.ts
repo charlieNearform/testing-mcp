@@ -58,6 +58,37 @@ interface RegistryFile {
   projects: Record<string, { path: string; configPath: string; status: ProjectStatus }>;
 }
 
+/**
+ * Validate and, if needed, upgrade a parsed registry file to the current schemaVersion.
+ * Returns the current-version file plus an `upgraded` flag so the caller can re-persist.
+ * Throws RegistryError (never crashes the daemon) on a newer/unsupported version.
+ *
+ * Add real step migrations here as SCHEMA_VERSION grows, e.g.:
+ *   if (version < 2) { ...transform projects...; version = 2; }
+ * Today SCHEMA_VERSION === 1, so the only "older" case is a pre-versioning file
+ * (missing/0 schemaVersion), which is stamped forward with its projects intact.
+ */
+function migrateRegistryFile(
+  parsed: unknown,
+  registryPath: string,
+): RegistryFile & { upgraded: boolean } {
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new RegistryError("InvalidConfig", `registry.json is malformed at ${registryPath}`);
+  }
+  const obj = parsed as { schemaVersion?: unknown; projects?: unknown };
+  const version = typeof obj.schemaVersion === "number" ? obj.schemaVersion : 0;
+
+  if (version > SCHEMA_VERSION) {
+    throw new RegistryError(
+      "InvalidConfig",
+      `registry.json schemaVersion ${version} is newer than supported ${SCHEMA_VERSION}; upgrade test-mcp`,
+    );
+  }
+
+  const projects = (obj.projects ?? {}) as RegistryFile["projects"];
+  return { schemaVersion: SCHEMA_VERSION, projects, upgraded: version < SCHEMA_VERSION };
+}
+
 export class ProjectRegistry {
   private projects = new Map<string, RegisteredProject>();
 
@@ -68,18 +99,37 @@ export class ProjectRegistry {
     return this.projects.has(projectId);
   }
 
-  /** Read registry.json into memory if it exists. (Daemon-start rehydration is wired in Story 1.4.) */
+  /** Rehydrate the in-memory registry from registry.json. Migrates older files forward and
+   *  re-persists them; throws RegistryError on a corrupt/newer file (the daemon catches it). */
   async load(): Promise<void> {
     let raw: string;
     try {
       raw = fs.readFileSync(this.registryPath, "utf8");
     } catch {
-      return; // no file yet
+      return; // no file yet — nothing to rehydrate
     }
-    const parsed = JSON.parse(raw) as RegistryFile;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new RegistryError("InvalidConfig", `registry.json is not valid JSON at ${this.registryPath}`);
+    }
+
+    const file = migrateRegistryFile(parsed, this.registryPath);
+
     this.projects.clear();
-    for (const [projectId, entry] of Object.entries(parsed.projects ?? {})) {
+    for (const [projectId, entry] of Object.entries(file.projects)) {
       this.projects.set(projectId, { projectId, ...entry });
+    }
+
+    if (file.upgraded) {
+      try {
+        await this.save(); // persist the upgraded file at current schemaVersion
+      } catch (err) {
+        this.projects.clear();
+        throw err;
+      }
     }
   }
 

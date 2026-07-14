@@ -130,7 +130,17 @@ export async function startDaemon(): Promise<DaemonHandle> {
   const cfg = loadOrCreateConfig();
   const token = crypto.randomBytes(32).toString("hex");
 
-  const registry = new ProjectRegistry(registryPath());
+  let registry = new ProjectRegistry(registryPath());
+  try {
+    await registry.load();
+  } catch (err) {
+    registry = new ProjectRegistry(registryPath());
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `test-mcp daemon: could not load registry (${message}); ` +
+        `starting with an empty registry\n`,
+    );
+  }
   const server = http.createServer(createMcpRequestListener({ token, registry }));
 
   await new Promise<void>((resolve, reject) => {

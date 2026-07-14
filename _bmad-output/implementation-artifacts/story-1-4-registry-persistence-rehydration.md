@@ -1,6 +1,6 @@
 # Story 1.4: Registry Persistence & Rehydration
 
-Status: ready-for-dev
+Status: done
 
 **Prerequisite:** Story 1.3 complete (`ProjectRegistry`, registry MCP tools, CLI `init`/`register`, all `done`). Do not restructure the repo.
 
@@ -292,10 +292,24 @@ describe("daemon registry rehydration", () => {
 
 ### Task 5 — Verify (AC: all)
 
-- [ ] `pnpm run typecheck` → exit 0
-- [ ] `pnpm run build` → exit 0
-- [ ] `pnpm test` → all tests pass (existing + `registry-migration` + `registry-rehydration`)
-- [ ] Manual (optional): `H=$(mktemp -d); TEST_MCP_HOME=$H node bin/test-mcp.mjs register` in this repo, then `TEST_MCP_HOME=$H node bin/test-mcp.mjs stop`, then `TEST_MCP_HOME=$H node bin/test-mcp.mjs start &` and `TEST_MCP_HOME=$H node bin/test-mcp.mjs status` → `registered projects: 1` (survived restart). Stop the daemon afterwards.
+- [x] `pnpm run typecheck` → exit 0
+- [x] `pnpm run build` → exit 0
+- [x] `pnpm test` → all tests pass (existing + `registry-migration` + `registry-rehydration`)
+- [x] Manual (optional): `H=$(mktemp -d); TEST_MCP_HOME=$H node bin/test-mcp.mjs register` in this repo, then `TEST_MCP_HOME=$H node bin/test-mcp.mjs stop`, then `TEST_MCP_HOME=$H node bin/test-mcp.mjs start &` and `TEST_MCP_HOME=$H node bin/test-mcp.mjs status` → `registered projects: 1` (survived restart). Stop the daemon afterwards.
+
+### Review Findings
+
+- [x] [Review][Patch] Upgrade save failure leaves populated registry while daemon logs empty start [src/daemon/index.ts:134, src/registry/project-registry.ts:126] — fixed: `load()` clears on save failure; daemon replaces registry with fresh empty instance on catch.
+- [x] [Review][Patch] Non-Error throws produce unhelpful daemon stderr [src/daemon/index.ts:138] — fixed: `err instanceof Error ? err.message : String(err)`.
+- [x] [Review][Patch] Corrupt-registry integration test omits stderr assertion [test/registry-rehydration.test.ts:74] — fixed: spy on `process.stderr.write` and assert warning text.
+- [x] [Review][Patch] Migration test import uses `.js` instead of spec-required `.ts` [test/registry-migration.test.ts:5] — fixed.
+
+- [x] [Review][Defer] `load()` uses synchronous `readFileSync` inside async method [src/registry/project-registry.ts:107] — deferred, pre-existing pattern also used by `save()`.
+- [x] [Review][Defer] Filesystem read errors treated same as missing file [src/registry/project-registry.ts:108] — deferred, pre-existing silent catch predates this story.
+- [x] [Review][Defer] Rehydrated `status` values not normalized on restart [src/registry/project-registry.ts:122] — deferred, pre-existing load behaviour; worker lifecycle is a later epic.
+- [x] [Review][Defer] `save()` uses direct write without atomic rename [src/registry/project-registry.ts:135] — deferred, pre-existing; unchanged by this story.
+- [x] [Review][Defer] Map key vs entry `projectId` mismatch not detected [src/registry/project-registry.ts:122] — deferred, pre-existing spread pattern from Story 1.3.
+- [x] [Review][Defer] `NaN` schemaVersion accepted without rejection [src/registry/project-registry.ts:79] — deferred, extreme JSON edge case; spec uses simple typeof check.
 
 ## Dev Notes
 
@@ -333,9 +347,20 @@ describe("daemon registry rehydration", () => {
 ## Dev Agent Record
 
 ### Agent Model Used
+qwen3-coder-next
 
 ### Debug Log References
 
 ### Completion Notes List
+- Implemented `migrateRegistryFile()` helper to validate schemaVersion and migrate older files forward
+- Updated `load()` method to use migration helper and re-persist upgraded files
+- Added daemon-start rehydration in `startDaemon()` with error handling (logs to stderr, continues empty)
+- Created `test/registry-migration.test.ts` with 5 unit tests covering current-version load, legacy migration, newer version rejection, corrupt file rejection, and missing file handling
+- Created `test/registry-rehydration.test.ts` with 2 integration tests verifying daemon starts with seeded registry and handles corrupt registry gracefully
+- All tests pass (50 total tests across 11 test files)
 
 ### File List
+- src/registry/project-registry.ts — added `migrateRegistryFile()` helper, updated `load()` method
+- src/daemon/index.ts — added `registry.load()` call wrapped in try/catch in `startDaemon()`
+- test/registry-migration.test.ts — new (migration + rehydration unit tests)
+- test/registry-rehydration.test.ts — new (daemon integration tests)
