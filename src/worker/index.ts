@@ -29,12 +29,17 @@ interface VTestModule {
   errors(): ReadonlyArray<VError>;
   children: { allTests(): Iterable<VTestCase> };
 }
+interface VitestInstance {
+  close(): Promise<void>;
+  config: { isolate: boolean };
+}
+
 interface VitestNode {
   startVitest(
     mode: string,
     cliFilters: string[],
     options: Record<string, unknown>,
-  ): Promise<{ close(): Promise<void> } | false>;
+  ): Promise<VitestInstance | false>;
 }
 
 /** Convert captured Vitest reporter data into our TestResult contract. Pure — unit-testable. */
@@ -43,6 +48,7 @@ export function mapModulesToResult(
   unhandled: ReadonlyArray<VError>,
   wallClockMs: number,
   requestedFiles: string[],
+  isolate: boolean,
 ): TestResult {
   let passed = 0;
   let failed = 0;
@@ -117,6 +123,7 @@ export function mapModulesToResult(
       wallClockMs,
       testExecMs,
       overheadMs: Math.max(0, wallClockMs - testExecMs),
+      isolate,
     },
   };
 }
@@ -200,9 +207,10 @@ export async function runVitest(
   if (!vitest) {
     throw new Error("Vitest failed to start");
   }
+  const isolate = vitest.config.isolate ?? true;
   try {
     return {
-      result: mapModulesToResult(modules, unhandled, wallClockMs, files),
+      result: mapModulesToResult(modules, unhandled, wallClockMs, files, isolate),
       failureDetails: mapFailureDetails(modules, unhandled),
     };
   } finally {

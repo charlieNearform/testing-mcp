@@ -1,6 +1,6 @@
 # Story 2.3: Test Isolation Verification
 
-Status: ready-for-dev
+Status: done
 
 **Prerequisite:** Story 2.2 complete (`run_tests` + `get_failure_details`, worker/orchestrator result flow, all `done`). Build on that code in place.
 
@@ -224,10 +224,15 @@ describe("test isolation", () => {
 
 ### Task 5 — Verify (AC: all)
 
-- [ ] `pnpm run typecheck` → exit 0 (watch `noUnusedLocals`/`noUnusedParameters`; the new `isolate` param must be used).
-- [ ] `pnpm run build` → exit 0 (rebuilds `dist/worker/index.js` the tests fork).
-- [ ] `pnpm test` → all tests pass (existing suite + `isolation`). The existing `sample-project` tests are unchanged.
-- [ ] Sanity: a `run_tests` result's `metadata` now includes `isolate`.
+- [x] `pnpm run typecheck` → exit 0 (watch `noUnusedLocals`/`noUnusedParameters`; the new `isolate` param must be used).
+- [x] `pnpm run build` → exit 0 (rebuilds `dist/worker/index.js` the tests fork).
+- [x] `pnpm test` → all tests pass (existing suite + `isolation`). The existing `sample-project` tests are unchanged.
+- [x] Sanity: a `run_tests` result's `metadata` now includes `isolate`.
+
+### Review Findings
+
+- [x] [Review][Defer] `TestResultSchema` stub does not validate `metadata.isolate` [`src/types/contracts.ts:51`] — deferred, pre-existing Story 1.0 placeholder
+- [x] [Review][Defer] AC1 e2e may not distinguish `isolate:true` from parallel worker isolation [`test-fixtures/isolation-project/`] — deferred; story spec prescribed fixture without pool pinning; metadata AC2 path is sound
 
 ## Dev Notes
 
@@ -269,3 +274,21 @@ Vitest, `environment: node`. Exercised through the real `Orchestrator` + built w
 ### Completion Notes List
 
 ### File List
+
+- `src/types/contracts.ts` — Added `isolate: boolean` to `TestResult.metadata`
+- `src/worker/index.ts` — Extended Vitest typing, added `isolate` parameter to `mapModulesToResult`, read config and thread through result
+- `test-fixtures/isolation-project/vitest.config.ts` — New fixture proving isolation (isolate: true)
+- `test-fixtures/isolation-project/counter.ts` — Shared module with mutable counter for isolation testing
+- `test-fixtures/isolation-project/a.test.ts` — Test file verifying fresh counter state
+- `test-fixtures/isolation-project/b.test.ts` — Test file verifying no cross-file state leakage
+- `test-fixtures/no-isolation-project/vitest.config.ts` — New fixture with isolation disabled
+- `test-fixtures/no-isolation-project/noop.test.ts` — Trivial test for isolation-off verification
+- `test/isolation.test.ts` — New test verifying both isolation modes
+
+### Change Log
+
+- **2026-07-14** — Story 2.3 implementation complete. Added per-file isolation detection and reporting.
+
+### Completion Notes
+
+Implemented Story 2.3: Test Isolation Verification. The worker now reads the resolved Vitest config.isolate value and includes it in TestResult.metadata. Two fixtures were created: isolation-project (isolate: true) verifies fresh per-file module state via shared counter module; no-isolation-project (isolate: false) surfaces the metadata flag. All tests pass including the new isolation.test.ts which validates both modes.

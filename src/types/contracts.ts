@@ -23,6 +23,8 @@ export interface TestResult {
     wallClockMs: number;
     testExecMs: number;
     overheadMs: number;
+    /** Resolved Vitest per-file isolation for this run (Story 2.3). */
+    isolate: boolean;
   };
 }
 

@@ -47,6 +47,10 @@ project_key: NOKEY
 tracking_system: file-system
 story_location: "{project-root}/_bmad-output/implementation-artifacts"
 
+# 2-3 moved ready-for-dev → in-progress on 2026-07-14 (Story 2.3 implementation started)
+# 2-3 moved in-progress → review on 2026-07-14 (Story 2.3 implementation complete)
+# 2-3 moved review → done on 2026-07-14 (code review: clean, 2 defer)
+
 # 1-1 moved backlog → ready-for-dev on 2026-07-13
 # 1-2 moved ready-for-dev → done on 2026-07-14
 # 1-2 moved done → in-progress on 2026-07-14 (code review findings)
@@ -75,12 +79,12 @@ development_status:
   epic-2: in-progress
   2-1-run-tests-via-project-local-worker: done
   2-2-structured-results-failure-detail: done
-  2-3-test-isolation-verification: ready-for-dev
+  2-3-test-isolation-verification: done
   epic-2-retrospective: optional
 
   # Epic 3: Intelligent Test Selection (Phase 1)
-  epic-3: backlog
-  3-1-git-aware-delta-selection: backlog
+  epic-3: in-progress
+  3-1-git-aware-delta-selection: ready-for-dev
   3-2-coverage-reverse-map-build-persist: backlog
   3-3-setup-baseline-subtraction: backlog
   3-4-always-run-unmeasurable-tests: backlog

@@ -16,3 +16,8 @@
 - Duplicate `${moduleId}::collect` ids collapse in orchestrator Map — pre-existing Story 2.1 id scheme; Story 2.2 correctly mirrors it
 - `get_failure_details` during in-flight `run_tests` returns prior run's cache — Phase 1 in-memory semantics; lookups not queued with runs
 - Unregister does not evict `lastFailures` entries — same pattern as `queues`; out of Story 2.2 scope
+
+## Deferred from: code review of story-2-3-test-isolation-verification.md (2026-07-14)
+
+- `TestResultSchema` stub does not validate `metadata.isolate` — pre-existing Story 1.0 placeholder
+- AC1 e2e may not distinguish `isolate:true` from parallel worker isolation — story spec prescribed fixture without pool pinning; metadata AC2 path is sound
