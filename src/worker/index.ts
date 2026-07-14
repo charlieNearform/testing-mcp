@@ -1,7 +1,16 @@
 import { createRequire } from "node:module";
 import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import type { TestResult, FailureDetail } from "../types/contracts.js";
-import type { ToWorker, FromWorker } from "../types/ipc.js";
+import type { ToWorker, FromWorker, CoverageDelta } from "../types/ipc.js";
+import {
+  buildCoverageMap,
+  extractCoveredSources,
+  loadCoverageMap,
+  saveCoverageMap,
+  type FileMeasurement,
+} from "../coverage/index.js";
 
 // Minimal structural typing for the parts of the Vitest reporter API we consume.
 // (Vitest is resolved dynamically from the project, so we cannot import its types here.)
@@ -34,12 +43,57 @@ interface VitestInstance {
   config: { isolate: boolean };
 }
 
+/** createVitest returns an instance we only use to discover test files. */
+interface DiscoveryInstance {
+  close(): Promise<void>;
+  globTestSpecifications(): Promise<ReadonlyArray<{ moduleId: string }>>;
+}
+
 interface VitestNode {
   startVitest(
     mode: string,
     cliFilters: string[],
     options: Record<string, unknown>,
   ): Promise<VitestInstance | false>;
+  createVitest(mode: string, options: Record<string, unknown>): Promise<DiscoveryInstance>;
+}
+
+interface RunOnceResult {
+  modules: ReadonlyArray<VTestModule>;
+  unhandled: ReadonlyArray<VError>;
+  wallClockMs: number;
+  isolate: boolean;
+}
+
+/** Execute Vitest once with the given filters/options and capture reporter output. */
+async function runOnce(
+  startVitest: VitestNode["startVitest"],
+  filters: string[],
+  extraOptions: Record<string, unknown>,
+): Promise<RunOnceResult> {
+  let modules: ReadonlyArray<VTestModule> = [];
+  let unhandled: ReadonlyArray<VError> = [];
+  const reporter = {
+    onTestRunEnd(testModules: ReadonlyArray<VTestModule>, unhandledErrors: ReadonlyArray<VError>) {
+      modules = testModules;
+      unhandled = unhandledErrors;
+    },
+  };
+  const start = Date.now();
+  const vitest = await startVitest("test", filters, {
+    watch: false,
+    reporters: [reporter],
+    coverage: { enabled: false },
+    ...extraOptions,
+  });
+  const wallClockMs = Date.now() - start;
+  if (!vitest) throw new Error("Vitest failed to start");
+  const isolate = vitest.config.isolate ?? true;
+  try {
+    return { modules, unhandled, wallClockMs, isolate };
+  } finally {
+    await vitest.close();
+  }
 }
 
 /** Convert captured Vitest reporter data into our TestResult contract. Pure — unit-testable. */
@@ -47,7 +101,7 @@ export function mapModulesToResult(
   modules: ReadonlyArray<VTestModule>,
   unhandled: ReadonlyArray<VError>,
   wallClockMs: number,
-  requestedFiles: string[],
+  selection: { strategy: "full" | "incremental"; reason: string },
   isolate: boolean,
 ): TestResult {
   let passed = 0;
@@ -115,8 +169,8 @@ export function mapModulesToResult(
     skipped,
     failures,
     selection: {
-      strategy: "full",
-      reason: requestedFiles.length ? "explicit file list" : "full suite (no selection engine yet)",
+      strategy: selection.strategy,
+      reason: selection.reason,
       files: filesRun,
     },
     metadata: {
@@ -179,43 +233,139 @@ export function mapFailureDetails(
   return details;
 }
 
-/** Resolve the PROJECT's Vitest and run it programmatically, returning result + failure details. */
+/** Resolve the PROJECT's Vitest and run it, honouring git-delta selection with a safe fallback. */
 export async function runVitest(
   cwd: string,
-  files: string[],
+  opts: { files: string[]; changed: boolean },
 ): Promise<{ result: TestResult; failureDetails: FailureDetail[] }> {
-  // Resolve vitest from the project's own node_modules (walks up from cwd).
   const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
   const { startVitest } = projectRequire("vitest/node") as VitestNode;
 
-  let modules: ReadonlyArray<VTestModule> = [];
-  let unhandled: ReadonlyArray<VError> = [];
-  const reporter = {
-    onTestRunEnd(testModules: ReadonlyArray<VTestModule>, unhandledErrors: ReadonlyArray<VError>) {
-      modules = testModules;
-      unhandled = unhandledErrors;
-    },
-  };
-
-  const start = Date.now();
-  const vitest = await startVitest("test", files, {
-    watch: false,
-    reporters: [reporter],
-    coverage: { enabled: false },
+  const build = (
+    r: RunOnceResult,
+    selection: { strategy: "full" | "incremental"; reason: string },
+  ) => ({
+    result: mapModulesToResult(r.modules, r.unhandled, r.wallClockMs, selection, r.isolate),
+    failureDetails: mapFailureDetails(r.modules, r.unhandled),
   });
-  const wallClockMs = Date.now() - start;
-  if (!vitest) {
-    throw new Error("Vitest failed to start");
+
+  // Incremental (git-aware) selection — only when the caller did not pin explicit files.
+  if (opts.changed && opts.files.length === 0) {
+    try {
+      const inc = await runOnce(startVitest, [], { changed: true });
+      if (inc.modules.length > 0) {
+        return build(inc, {
+          strategy: "incremental",
+          reason: "git delta via vitest --changed (static import graph)",
+        });
+      }
+      // No affected test files -> fall through to a full run (never a silent skip).
+    } catch {
+      // Not a git repo / --changed unusable -> fall through to a full run.
+    }
+    const full = await runOnce(startVitest, [], {});
+    return build(full, {
+      strategy: "full",
+      reason: "incremental found no affected tests (unmapped change or non-git); ran full suite",
+    });
   }
-  const isolate = vitest.config.isolate ?? true;
+
+  // Full run, or an explicit file list.
+  const run = await runOnce(startVitest, opts.files, {});
+  return build(run, {
+    strategy: "full",
+    reason: opts.files.length ? "explicit file list" : "full suite",
+  });
+}
+
+/** Measure one test file's coverage by running the project's Vitest with V8 coverage. */
+async function measureCoverage(
+  startVitest: VitestNode["startVitest"],
+  projectRoot: string,
+  absTestFile: string,
+): Promise<FileMeasurement> {
+  const reportsDir = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-cov-"));
   try {
-    return {
-      result: mapModulesToResult(modules, unhandled, wallClockMs, files, isolate),
-      failureDetails: mapFailureDetails(modules, unhandled),
-    };
+    const vitest = await startVitest("test", [absTestFile], {
+      watch: false,
+      // Keep reporters quiet; we only care about the coverage output on disk.
+      reporters: [{}],
+      coverage: {
+        enabled: true,
+        provider: "v8",
+        all: false,
+        reporter: ["json"],
+        reportsDirectory: reportsDir,
+        // A single-file run trips project coverage thresholds; never fail the build on them.
+        thresholds: undefined,
+      },
+    });
+    if (!vitest) return { sources: [], measured: false };
+    try {
+      const covFile = path.join(reportsDir, "coverage-final.json");
+      if (!fs.existsSync(covFile)) return { sources: [], measured: false };
+      const json = JSON.parse(fs.readFileSync(covFile, "utf8")) as Record<
+        string,
+        { s?: Record<string, number> }
+      >;
+      return { sources: extractCoveredSources(json, projectRoot, absTestFile), measured: true };
+    } finally {
+      await vitest.close();
+    }
+  } finally {
+    fs.rmSync(reportsDir, { recursive: true, force: true });
+  }
+}
+
+/** Discover all test files in the project (absolute paths) without running them. */
+async function discoverTestFiles(createVitest: VitestNode["createVitest"]): Promise<string[]> {
+  const vitest = await createVitest("test", { watch: false });
+  try {
+    const specs = await vitest.globTestSpecifications();
+    return [...new Set(specs.map((s) => s.moduleId))];
   } finally {
     await vitest.close();
   }
+}
+
+/**
+ * Build/update and persist the reverse coverage map for this run.
+ * Full when no explicit files were given; incremental (only the given test files
+ * re-measured) when a file list was provided and a map already exists.
+ */
+async function buildAndPersistCoverageMap(
+  cwd: string,
+  projectId: string,
+  files: string[],
+): Promise<CoverageDelta> {
+  const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
+  const { startVitest, createVitest } = projectRequire("vitest/node") as VitestNode;
+
+  const targetTestFiles =
+    files.length > 0
+      ? files.map((f) => path.resolve(cwd, f))
+      : await discoverTestFiles(createVitest);
+
+  const { file, summary } = await buildCoverageMap({
+    projectRoot: cwd,
+    projectId,
+    targetTestFiles,
+    existing: loadCoverageMap(cwd),
+    measure: (abs) => measureCoverage(startVitest, cwd, abs),
+  });
+  saveCoverageMap(cwd, file);
+  return { ...summary };
+}
+
+/** Run tests, and (when requested) build/persist the coverage map on top of the results. */
+async function handleRun(
+  msg: Extract<ToWorker, { type: "run" }>,
+): Promise<{ result: TestResult; failureDetails: FailureDetail[]; coverageDelta?: CoverageDelta }> {
+  const cwd = process.cwd();
+  const base = await runVitest(cwd, { files: msg.files, changed: msg.changed });
+  if (!msg.coverage) return base;
+  const coverageDelta = await buildAndPersistCoverageMap(cwd, msg.projectId, msg.files);
+  return { ...base, coverageDelta };
 }
 
 function send(msg: FromWorker): void {
@@ -226,8 +376,10 @@ function send(msg: FromWorker): void {
 if (process.send) {
   process.on("message", (msg: ToWorker) => {
     if (msg.type === "run") {
-      runVitest(process.cwd(), msg.files)
-        .then(({ result, failureDetails }) => send({ type: "result", runId: msg.runId, result, failureDetails }))
+      handleRun(msg)
+        .then(({ result, failureDetails, coverageDelta }) =>
+          send({ type: "result", runId: msg.runId, result, failureDetails, coverageDelta }),
+        )
         .catch((err: unknown) =>
           send({
             type: "error",

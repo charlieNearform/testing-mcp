@@ -43,15 +43,27 @@ export class Orchestrator {
   }
 
   /** Run a project's tests in a fresh project-local worker. Rejects with WorkerError on failure. */
-  async runTests(project: ProjectRef, opts: { files?: string[] } = {}): Promise<TestResult> {
+  async runTests(
+    project: ProjectRef,
+    opts: { files?: string[]; mode?: string; coverage?: boolean } = {},
+  ): Promise<TestResult> {
     const prev = this.queues.get(project.projectId) ?? Promise.resolve();
-    const run = prev.catch(() => undefined).then(() => this.execute(project, opts.files ?? []));
+    const run = prev
+      .catch(() => undefined)
+      .then(() =>
+        this.execute(project, opts.files ?? [], opts.mode === "incremental", opts.coverage === true),
+      );
     // Keep the chain alive even if this run rejects, so the next run still serializes after it.
     this.queues.set(project.projectId, run.catch(() => undefined));
     return run;
   }
 
-  private execute(project: ProjectRef, files: string[]): Promise<TestResult> {
+  private execute(
+    project: ProjectRef,
+    files: string[],
+    changed: boolean,
+    coverage: boolean,
+  ): Promise<TestResult> {
     return new Promise<TestResult>((resolve, reject) => {
       const runId = randomUUID();
       const failRun = (err: WorkerError): void => {
@@ -92,9 +104,11 @@ export class Orchestrator {
           const runMsg: ToWorker = {
             type: "run",
             runId,
+            projectId: project.projectId,
             files,
-            coverage: false,
+            coverage,
             allTestsRun: files.length === 0,
+            changed,
           };
           if (!child.send(runMsg)) {
             finish(() => failRun(new WorkerError("IPC send failed")));

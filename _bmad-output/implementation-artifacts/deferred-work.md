@@ -1,23 +1,16 @@
 # Deferred Work Ledger
 
-## Deferred from: code review of story-2-1-run-tests-via-project-local-worker.md (2026-07-14)
+## Deferred from: story-3-2-coverage-reverse-map-build-persist (2026-07-14)
 
-- `maxConcurrentWorkers` not wired to Orchestrator — architecture gap; story 2.1 defers pooling/lifecycle
-- `configPath` not forwarded to worker — story relies on Vitest cwd auto-discovery
-- Full daemon `process.env` inherited in fork — pre-existing env-inheritance pattern
-- SIGTERM-only kill on timeout — hung workers may survive SIGTERM
-- Worker error `stack` discarded before MCP — observability gap
-- `mapModulesToResult` lacks direct unit tests — integration tests cover happy path only
-- No `disconnect` IPC handler — timeout is fallback
-- Serialization test is sequential not concurrent — promise-chain serialization structurally sound; concurrent stress not required by spec
+- **Single-pass V8 snapshot-diff measurement** — Story 3.2 was implemented with per-test-file measurement (one Vitest run per test file), which the spike proved correct. The architecture's single-pass serial snapshot-diff (same accuracy, ~6x cheaper) is a performance optimisation deferred here. [supersedes AC1's "single-pass" wording; approved trade-off]
+- **Vendoring `testpick` (MIT) attribution + license retention** — AC2 (NOTICE/THIRD_PARTY_LICENSES + vendored-module header) is N/A while we do not vendor testpick. Revisit if/when the single-pass algorithm is adopted from testpick.
+- Surface `coverageDelta` to the MCP `run_tests` response — currently the map is persisted to disk and the summary returned over IPC only; not exposed to the tool caller.
+- Prune stale source files that no test covers after a full rebuild across renamed/deleted sources — current build only prunes edges for re-measured test files (incremental) or starts fresh (full).
 
-## Deferred from: code review of story-2-2-structured-results-failure-detail.md (2026-07-14)
+## Deferred from: code review of story-3-1-git-aware-delta-selection (2026-07-14)
 
-- Duplicate `${moduleId}::collect` ids collapse in orchestrator Map — pre-existing Story 2.1 id scheme; Story 2.2 correctly mirrors it
-- `get_failure_details` during in-flight `run_tests` returns prior run's cache — Phase 1 in-memory semantics; lookups not queued with runs
-- Unregister does not evict `lastFailures` entries — same pattern as `queues`; out of Story 2.2 scope
-
-## Deferred from: code review of story-2-3-test-isolation-verification.md (2026-07-14)
-
-- `TestResultSchema` stub does not validate `metadata.isolate` — pre-existing Story 1.0 placeholder
-- AC1 e2e may not distinguish `isolate:true` from parallel worker isolation — story spec prescribed fixture without pool pinning; metadata AC2 path is sound
+- Add fast unit tests for `mapModulesToResult` selection branches — story specifies E2E-only coverage
+- Assert `selection.reason` strings in git-selection tests — not required by AC
+- Wire `dryRun`/`suite`/`planId` run_tests params — pre-existing; Story 4.1 scope
+- Consolidate `Orchestrator.execute` into options object as more run params arrive — style/refactor out of scope
+- Queue-serialization tests with `changed` flag — pre-existing coverage gap

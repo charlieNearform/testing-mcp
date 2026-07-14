@@ -1,6 +1,6 @@
 # Story 3.1: Git-Aware Delta Selection
 
-Status: ready-for-dev
+Status: done
 
 **Prerequisite:** Epic 2 complete (`run_tests`, worker/orchestrator, results/failure detail, isolation metadata — all `done`). This opens Epic 3 (intelligent selection). Build on the existing worker in place.
 
@@ -358,6 +358,15 @@ describe("git-aware delta selection", () => {
 - [ ] `pnpm test` → all tests pass (existing suite + `git-selection`). Existing full-run tests still pass — they assert `selection.strategy === "full"` and counts, which are unchanged (only the `reason` text changed).
 - [ ] Sanity: `run_tests({mode:"incremental"})` on a project with an unmapped change returns `selection.strategy === "full"`, never an empty pass.
 
+### Review Findings
+
+- [x] [Review][Patch] Remove unused `beforeEach` import [test/git-selection.test.ts:1]
+- [x] [Review][Defer] Add fast unit tests for `mapModulesToResult` selection branches [src/worker/index.ts] — deferred, pre-existing gap; story specifies E2E-only coverage
+- [x] [Review][Defer] Assert `selection.reason` strings in git-selection tests [test/git-selection.test.ts] — deferred, not required by AC
+- [x] [Review][Defer] Wire `dryRun`/`suite`/`planId` run_tests params [src/mcp/server.ts] — deferred, pre-existing; Story 4.1 scope
+- [x] [Review][Defer] Consolidate `Orchestrator.execute` into options object as more run params arrive [src/orchestrator/index.ts] — deferred, style/refactor out of scope
+- [x] [Review][Defer] Queue-serialization tests with `changed` flag [src/orchestrator/index.ts] — deferred, pre-existing coverage gap
+
 ## Dev Notes
 
 ### Why git-delta lives in the worker, not the SelectionEngine (yet)
@@ -402,3 +411,38 @@ Vitest, `environment: node`. Exercised through the real `Orchestrator` + built w
 ### Completion Notes List
 
 ### File List
+
+- `src/types/ipc.ts` — added `changed: boolean` to the `"run"` variant of `ToWorker`
+- `src/worker/index.ts` — refactored `mapModulesToResult` to accept explicit `selection`, added `runOnce` helper, updated `runVitest` with incremental→full fallback logic, updated IPC handler to pass `changed`
+- `src/orchestrator/index.ts` — threaded `mode` parameter through `runTests` → `execute` → worker message as `changed`
+- `src/mcp/server.ts` — destructured and forwarded `mode` from `run_tests` input to orchestrator
+- `test/git-selection.test.ts` — new test file with three hermetic tests for incremental selection, unmapped-change fallback, and non-git fallback
+
+### Change Log
+
+- **2026-07-14**: Story 3.1 implementation complete. Added git-aware delta selection using Vitest's `--changed` option with safe full-suite fallback when incremental selection yields no affected tests or when the project is not a git repository.
+
+### Dev Agent Record
+
+#### Agent Model Used
+
+qwen3-coder-next
+
+#### Debug Log References
+
+None
+
+#### Completion Notes
+
+Successfully implemented Story 3.1: Git-Aware Delta Selection. The worker now supports incremental test runs via Vitest's `--changed` config option. When `mode: "incremental"` is specified:
+
+1. If the project is a git repo and there are changed files that affect test modules, only those tests run (`strategy: "incremental"`).
+2. If the change maps to no test files (unmapped dependency), the run falls back to the full suite with `strategy: "full"` and a descriptive reason.
+3. If the project is not a git repo, the run immediately falls back to the full suite.
+
+Three hermetic tests verify:
+- Incremental selection correctly identifies affected tests based on static import graphs
+- Unmapped changes trigger full-suite fallback (no silent skip)
+- Non-git projects always use full-suite mode
+
+All existing tests continue to pass; the `selection.reason` text was updated but the shape remains compatible.

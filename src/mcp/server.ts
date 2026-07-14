@@ -99,20 +99,24 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
       inputSchema: {
         projectId: z.string().describe("ID of a registered project"),
         mode: z.enum(["full", "incremental", "watch"]).optional().describe("Run mode"),
+        coverage: z
+          .boolean()
+          .optional()
+          .describe("Build/refresh the source->test coverage map for this run"),
         files: z.array(z.string()).optional().describe("Specific files to run"),
         suite: z.string().optional().describe("Test suite name"),
         dryRun: z.boolean().optional().describe("Compute the plan without executing"),
         planId: z.string().optional().describe("Execute a previously computed plan"),
       },
     },
-    async ({ projectId, files }) => {
+    async ({ projectId, files, mode, coverage }) => {
       const project = registry?.get(projectId);
       if (!project) return unknownProject(projectId);
       if (!orchestrator) {
         return errorResult(toAppError("NotImplemented", "orchestrator unavailable"));
       }
       try {
-        const result = await orchestrator.runTests(project, { files });
+        const result = await orchestrator.runTests(project, { files, mode, coverage });
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
       } catch (err) {
         return errorResult(

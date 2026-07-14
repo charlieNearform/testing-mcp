@@ -4,7 +4,15 @@ import { TestResult, FailureDetail } from "./contracts.js";
 export type CoverageDelta = Record<string, unknown>;
 
 export type ToWorker =
-  | { type: "run"; runId: string; files: string[]; coverage: boolean; allTestsRun: boolean }
+  | {
+      type: "run";
+      runId: string;
+      projectId: string;
+      files: string[];
+      coverage: boolean;
+      allTestsRun: boolean;
+      changed: boolean;
+    }
   | { type: "cancel"; runId: string }
   | { type: "shutdown" };
 
