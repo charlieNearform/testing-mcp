@@ -6,11 +6,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { toAppError, type AppError } from "../types/errors.js";
+import { ProjectRegistry, RegistryError } from "../registry/project-registry.js";
 
 export interface McpServerDeps {
-  /** Returns true if a projectId is registered. Real registry arrives in Story 1.3;
-   *  until then this defaults to always-false so project-scoped tools return UnknownProject. */
-  isProjectRegistered?: (projectId: string) => boolean;
+  /** Shared project registry (owned by the daemon). Absent in bare unit tests. */
+  registry?: ProjectRegistry;
 }
 
 export interface McpListenerDeps extends McpServerDeps {
@@ -24,7 +24,8 @@ function errorResult(err: AppError) {
 
 /** Build a configured McpServer with all Phase-1 tools registered (discoverable). */
 export function createMcpServer(deps: McpServerDeps = {}): McpServer {
-  const isRegistered = deps.isProjectRegistered ?? (() => false);
+  const registry = deps.registry;
+  const isRegistered = (projectId: string) => registry?.has(projectId) ?? false;
   const server = new McpServer({ name: "test-mcp", version: "0.0.0" });
 
   const unknownProject = (projectId: string) =>
@@ -43,13 +44,26 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
       description: "Register a project (with a vitest/vite config) for test orchestration",
       inputSchema: { path: z.string().describe("Absolute path to the project root") },
     },
-    async () => errorResult(toAppError("NotImplemented", "register_project arrives in Story 1.3")),
+    async ({ path: projectPath }) => {
+      if (!registry) return errorResult(toAppError("NotImplemented", "registry unavailable"));
+      try {
+        const project = await registry.register(projectPath);
+        return { content: [{ type: "text" as const, text: JSON.stringify(project) }] };
+      } catch (e) {
+        if (e instanceof RegistryError) return errorResult(toAppError(e.code, e.message));
+        const message = e instanceof Error ? e.message : String(e);
+        return errorResult(toAppError("ValidationError", message));
+      }
+    },
   );
 
   server.registerTool(
     "list_projects",
     { description: "List registered projects", inputSchema: {} },
-    async () => errorResult(toAppError("NotImplemented", "list_projects arrives in Story 1.3")),
+    async () => {
+      const projects = registry ? await registry.list() : [];
+      return { content: [{ type: "text" as const, text: JSON.stringify({ projects }) }] };
+    },
   );
 
   server.registerTool(
@@ -61,7 +75,17 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
         purge: z.boolean().optional().describe("Also delete the project's .test-mcp state"),
       },
     },
-    async ({ projectId }) => requireRegisteredProject(projectId),
+    async ({ projectId, purge }) => {
+      if (!registry || !registry.has(projectId)) return unknownProject(projectId);
+      try {
+        const result = await registry.unregister(projectId, purge ?? false);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      } catch (e) {
+        if (e instanceof RegistryError) return errorResult(toAppError(e.code, e.message));
+        const message = e instanceof Error ? e.message : String(e);
+        return errorResult(toAppError("ValidationError", message));
+      }
+    },
   );
 
   server.registerTool(

@@ -5,6 +5,7 @@ import * as crypto from "node:crypto";
 import * as http from "node:http";
 import { SCHEMA_VERSION } from "../index.js";
 import { createMcpRequestListener } from "../mcp/server.js";
+import { ProjectRegistry } from "../registry/project-registry.js";
 
 export { SCHEMA_VERSION };
 
@@ -48,6 +49,10 @@ export function configPath(): string {
 
 export function lockfilePath(): string {
   return path.join(centralDir(), "daemon.lock");
+}
+
+export function registryPath(): string {
+  return path.join(centralDir(), "registry.json");
 }
 
 export function isPidAlive(pid: number): boolean {
@@ -125,7 +130,8 @@ export async function startDaemon(): Promise<DaemonHandle> {
   const cfg = loadOrCreateConfig();
   const token = crypto.randomBytes(32).toString("hex");
 
-  const server = http.createServer(createMcpRequestListener({ token }));
+  const registry = new ProjectRegistry(registryPath());
+  const server = http.createServer(createMcpRequestListener({ token, registry }));
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", (err) => {
@@ -224,10 +230,19 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
     return { running: false, registeredProjects: [] };
   }
 
+  let registeredProjects: string[] = [];
+  try {
+    const reg = JSON.parse(fs.readFileSync(registryPath(), "utf8")) as {
+      projects?: Record<string, unknown>;
+    };
+    registeredProjects = Object.keys(reg.projects ?? {});
+  } catch {
+    // no registry file yet
+  }
   return {
     running: true,
     pid: lock.pid,
     port: lock.port,
-    registeredProjects: [],
+    registeredProjects,
   };
 }

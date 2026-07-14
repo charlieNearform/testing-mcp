@@ -53,7 +53,7 @@ describe("createMcpServer", () => {
     await server.close();
   });
 
-  it("returns NotImplemented for register_project", async () => {
+  it("returns NotImplemented when registry unavailable", async () => {
     const { client, server } = await connectClient();
     const res = (await client.callTool({
       name: "register_project",
@@ -66,15 +66,15 @@ describe("createMcpServer", () => {
     await server.close();
   });
 
-  it("returns NotImplemented for list_projects", async () => {
+  it("returns empty projects list when registry unavailable", async () => {
     const { client, server } = await connectClient();
     const res = (await client.callTool({
       name: "list_projects",
       arguments: {},
     })) as { isError?: boolean; content: Array<{ type: string; text: string }> };
-    expect(res.isError).toBe(true);
-    const env = JSON.parse(res.content[0].text) as { code: string };
-    expect(env.code).toBe("NotImplemented");
+    expect(res.isError).toBeFalsy();
+    const payload = JSON.parse(res.content[0].text) as { projects: [] };
+    expect(payload.projects).toEqual([]);
     await client.close();
     await server.close();
   });

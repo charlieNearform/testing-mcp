@@ -1,6 +1,6 @@
 # Story 1.3: Project Registration via `test-mcp register`
 
-Status: ready-for-dev
+Status: done
 
 **Prerequisite:** Story 1.2 complete (MCP server + secured HTTP transport, `done`). Do not restructure the repo.
 
@@ -712,6 +712,18 @@ describe("test-mcp register (CLI)", () => {
 - [ ] `node bin/test-mcp.mjs --help` → still lists `init register start stop status`
 - [ ] Manual (optional): in this repo, `TEST_MCP_HOME=$(mktemp -d) node bin/test-mcp.mjs register` → prints `registered <id>`; then `... status` shows `registered projects: 1`; then `... stop`.
 
+### Review Findings
+
+- [x] [Review][Patch] CLI never emits `DaemonUnavailable` on daemon-unreachable paths [src/cli/main.ts:72-87] — AC2 requires this error code when `--no-spawn` or boot times out; implementation throws plain `Error` and prints it without the code prefix
+- [x] [Review][Patch] MCP registry handlers rethrow non-`RegistryError` failures [src/mcp/server.ts:52-55,77-85] — `fs` I/O errors during `save()`/`purge` bypass the `{ code, message }` envelope instead of mapping to a structured error
+- [x] [Review][Patch] `ensureDaemon` ignores spawned child `error` event [src/cli/main.ts:75-79] — spawn failures (e.g. missing bin) surface only as a generic 5s timeout
+- [x] [Review][Patch] `ensureProjectConfig` throws on corrupt `config.json` [src/cli/main.ts:35-37] — malformed JSON aborts `init`/`register` with a raw `SyntaxError` instead of recovering or failing clearly
+- [x] [Review][Patch] `registry.json` written without restrictive permissions [src/registry/project-registry.ts:92] — lockfile uses `0o600` but registry file inherits default umask
+- [x] [Review][Patch] No test for `unregister_project` with `purge: true` [test/mcp-registry.test.ts] — destructive side effect is untested
+- [x] [Review][Patch] `register` CLI assumes `res.content[0]` exists [src/cli/main.ts:130] — empty/malformed tool response throws `TypeError` instead of a clear CLI error
+- [x] [Review][Defer] In-memory registry empty after daemon restart until Story 1.4 `load()` [src/daemon/index.ts:133] — deferred, intentional scope boundary; `status` reads disk so counts can disagree with MCP tools until 1.4
+- [x] [Review][Defer] Non-atomic `registry.json` write [src/registry/project-registry.ts:92] — deferred, pre-existing pattern risk; address with 1.4 persistence hardening
+
 ## Dev Notes
 
 ### Architecture invariants that constrain this story
@@ -756,9 +768,24 @@ describe("test-mcp register (CLI)", () => {
 ## Dev Agent Record
 
 ### Agent Model Used
+qwen3-coder-next
 
 ### Debug Log References
 
 ### Completion Notes List
+- Implemented `ProjectRegistry` class with full CRUD operations for project registration
+- Added MCP tool handlers for `register_project`, `list_projects`, `unregister_project`
+- Integrated registry into daemon startup and status reporting
+- Implemented CLI `init` and `register` commands with auto-boot support
+- Created unit tests for registry (project-registry.test.ts)
+- Created MCP integration tests (mcp-registry.test.ts)
+- Created CLI integration tests (cli-register.test.ts)
 
 ### File List
+- src/registry/project-registry.ts - Replaced stub with full implementation
+- src/mcp/server.ts - Updated deps interface and implemented registry tool handlers
+- src/daemon/index.ts - Added registry instantiation and status counting
+- src/cli/main.ts - Implemented init/register commands with helper functions
+- test/project-registry.test.ts - New unit tests
+- test/mcp-registry.test.ts - New MCP integration tests
+- test/cli-register.test.ts - New CLI integration tests
