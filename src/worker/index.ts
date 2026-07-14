@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import type { TestResult } from "../types/contracts.js";
+import type { TestResult, FailureDetail } from "../types/contracts.js";
 import type { ToWorker, FromWorker } from "../types/ipc.js";
 
 // Minimal structural typing for the parts of the Vitest reporter API we consume.
@@ -8,6 +8,10 @@ import type { ToWorker, FromWorker } from "../types/ipc.js";
 interface VError {
   message?: string;
   stack?: string;
+  name?: string;
+  expected?: string;
+  actual?: string;
+  diff?: string;
 }
 interface VTestResult {
   state: "passed" | "failed" | "skipped" | "pending";
@@ -117,8 +121,62 @@ export function mapModulesToResult(
   };
 }
 
-/** Resolve the PROJECT's Vitest and run it programmatically, returning a TestResult. */
-export async function runVitest(cwd: string, files: string[]): Promise<TestResult> {
+/** Build the on-demand failure detail list. Ids match mapModulesToResult's compact failures. */
+export function mapFailureDetails(
+  modules: ReadonlyArray<VTestModule>,
+  unhandled: ReadonlyArray<VError>,
+): FailureDetail[] {
+  const details: FailureDetail[] = [];
+
+  for (const m of modules) {
+    for (const err of m.errors()) {
+      details.push({
+        id: `${m.moduleId}::collect`,
+        name: "(module load error)",
+        file: m.moduleId,
+        message: err.message ?? "Module failed to load",
+        stack: err.stack,
+        expected: err.expected,
+        actual: err.actual,
+        diff: err.diff,
+      });
+    }
+    for (const tc of m.children.allTests()) {
+      const r = tc.result();
+      if (r.state === "failed" || r.state === "pending") {
+        const e = r.errors?.[0];
+        details.push({
+          id: tc.id,
+          name: tc.fullName,
+          file: tc.module.moduleId,
+          message: e?.message ?? (r.state === "pending" ? "Test still pending" : "Test failed"),
+          stack: e?.stack,
+          expected: e?.expected,
+          actual: e?.actual,
+          diff: e?.diff,
+        });
+      }
+    }
+  }
+
+  unhandled.forEach((err, i) => {
+    details.push({
+      id: `unhandled-${i}`,
+      name: "(unhandled error)",
+      file: "",
+      message: err.message ?? "Unhandled error during run",
+      stack: err.stack,
+    });
+  });
+
+  return details;
+}
+
+/** Resolve the PROJECT's Vitest and run it programmatically, returning result + failure details. */
+export async function runVitest(
+  cwd: string,
+  files: string[],
+): Promise<{ result: TestResult; failureDetails: FailureDetail[] }> {
   // Resolve vitest from the project's own node_modules (walks up from cwd).
   const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
   const { startVitest } = projectRequire("vitest/node") as VitestNode;
@@ -143,7 +201,10 @@ export async function runVitest(cwd: string, files: string[]): Promise<TestResul
     throw new Error("Vitest failed to start");
   }
   try {
-    return mapModulesToResult(modules, unhandled, wallClockMs, files);
+    return {
+      result: mapModulesToResult(modules, unhandled, wallClockMs, files),
+      failureDetails: mapFailureDetails(modules, unhandled),
+    };
   } finally {
     await vitest.close();
   }
@@ -158,7 +219,7 @@ if (process.send) {
   process.on("message", (msg: ToWorker) => {
     if (msg.type === "run") {
       runVitest(process.cwd(), msg.files)
-        .then((result) => send({ type: "result", runId: msg.runId, result }))
+        .then(({ result, failureDetails }) => send({ type: "result", runId: msg.runId, result, failureDetails }))
         .catch((err: unknown) =>
           send({
             type: "error",

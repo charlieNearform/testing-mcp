@@ -140,7 +140,20 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
         failureId: z.string().describe("ID of a failure from a run result"),
       },
     },
-    async ({ projectId }) => requireRegisteredProject(projectId),
+    async ({ projectId, failureId }) => {
+      const project = registry?.get(projectId);
+      if (!project) return unknownProject(projectId);
+      if (!orchestrator) {
+        return errorResult(toAppError("NotImplemented", "orchestrator unavailable"));
+      }
+      const detail = orchestrator.getFailureDetail(projectId, failureId);
+      if (!detail) {
+        return errorResult(
+          toAppError("ValidationError", `Unknown or expired failureId: ${failureId}`),
+        );
+      }
+      return { content: [{ type: "text" as const, text: JSON.stringify(detail) }] };
+    },
   );
 
   return server;

@@ -1,6 +1,8 @@
+baseline_commit: 46f2d19bc4f6e88b803ed1a2856df2bc701cddb7
+
 # Story 2.2: Structured Results & Failure Detail
 
-Status: ready-for-dev
+Status: done
 
 **Prerequisite:** Story 2.1 complete (`Orchestrator` + project-local worker + `run_tests`, all `done`). Build on that code in place.
 
@@ -378,9 +380,50 @@ Vitest, `environment: node`. Exercised end-to-end through the in-memory MCP tran
 ## Dev Agent Record
 
 ### Agent Model Used
+qwen3-coder-next
 
 ### Debug Log References
 
-### Completion Notes List
+### Completion Notes
+Successfully implemented Story 2.2: Structured Results & Failure Detail.
+
+**Changes made:**
+1. Added `FailureDetail` interface to `src/types/contracts.ts` with fields: id, name, file, message, stack?, expected?, actual?, diff?
+2. Updated `FromWorker` IPC type in `src/types/ipc.ts` to include optional `failureDetails` array
+3. Extended worker VError interface to carry assertion fields (name, expected, actual, diff)
+4. Added `mapFailureDetails()` function in `src/worker/index.ts` that builds detailed failure list matching compact failure IDs
+5. Modified `runVitest()` to return both result and failureDetails
+6. Updated worker IPC handler to send failureDetails in result messages
+7. Added `lastFailures` cache map to Orchestrator class for caching failure details per project
+8. Cached failure details in orchestrator's execute() method when receiving result from worker
+9. Added `getFailureDetail()` public accessor to retrieve cached failure details
+10. Implemented `get_failure_details` MCP handler that validates project registration and returns full failure detail or appropriate error
+11. Created comprehensive test file `test/failure-details.test.ts` verifying:
+    - Full failure detail returned on demand (with stack, expected, actual)
+    - Compact result contains no stacks (progressive disclosure)
+    - ValidationError for unknown failureId
+    - UnknownProject error for unregistered projects
+
+**Verification results:**
+- `pnpm run typecheck`: exit 0
+- `pnpm run build`: exit 0  
+- `pnpm test`: 54 tests passed (including new failure-details test)
 
 ### File List
+- src/types/contracts.ts
+- src/types/ipc.ts
+- src/worker/index.ts
+- src/orchestrator/index.ts
+- src/mcp/server.ts
+- test/failure-details.test.ts (new)
+
+### Review Findings
+
+- [x] [Review][Patch] Stale failure cache survives a failed subsequent run [src/orchestrator/index.ts:98-122] — `lastFailures` is only replaced on a successful `"result"` IPC message; worker error, timeout, and exit paths leave the prior map in place, so `get_failure_details` can return details from an older run after `run_tests` rejects.
+- [x] [Review][Patch] Test file uses `.js` imports instead of story-required `.ts` [test/failure-details.test.ts:8-10] — sibling MCP tests (`mcp-run-tests.test.ts`) and the story Task 5 spec use `../src/.../*.ts` on relative source paths.
+- [x] [Review][Patch] Error-path tests omit `isError` assertions [test/failure-details.test.ts:63-74] — other MCP tests (`mcp-registry.test.ts`, `mcp-server.test.ts`) assert `isError` alongside parsed `code`.
+- [x] [Review][Patch] No test for expired `failureId` after a second successful run [test/failure-details.test.ts] — AC2 "unknown/expired" semantics are only exercised for a never-seen id, not cache replacement across consecutive runs.
+- [x] [Review][Patch] Stale JSDoc on `runVitest` [src/worker/index.ts:175] — comment still says "returning a TestResult" but the function now returns `{ result, failureDetails }`.
+- [x] [Review][Defer] Duplicate `${moduleId}::collect` ids collapse in orchestrator Map [src/worker/index.ts:132-137, src/orchestrator/index.ts:103] — deferred, pre-existing: `mapModulesToResult` already emits duplicate ids for multiple module collection errors (Story 2.1); Story 2.2 correctly mirrors that scheme.
+- [x] [Review][Defer] `get_failure_details` during in-flight `run_tests` returns prior run's cache [src/orchestrator/index.ts:127] — deferred, pre-existing: lookups are not serialized with the per-project run queue; acceptable for Phase 1 in-memory cache semantics.
+- [x] [Review][Defer] Unregister does not evict `lastFailures` entries [src/orchestrator/index.ts:36] — deferred, pre-existing: same pattern as `queues`; out of Story 2.2 scope.

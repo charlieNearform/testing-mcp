@@ -2,7 +2,7 @@ import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { TestResult } from "../types/contracts.js";
+import type { TestResult, FailureDetail } from "../types/contracts.js";
 import type { ToWorker, FromWorker } from "../types/ipc.js";
 
 /** The minimal project shape the orchestrator needs (matches RegisteredProject). */
@@ -32,6 +32,8 @@ export class Orchestrator {
   private readonly runTimeoutMs: number;
   /** Per-project promise chain so a project runs one suite at a time (architecture: per-project serialization). */
   private readonly queues = new Map<string, Promise<unknown>>();
+  /** Most recent run's failure details per project, keyed projectId -> (failureId -> detail). */
+  private readonly lastFailures = new Map<string, Map<string, FailureDetail>>();
 
   constructor(opts: OrchestratorOptions = {}) {
     // In production this module runs from dist/, so ../worker/index.js resolves to dist/worker/index.js.
@@ -52,6 +54,10 @@ export class Orchestrator {
   private execute(project: ProjectRef, files: string[]): Promise<TestResult> {
     return new Promise<TestResult>((resolve, reject) => {
       const runId = randomUUID();
+      const failRun = (err: WorkerError): void => {
+        this.lastFailures.delete(project.projectId);
+        reject(err);
+      };
       const workerEnv: NodeJS.ProcessEnv = {
         PATH: process.env.PATH,
         HOME: process.env.HOME,
@@ -69,7 +75,7 @@ export class Orchestrator {
 
       let settled = false;
       const timer = setTimeout(() => {
-        finish(() => reject(new WorkerError(`worker timed out after ${this.runTimeoutMs}ms`)));
+        finish(() => failRun(new WorkerError(`worker timed out after ${this.runTimeoutMs}ms`)));
       }, this.runTimeoutMs);
 
       const finish = (act: () => void): void => {
@@ -91,30 +97,40 @@ export class Orchestrator {
             allTestsRun: files.length === 0,
           };
           if (!child.send(runMsg)) {
-            finish(() => reject(new WorkerError("IPC send failed")));
+            finish(() => failRun(new WorkerError("IPC send failed")));
           }
         } else if (msg.type === "result" && msg.runId === runId) {
           if (!msg.result) {
-            finish(() => reject(new WorkerError("worker returned no result")));
+            finish(() => failRun(new WorkerError("worker returned no result")));
           } else {
+            const map = new Map<string, FailureDetail>();
+            for (const d of msg.failureDetails ?? []) map.set(d.id, d);
+            this.lastFailures.set(project.projectId, map);
             finish(() => resolve(msg.result));
           }
         } else if (msg.type === "error" && msg.runId === runId) {
-          finish(() => reject(new WorkerError(msg.message)));
+          finish(() => failRun(new WorkerError(msg.message)));
         } else if (
           (msg.type === "result" || msg.type === "error") &&
           msg.runId !== runId
         ) {
           finish(() =>
-            reject(new WorkerError(`unexpected IPC ${msg.type} for run ${runId}`)),
+            failRun(new WorkerError(`unexpected IPC ${msg.type} for run ${runId}`)),
           );
         }
       });
 
-      child.on("error", (err) => finish(() => reject(new WorkerError(err.message))));
+      child.on("error", (err) => finish(() => failRun(new WorkerError(err.message))));
       child.on("exit", (code) =>
-        finish(() => reject(new WorkerError(`worker exited (code ${code}) before returning a result`))),
+        finish(() =>
+          failRun(new WorkerError(`worker exited (code ${code}) before returning a result`)),
+        ),
       );
     });
+  }
+
+  /** Look up a failure from the project's most recent run. */
+  getFailureDetail(projectId: string, failureId: string): FailureDetail | undefined {
+    return this.lastFailures.get(projectId)?.get(failureId);
   }
 }

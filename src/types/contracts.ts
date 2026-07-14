@@ -26,6 +26,18 @@ export interface TestResult {
   };
 }
 
+/** Full detail for a single failure, returned on demand by get_failure_details (Story 2.2). */
+export interface FailureDetail {
+  id: string;
+  name: string;
+  file: string;
+  message: string;
+  stack?: string;
+  expected?: string;
+  actual?: string;
+  diff?: string;
+}
+
 export interface TestPlan {
   planId: string;
   files: string[];
