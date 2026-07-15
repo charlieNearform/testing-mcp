@@ -7,6 +7,7 @@ import {
   isPidAlive,
 } from "../daemon/index.js";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -72,6 +73,40 @@ function ensureGitignore(gitRoot: string): void {
 function binPath(): string {
   // dist/cli/main.js -> ../../bin/test-mcp.mjs
   return fileURLToPath(new URL("../../bin/test-mcp.mjs", import.meta.url));
+}
+
+/** Directories on the user's PATH, in order. */
+function pathDirs(): string[] {
+  return (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+}
+
+function isWritableDir(dir: string): boolean {
+  try {
+    if (!fs.statSync(dir).isDirectory()) return false;
+    fs.accessSync(dir, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Choose where to symlink the CLI. Explicit `dir` wins; otherwise prefer a stable,
+ * user-writable location already on PATH, falling back to the first writable PATH entry.
+ */
+function resolveLinkDir(explicit?: string): string {
+  if (explicit) return path.resolve(explicit);
+  const preferred = ["/opt/homebrew/bin", "/usr/local/bin", path.join(os.homedir(), ".local", "bin")];
+  const onPath = new Set(pathDirs());
+  for (const dir of preferred) {
+    if (onPath.has(dir) && isWritableDir(dir)) return dir;
+  }
+  for (const dir of pathDirs()) {
+    if (isWritableDir(dir)) return dir;
+  }
+  throw new Error(
+    "no writable directory found on PATH; pass --dir <dir> (and ensure it is on your PATH)",
+  );
 }
 
 /** Ensure the singleton daemon is running; auto-boot it detached unless noSpawn. Returns the lockfile. */
@@ -227,6 +262,93 @@ program
       process.exit(0);
     } catch (err) {
       console.error(`test-mcp status: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("link")
+  .description("Symlink the test-mcp CLI into a directory on your PATH")
+  .option("--dir <dir>", "target directory (default: a writable directory already on PATH)")
+  .option("-f, --force", "overwrite an existing test-mcp entry")
+  .action((opts: { dir?: string; force?: boolean }) => {
+    try {
+      const dir = resolveLinkDir(opts.dir);
+      const target = binPath();
+      const linkPath = path.join(dir, "test-mcp");
+      let existing: fs.Stats | undefined;
+      try {
+        existing = fs.lstatSync(linkPath);
+      } catch {
+        // nothing there yet
+      }
+      if (existing) {
+        const current = existing.isSymbolicLink() ? fs.readlinkSync(linkPath) : undefined;
+        if (current === target) {
+          console.log(`test-mcp link: already linked at ${linkPath}`);
+          process.exit(0);
+        }
+        if (!opts.force) {
+          console.error(`test-mcp link: ${linkPath} already exists; pass --force to overwrite`);
+          process.exit(1);
+        }
+        fs.rmSync(linkPath, { force: true });
+      }
+      fs.symlinkSync(target, linkPath);
+      console.log(`test-mcp link: linked -> ${linkPath}`);
+      if (!new Set(pathDirs()).has(dir)) {
+        console.error(`test-mcp link: warning — ${dir} is not on your PATH; add it to use \`test-mcp\` directly`);
+      }
+      process.exit(0);
+    } catch (err) {
+      console.error(`test-mcp link: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("unlink")
+  .description("Remove a test-mcp symlink created by `link`")
+  .option("--dir <dir>", "directory to remove from (default: search PATH)")
+  .option("-f, --force", "remove even if it points elsewhere")
+  .action((opts: { dir?: string; force?: boolean }) => {
+    try {
+      const target = binPath();
+      const dirs = opts.dir ? [path.resolve(opts.dir)] : pathDirs();
+      for (const dir of dirs) {
+        const linkPath = path.join(dir, "test-mcp");
+        let st: fs.Stats;
+        try {
+          st = fs.lstatSync(linkPath);
+        } catch {
+          continue; // nothing here
+        }
+        // Never remove a real binary — only symlinks are ours to delete.
+        if (!st.isSymbolicLink()) {
+          if (opts.dir) {
+            console.error(`test-mcp unlink: ${linkPath} is not a symlink; refusing to remove`);
+            process.exit(1);
+          }
+          continue;
+        }
+        const points = fs.readlinkSync(linkPath);
+        if (points !== target && !opts.force) {
+          if (opts.dir) {
+            console.error(
+              `test-mcp unlink: ${linkPath} points to ${points}, not this package; pass --force`,
+            );
+            process.exit(1);
+          }
+          continue; // a different test-mcp; leave it alone when scanning
+        }
+        fs.rmSync(linkPath, { force: true });
+        console.log(`test-mcp unlink: removed ${linkPath}`);
+        process.exit(0);
+      }
+      console.log("test-mcp unlink: no test-mcp symlink found");
+      process.exit(0);
+    } catch (err) {
+      console.error(`test-mcp unlink: ${(err as Error).message}`);
       process.exit(1);
     }
   });
