@@ -41,6 +41,11 @@ Security**, referencing the GitHub issue (`#123`) where applicable.
 
 ### Added
 
+- Monitoring UI drill-down: the daemon keeps an in-memory run history (last ~50 runs per
+  project) and the `/ui` page is now a small SPA — click a project to see its run history,
+  and a run to see its selection (strategy + test files + reason), counts, duration, and
+  failure details. New endpoints `/ui/api/projects/:id/runs` and `…/runs/:runId`. Live via
+  the existing SSE stream. History is in-memory (resets on daemon restart).
 - `docs/usage.md`: a how-to-run guide covering the daemon lifecycle, project registration,
   the MCP tool catalog, watch mode, the monitoring UI, CI usage, configuration, and
   troubleshooting.

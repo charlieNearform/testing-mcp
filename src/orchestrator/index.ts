@@ -40,6 +40,21 @@ export interface RunStatus {
   updatedAt?: string;
 }
 
+/** A completed run retained in the in-memory history ring buffer (for the monitoring UI). */
+export interface RunRecord {
+  runId: string;
+  projectId: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  status: "complete" | "error";
+  error?: string;
+  /** Present for completed runs — carries selection, counts and the failures summary. */
+  result?: TestResult;
+  /** Full failure detail (stack/diff) for drill-down; empty for error/passing runs. */
+  failures: FailureDetail[];
+}
+
 /** Concrete, resolved execution parameters plus human-facing selection info. */
 interface ResolvedSelection {
   files: string[];
@@ -87,6 +102,9 @@ export class Orchestrator {
   private readonly plans = new Map<string, StoredPlan>();
   /** Pollable run state per project (Story 4.2). */
   private readonly runState = new Map<string, RunStatus>();
+  /** In-memory run history per project (newest first), capped at maxHistory (UI drill-down). */
+  private readonly history = new Map<string, RunRecord[]>();
+  private readonly maxHistory = 50;
   /** Status-change subscribers (Story 5.1 UI push). */
   private readonly statusListeners = new Set<() => void>();
 
@@ -197,6 +215,17 @@ export class Orchestrator {
     const run = prev.catch(() => undefined).then(() => {
       if (sel.empty) {
         const result = emptyResult(sel.reason);
+        const now = new Date().toISOString();
+        this.recordRun({
+          runId: randomUUID(),
+          projectId: project.projectId,
+          startedAt: now,
+          finishedAt: now,
+          durationMs: 0,
+          status: "complete",
+          result,
+          failures: [],
+        });
         this.setRunState(project.projectId, {
           state: "complete",
           lastResult: result,
@@ -278,6 +307,8 @@ export class Orchestrator {
   ): Promise<TestResult> {
     return new Promise<TestResult>((resolve, reject) => {
       const runId = randomUUID();
+      const startedAt = new Date().toISOString();
+      const startMs = Date.now();
       this.setRunState(project.projectId, {
         state: "running",
         progress: undefined,
@@ -285,6 +316,16 @@ export class Orchestrator {
       });
       const failRun = (err: WorkerError): void => {
         this.lastFailures.delete(project.projectId);
+        this.recordRun({
+          runId,
+          projectId: project.projectId,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          durationMs: Date.now() - startMs,
+          status: "error",
+          error: err.message,
+          failures: [],
+        });
         this.setRunState(project.projectId, { state: "error", lastError: err.message, progress: undefined });
         reject(err);
       };
@@ -357,10 +398,21 @@ export class Orchestrator {
           if (!msg.result) {
             finish(() => failRun(new WorkerError("worker returned no result")));
           } else {
+            const failureDetails = msg.failureDetails ?? [];
             const map = new Map<string, FailureDetail>();
-            for (const d of msg.failureDetails ?? []) map.set(d.id, d);
+            for (const d of failureDetails) map.set(d.id, d);
             this.lastFailures.set(project.projectId, map);
             const result = msg.result;
+            this.recordRun({
+              runId,
+              projectId: project.projectId,
+              startedAt,
+              finishedAt: new Date().toISOString(),
+              durationMs: Date.now() - startMs,
+              status: "complete",
+              result,
+              failures: failureDetails,
+            });
             this.setRunState(project.projectId, {
               state: "complete",
               lastResult: result,
@@ -397,6 +449,24 @@ export class Orchestrator {
   /** Current pollable run state for a project (Story 4.2). */
   getRunStatus(projectId: string): RunStatus {
     return this.runState.get(projectId) ?? { state: "idle" };
+  }
+
+  /** Retained run history for a project, newest first (in-memory, capped). */
+  getRunHistory(projectId: string): RunRecord[] {
+    return this.history.get(projectId) ?? [];
+  }
+
+  /** A single retained run by id, or undefined if evicted/unknown. */
+  getRun(projectId: string, runId: string): RunRecord | undefined {
+    return this.history.get(projectId)?.find((r) => r.runId === runId);
+  }
+
+  /** Append a completed run to the project's history ring buffer (newest first, capped). */
+  private recordRun(record: RunRecord): void {
+    const list = this.history.get(record.projectId) ?? [];
+    list.unshift(record);
+    if (list.length > this.maxHistory) list.length = this.maxHistory;
+    this.history.set(record.projectId, list);
   }
 
   /** Subscribe to run-state changes (Story 5.1 UI push). Returns an unsubscribe fn. */

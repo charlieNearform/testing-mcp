@@ -238,9 +238,17 @@ open "$(test-mcp ui)"  # macOS: open it directly
 
 (`test-mcp register` also prints the UI link on success.)
 
-- `GET /ui` — live status page (no bearer required; loopback-gated, GET-only).
-- `GET /ui/api/status` — JSON snapshot.
+- `GET /ui` — live status page (no bearer required; loopback-gated, GET-only). Updates live
+  via Server-Sent Events (no manual refresh). Click a project to see its **run history**, and
+  a run to see what it did: selection (strategy + which test files ran + why), pass/fail
+  counts, duration, and failure details.
+- `GET /ui/api/status` — JSON snapshot of all projects.
+- `GET /ui/api/projects/:projectId/runs` — run history (summaries, newest first).
+- `GET /ui/api/projects/:projectId/runs/:runId` — full detail for one run.
 - `GET /ui/events` — Server-Sent Events stream of live updates.
+
+Run history is kept **in memory** (last ~50 runs per project) and resets when the daemon
+restarts.
 
 `GET /health` (or `/`) returns `{ status: "ok", daemon: "test-mcp" }` — a quick liveness
 check that also needs no auth.

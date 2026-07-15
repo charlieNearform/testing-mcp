@@ -144,10 +144,11 @@ All files are JSON with a `schemaVersion`. Locations per invariant 3.
 }
 ```
 
-**Run history** (repo, `<git-root>/.test-mcp/history/*.json`) — **planned, not yet
-implemented**: per-run records (counts, duration, failures, selection reasoning, and
-Phase-2 failure/flake stats). Today run results are held only in memory
-(`get_test_status.lastResult`).
+**Run history** — an **in-memory** ring buffer in the daemon (newest first, capped per
+project) holding each completed run: id, timestamps, duration, status, selection (strategy +
+files + reason), counts, and failure details. Served to the monitoring UI
+(`/ui/api/projects/:id/runs` and `/ui/api/projects/:id/runs/:runId`). It resets on daemon
+restart; **on-disk** persistence (`<git-root>/.test-mcp/history/*.json`) is still planned.
 
 **Plan cache** (in-memory, daemon) — `planId → { projectId, files, reasoning, createdAt }`
 with short TTL; used by the dry-run → commit flow.

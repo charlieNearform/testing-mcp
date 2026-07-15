@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ProjectRegistry } from "../registry/project-registry.js";
-import type { Orchestrator } from "../orchestrator/index.js";
+import type { Orchestrator, RunRecord } from "../orchestrator/index.js";
 
 /**
  * Human Monitoring UI (Epic 5, Phase 2). A convenience web view served by the daemon on
@@ -18,6 +18,7 @@ interface ProjectView {
   projectId: string;
   path: string;
   registryStatus: string;
+  runCount: number;
   run: {
     state: string;
     progress?: { completed: number; total: number };
@@ -27,6 +28,26 @@ interface ProjectView {
     passed?: number;
     failed?: number;
     updatedAt?: string;
+  };
+}
+
+/** Compact run summary for the history list (heavy fields dropped). */
+function runSummary(rec: RunRecord) {
+  const r = rec.result;
+  return {
+    runId: rec.runId,
+    startedAt: rec.startedAt,
+    finishedAt: rec.finishedAt,
+    durationMs: rec.durationMs,
+    status: rec.status,
+    error: rec.error,
+    success: r?.success,
+    strategy: r?.selection.strategy,
+    reason: r?.selection.reason,
+    total: r?.total,
+    passed: r?.passed,
+    failed: r?.failed,
+    skipped: r?.skipped,
   };
 }
 
@@ -42,6 +63,7 @@ export async function uiSnapshot(deps: UiDeps): Promise<{ serverTime: string; pr
         projectId: p.projectId,
         path: p.path,
         registryStatus: p.status,
+        runCount: deps.orchestrator?.getRunHistory(p.projectId).length ?? 0,
         run: {
           state: run.state,
           progress: run.progress,
@@ -114,6 +136,29 @@ export async function handleUiRequest(
     return true;
   }
 
+  // /ui/api/projects/<projectId>/runs            -> run history (summaries, newest first)
+  // /ui/api/projects/<projectId>/runs/<runId>     -> full run detail (selection + failures)
+  const parts = path.split("/").filter(Boolean); // ["ui","api","projects",pid,"runs",runId?]
+  if (parts[0] === "ui" && parts[1] === "api" && parts[2] === "projects" && parts[4] === "runs") {
+    const projectId = decodeURIComponent(parts[3]);
+    const runId = parts[5] ? decodeURIComponent(parts[5]) : undefined;
+    if (runId) {
+      const rec = deps.orchestrator?.getRun(projectId, runId);
+      if (!rec) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ code: "ValidationError", message: "Unknown run" }));
+        return true;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(rec));
+      return true;
+    }
+    const runs = (deps.orchestrator?.getRunHistory(projectId) ?? []).map(runSummary);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ projectId, runs }));
+    return true;
+  }
+
   res.writeHead(404, { "content-type": "application/json" });
   res.end(JSON.stringify({ code: "ValidationError", message: "Not found" }));
   return true;
@@ -135,8 +180,11 @@ const UI_HTML = `<!doctype html>
   header h1 { font-size:16px; margin:0; font-weight:600; }
   .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
   .dot.live { background:var(--ok); box-shadow:0 0 8px var(--ok); }
-  main { padding:24px; display:grid; gap:16px; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  main { padding:24px; }
+  a { color:inherit; text-decoration:none; }
+  .grid { display:grid; gap:16px; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; display:block; }
+  a.card:hover { border-color:var(--muted); }
   .card h2 { font-size:14px; margin:0 0 4px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
   .path { color:var(--muted); font-size:12px; word-break:break-all; margin-bottom:12px; }
   .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; }
@@ -148,10 +196,25 @@ const UI_HTML = `<!doctype html>
   .summary.fail { color:var(--fail); }
   .counts { margin-top:10px; display:flex; gap:14px; font-size:13px; }
   .counts b.ok{ color:var(--ok); } .counts b.fail{ color:var(--fail); } .counts b.skip{ color:var(--muted); }
-  .bar { margin-top:10px; height:6px; border-radius:3px; background:#21262d; overflow:hidden; }
-  .bar > i { display:block; height:100%; background:var(--run); transition:width .2s; }
-  .empty { color:var(--muted); padding:40px; text-align:center; grid-column:1/-1; }
+  .empty { color:var(--muted); padding:40px; text-align:center; }
   .ts { color:var(--muted); font-size:11px; margin-top:10px; }
+  .back { color:var(--muted); font-size:13px; display:inline-block; margin-bottom:16px; }
+  .back:hover { color:var(--text); }
+  h2.mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:15px; margin:0 0 4px; }
+  .ok { color:var(--ok); } .fail { color:var(--fail); }
+  table.runs { width:100%; border-collapse:collapse; font-size:13px; margin-top:12px; }
+  table.runs th { text-align:left; color:var(--muted); font-weight:500; padding:8px 10px; border-bottom:1px solid var(--border); }
+  table.runs td { padding:8px 10px; border-bottom:1px solid var(--border); }
+  table.runs tr.row:hover { background:var(--card); cursor:pointer; }
+  .detail-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; margin:14px 0; }
+  .kv { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
+  .kv .k { color:var(--muted); font-size:11px; } .kv .v { font-size:15px; margin-top:2px; }
+  .section-title { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; margin:22px 0 8px; }
+  ul.files { list-style:none; padding:0; margin:8px 0; }
+  ul.files li { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; padding:3px 0; }
+  .fail-item { background:var(--card); border:1px solid var(--border); border-left:3px solid var(--fail); border-radius:6px; padding:10px 12px; margin:8px 0; }
+  .fail-item .name { font-weight:600; } .fail-item .loc { color:var(--muted); font-size:12px; margin-top:2px; }
+  pre { background:#0d1117; border:1px solid var(--border); border-radius:6px; padding:10px; overflow-x:auto; font-size:12px; margin:8px 0 0; }
 </style>
 </head>
 <body>
@@ -160,32 +223,115 @@ const UI_HTML = `<!doctype html>
 <script>
 const app = document.getElementById("app");
 const live = document.getElementById("live");
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let snapshot = { projects: [], serverTime: null };
+
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmtTime = (t) => t ? new Date(t).toLocaleTimeString() : "";
+const fmtDur = (ms) => (ms == null) ? "" : (ms < 1000 ? ms + "ms" : (ms / 1000).toFixed(1) + "s");
+const badge = (s) => '<span class="badge ' + esc(s || "idle") + '">' + esc(s || "idle") + '</span>';
+const go = (path) => { location.hash = "#" + path; };
+const routeParts = () => (location.hash || "#/").slice(1).split("/").filter(Boolean);
+async function getJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }
+
 function card(p) {
   const r = p.run || {};
-  const pct = r.progress && r.progress.total ? Math.round(100 * r.progress.completed / r.progress.total) : 0;
-  const bar = r.state === "running" ? '<div class="bar"><i style="width:'+pct+'%"></i></div>' : "";
-  const counts = (r.total != null) ? '<div class="counts"><span>total <b>'+r.total+'</b></span>'
-    + '<span>pass <b class="ok">'+(r.passed||0)+'</b></span>'
-    + '<span>fail <b class="fail">'+(r.failed||0)+'</b></span></div>' : "";
-  const summary = r.summary ? '<div class="summary '+(r.failed?'fail':'')+'">'+esc(r.summary)+'</div>' : "";
-  const ts = r.updatedAt ? '<div class="ts">updated '+new Date(r.updatedAt).toLocaleTimeString()+'</div>' : "";
-  return '<div class="card"><h2>'+esc(p.projectId)+'</h2><div class="path">'+esc(p.path)+'</div>'
-    + '<span class="badge '+esc(r.state||"idle")+'">'+esc(r.state||"idle")+'</span>'
-    + bar + counts + summary + ts + '</div>';
+  const counts = (r.total != null) ? '<div class="counts"><span>total <b>' + r.total + '</b></span>'
+    + '<span>pass <b class="ok">' + (r.passed || 0) + '</b></span>'
+    + '<span>fail <b class="fail">' + (r.failed || 0) + '</b></span></div>' : "";
+  const summary = r.summary ? '<div class="summary ' + (r.failed ? 'fail' : '') + '">' + esc(r.summary) + '</div>' : "";
+  const n = p.runCount || 0;
+  const runs = '<div class="ts">' + n + ' run' + (n === 1 ? '' : 's') + ' · click for history</div>';
+  return '<a class="card" href="#/project/' + encodeURIComponent(p.projectId) + '">'
+    + '<h2>' + esc(p.projectId) + '</h2><div class="path">' + esc(p.path) + '</div>'
+    + badge(r.state) + counts + summary + runs + '</a>';
 }
-function render(snap) {
-  const ps = snap.projects || [];
-  document.getElementById("clock").textContent = new Date(snap.serverTime).toLocaleTimeString();
-  app.innerHTML = ps.length ? ps.map(card).join("") : '<div class="empty">No projects registered.</div>';
+
+function renderList() {
+  document.getElementById("clock").textContent = fmtTime(snapshot.serverTime);
+  const ps = snapshot.projects || [];
+  app.innerHTML = ps.length
+    ? '<div class="grid">' + ps.map(card).join("") + '</div>'
+    : '<div class="empty">No projects registered.</div>';
 }
+
+async function renderProject(pid) {
+  const head = '<a class="back" href="#/">← projects</a><h2 class="mono">' + esc(pid) + '</h2>';
+  app.innerHTML = head + '<div class="empty">Loading…</div>';
+  let data;
+  try { data = await getJSON("/ui/api/projects/" + encodeURIComponent(pid) + "/runs"); }
+  catch (e) { app.innerHTML = head + '<div class="empty">Failed to load runs.</div>'; return; }
+  const runs = data.runs || [];
+  if (!runs.length) { app.innerHTML = head + '<div class="empty">No runs yet — trigger one via run_tests.</div>'; return; }
+  const rows = runs.map((r) =>
+    '<tr class="row" data-run="' + esc(r.runId) + '">'
+    + '<td>' + fmtTime(r.startedAt) + '</td>'
+    + '<td>' + badge(r.status) + '</td>'
+    + '<td>' + esc(r.strategy || "") + '</td>'
+    + '<td><b class="ok">' + (r.passed != null ? r.passed : "–") + '</b> / <b class="fail">' + (r.failed != null ? r.failed : "–") + '</b> of ' + (r.total != null ? r.total : "–") + '</td>'
+    + '<td>' + fmtDur(r.durationMs) + '</td></tr>').join("");
+  app.innerHTML = head + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / fail</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  app.querySelectorAll("tr.row").forEach((el) => {
+    el.addEventListener("click", () => go("/project/" + encodeURIComponent(pid) + "/run/" + encodeURIComponent(el.getAttribute("data-run"))));
+  });
+}
+
+async function renderRun(pid, runId) {
+  const back = '<a class="back" href="#/project/' + encodeURIComponent(pid) + '">← runs</a>';
+  app.innerHTML = back + '<div class="empty">Loading…</div>';
+  let rec;
+  try { rec = await getJSON("/ui/api/projects/" + encodeURIComponent(pid) + "/runs/" + encodeURIComponent(runId)); }
+  catch (e) { app.innerHTML = back + '<div class="empty">Run not found (evicted from in-memory history?).</div>'; return; }
+  const res = rec.result || {};
+  const sel = res.selection || {};
+  const kv = (k, v) => '<div class="kv"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
+  const resultCell = res.success == null ? "–" : (res.success ? '<span class="ok">pass</span>' : '<span class="fail">fail</span>');
+  const grid = '<div class="detail-grid">'
+    + kv("status", badge(rec.status)) + kv("result", resultCell)
+    + kv("tests", res.total != null ? res.total : "–")
+    + kv("passed", '<span class="ok">' + (res.passed != null ? res.passed : "–") + '</span>')
+    + kv("failed", '<span class="fail">' + (res.failed != null ? res.failed : "–") + '</span>')
+    + kv("duration", fmtDur(rec.durationMs)) + '</div>';
+  const files = (sel.files && sel.files.length)
+    ? '<ul class="files">' + sel.files.map((f) => '<li>' + esc(f) + '</li>').join("") + '</ul>'
+    : '<div class="ts">' + (sel.strategy === "full" ? "full suite (all test files)" : "no specific files") + '</div>';
+  const fails = (rec.failures && rec.failures.length)
+    ? '<div class="section-title">failures</div>' + rec.failures.map((f) =>
+        '<div class="fail-item"><div class="name">' + esc(f.name) + '</div>'
+        + '<div class="loc">' + esc(f.file || "") + '</div>'
+        + (f.message ? '<pre>' + esc(f.message) + '</pre>' : "")
+        + (f.stack ? '<pre>' + esc(f.stack) + '</pre>' : "") + '</div>').join("")
+    : (rec.status === "error" ? '<div class="section-title">error</div><pre>' + esc(rec.error || "") + '</pre>' : "");
+  app.innerHTML = back
+    + '<h2 class="mono">run ' + esc(String(runId).slice(0, 8)) + '…</h2>'
+    + '<div class="ts">' + fmtTime(rec.startedAt) + ' · ' + esc(sel.reason || "") + '</div>'
+    + grid
+    + '<div class="section-title">selection (' + esc(sel.strategy || "?") + ')</div>' + files
+    + fails;
+}
+
+function render() {
+  const p = routeParts();
+  if (p[0] === "project" && p[2] === "run") return renderRun(decodeURIComponent(p[1]), decodeURIComponent(p[3]));
+  if (p[0] === "project") return renderProject(decodeURIComponent(p[1]));
+  return renderList();
+}
+
+window.addEventListener("hashchange", render);
+
 function connect() {
   const es = new EventSource("/ui/events");
   es.onopen = () => live.classList.add("live");
-  es.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch {} };
-  es.onerror = () => { live.classList.remove("live"); /* EventSource auto-reconnects */ };
+  es.onmessage = (e) => {
+    try { snapshot = JSON.parse(e.data); } catch (_) { return; }
+    const p = routeParts();
+    // Live-refresh the list and the project history view; a run detail is immutable.
+    if (p.length === 0) renderList();
+    else if (p[0] === "project" && p.length === 1) render();
+  };
+  es.onerror = () => { live.classList.remove("live"); };
 }
 connect();
+render();
 </script>
 </body>
 </html>`;
