@@ -108,30 +108,53 @@ test-mcp stop
 `--no-spawn` makes `register` error out instead of starting a daemon, so a
 misconfigured job fails loudly.
 
-## Calling the MCP tools
+## Connecting an AI agent (MCP client config)
 
-The daemon speaks MCP over **Streamable HTTP** at `http://127.0.0.1:<port>/mcp`. Point any
-MCP client at that URL and send the bearer token from the lockfile.
-
-```jsonc
-// Example MCP client config (URL + auth header).
-// The token is stable across restarts — read it once from ~/.test-mcp/config.json
-// (or daemon.lock), or pin your own via the TEST_MCP_TOKEN env var.
-{
-  "url": "http://127.0.0.1:7420/mcp",
-  "headers": { "Authorization": "Bearer <token>" }
-}
-```
-
-Pin a known token so the client config never needs updating:
+The daemon speaks MCP over **Streamable HTTP** at `http://127.0.0.1:<port>/mcp`, gated by the
+bearer token. `test-mcp register` records the project *with the daemon*; it does **not** write
+your agent's MCP client config. To generate that, run:
 
 ```bash
-export TEST_MCP_TOKEN=my-stable-secret
-test-mcp start
+test-mcp mcp-config
 ```
 
-The CLI itself is a reference client: `test-mcp register` reads the lockfile, connects over
-HTTP with the bearer header, and calls `register_project`.
+It prints two ready-to-use options — the token is a **per-machine daemon secret**, so pick
+based on whether the config lives in your repo:
+
+**Option A — local scope (recommended): keep the token out of git, no env var.**
+The token goes into your client's *local, uncommitted* settings; nothing about test-mcp is
+added to the repo. Each developer runs this once:
+
+```bash
+claude mcp add --transport http --scope local test-mcp \
+  http://127.0.0.1:7420/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+**Option B — committed `.mcp.json`, token from the environment.**
+A project `.mcp.json` is usually committed and shared, so it must **not** contain the token.
+Reference an env var instead — MCP clients expand `${VAR}` at load — and each developer sets
+the value in their own environment:
+
+```jsonc
+// .mcp.json (safe to commit)
+{
+  "mcpServers": {
+    "test-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:7420/mcp",
+      "headers": { "Authorization": "Bearer ${TEST_MCP_TOKEN}" }
+    }
+  }
+}
+```
+```bash
+export TEST_MCP_TOKEN=<token>   # once per machine
+```
+
+The token is **stable across restarts** (see below), so either config keeps working without
+updates. The CLI itself is a reference client: `test-mcp register` reads the token, connects
+over HTTP with the bearer header, and calls `register_project`.
 
 ### Tool catalog
 

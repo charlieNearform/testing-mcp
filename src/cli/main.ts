@@ -5,6 +5,8 @@ import {
   getDaemonStatus,
   readLockfile,
   isPidAlive,
+  loadOrCreateConfig,
+  resolveToken,
 } from "../daemon/index.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -206,7 +208,10 @@ program
       if (res.isError) {
         return errExit(`test-mcp register: ${payload.code}: ${payload.message}`);
       }
-      return outExit(`test-mcp register: registered ${payload.projectId} (${payload.path})`);
+      return outExit(
+        `test-mcp register: registered ${payload.projectId} (${payload.path})\n` +
+          "Next: run `test-mcp mcp-config` to connect your MCP client (agent).",
+      );
     } catch (err) {
       return errExit(`test-mcp register: ${(err as Error).message}`);
     }
@@ -352,6 +357,75 @@ program
       return outExit("test-mcp unlink: no test-mcp symlink found");
     } catch (err) {
       return errExit(`test-mcp unlink: ${(err as Error).message}`);
+    }
+  });
+
+program
+  .command("mcp-config")
+  .description("Print MCP client config to connect an agent to the daemon (two safe options)")
+  .action(() => {
+    try {
+      // Prefer the live daemon's token/port; otherwise derive from persisted config
+      // (resolveToken reuses the stable token, so what we print matches the next start).
+      const lock = readLockfile();
+      let port: number;
+      let token: string;
+      if (lock && isPidAlive(lock.pid)) {
+        port = lock.port;
+        token = lock.token;
+      } else {
+        const cfg = loadOrCreateConfig();
+        port = cfg.port;
+        token = resolveToken(cfg);
+      }
+      const url = `http://127.0.0.1:${port}/mcp`;
+
+      // If run inside a registered project, note its id (passed as projectId to tools).
+      let projectNote = "";
+      try {
+        const gitRoot = resolveGitRoot(process.cwd());
+        const repoCfg = JSON.parse(
+          fs.readFileSync(path.join(gitRoot, ".test-mcp", "config.json"), "utf8"),
+        ) as { projectId?: string };
+        if (repoCfg.projectId) {
+          projectNote = `\n# This project's id (pass as projectId to the tools): ${repoCfg.projectId}`;
+        }
+      } catch {
+        // not inside a registered project — the daemon serves every registered project anyway
+      }
+
+      // Committed-safe config: the token comes from the environment, not the repo.
+      const mcpJson = JSON.stringify(
+        {
+          mcpServers: {
+            "test-mcp": { type: "http", url, headers: { Authorization: "Bearer ${TEST_MCP_TOKEN}" } },
+          },
+        },
+        null,
+        2,
+      );
+
+      const out = [
+        `# test-mcp MCP config — daemon at ${url}${projectNote}`,
+        ``,
+        `# ── Option A ─ local scope: token stays in your local (uncommitted) client settings.`,
+        `#    Recommended — nothing in the repo, no env var; run once per machine:`,
+        `claude mcp add --transport http --scope local test-mcp \\`,
+        `  ${url} \\`,
+        `  --header "Authorization: Bearer ${token}"`,
+        ``,
+        `# ── Option B ─ commit .mcp.json (safe: the token comes from each dev's environment):`,
+        mcpJson,
+        `#    then, once per machine:`,
+        `export TEST_MCP_TOKEN=${token}`,
+        ``,
+        `# Trade-off: A keeps the token out of git with no env var (each dev runs the command`,
+        `# once); B shares the server definition in-repo but each dev must set TEST_MCP_TOKEN.`,
+      ].join("\n");
+
+      return outExit(out);
+    } catch (err) {
+      return errExit(`test-mcp mcp-config: ${(err as Error).message}`);
     }
   });
 

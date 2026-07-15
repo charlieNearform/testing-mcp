@@ -47,6 +47,10 @@ Security**, referencing the GitHub issue (`#123`) where applicable.
 - `test-mcp link` / `test-mcp unlink` CLI commands: symlink the CLI into a writable
   directory on `PATH` (auto-detected or via `--dir`) so it can be run as `test-mcp` from a
   cloned checkout; `unlink` only ever removes its own symlink, never a real file.
+- `test-mcp mcp-config` CLI command: prints ready-to-use MCP client config to connect an
+  agent to the daemon, with two token-safe options — a local-scope `claude mcp add` command
+  (token stays out of the repo) and a committed-safe `.mcp.json` referencing
+  `${TEST_MCP_TOKEN}`. `register` now points to it.
 - BMAD scaffolding and full planning artifact set under `_bmad-output/planning-artifacts/`:
   requirements contract (`SPEC.md`), architecture spine (`ARCHITECTURE-SPINE.md`),
   epics & stories (`epics.md` — 5 epics / 18 stories), PRFAQ + distillate, and an

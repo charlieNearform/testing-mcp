@@ -30,20 +30,20 @@ test-mcp register
 ```
 
 `register` scaffolds `<git-root>/.test-mcp/`, auto-boots the daemon, and registers the
-project — printing the `projectId` that MCP tool calls use. Then point an MCP client at
-`http://127.0.0.1:7420/mcp` and call `run_tests`.
+project with it — printing the `projectId` that MCP tool calls use.
 
-Each `/mcp` request needs a bearer token. It's **stable across restarts** — generated once
-and stored in `~/.test-mcp/config.json` (also mirrored in `daemon.lock`), so you can put it
-in a client config and it won't change. Pin your own with the `TEST_MCP_TOKEN` env var:
+To connect an AI agent, generate its MCP client config:
 
-```jsonc
-// MCP client config
-{
-  "url": "http://127.0.0.1:7420/mcp",
-  "headers": { "Authorization": "Bearer <token from config.json, or your TEST_MCP_TOKEN>" }
-}
+```bash
+test-mcp mcp-config
 ```
+
+This prints two options for pointing a client at `http://127.0.0.1:7420/mcp` with the bearer
+token. The token is a **per-machine daemon secret** and is **stable across restarts** (stored
+in `~/.test-mcp/config.json`), so the config keeps working. Because a project `.mcp.json` is
+usually committed, it must not contain the token — so you either add the server at **local
+scope** (token in your uncommitted client settings) or commit a `.mcp.json` that references
+`${TEST_MCP_TOKEN}` from the environment. See [docs/usage.md](docs/usage.md#connecting-an-ai-agent-mcp-client-config).
 
 **→ Full guide: [docs/usage.md](docs/usage.md)** — CLI commands, the MCP tool catalog,
 watch mode, the monitoring UI, CI usage, configuration, and troubleshooting.
@@ -56,6 +56,7 @@ test-mcp status     # running/stopped, pid, port, registered-project count
 test-mcp stop       # graceful shutdown
 test-mcp init       # scaffold <git-root>/.test-mcp/ without touching the daemon
 test-mcp register   # scaffold + auto-boot daemon + register the current project
+test-mcp mcp-config # print MCP client config to connect an agent (two safe options)
 test-mcp link       # symlink this CLI into a writable dir on your PATH
 test-mcp unlink     # remove that symlink
 ```
