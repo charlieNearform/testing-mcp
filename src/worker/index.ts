@@ -53,10 +53,12 @@ interface VitestInstance {
   config: { isolate: boolean };
 }
 
-/** createVitest returns an instance we only use to discover test files. */
+/** createVitest returns an instance we use to discover test files and read resolved config. */
 interface DiscoveryInstance {
   close(): Promise<void>;
   globTestSpecifications(): Promise<ReadonlyArray<{ moduleId: string }>>;
+  /** Resolved config — we read the project's coverage thresholds for the gate (Story 6.3 AC4). */
+  config?: { coverage?: { thresholds?: unknown } };
 }
 
 interface VitestNode {
@@ -452,6 +454,25 @@ async function discoverTestFiles(createVitest: VitestNode["createVitest"]): Prom
   }
 }
 
+/**
+ * Read the project's configured Vitest `coverage.thresholds` (Story 6.3 AC4) from resolved config,
+ * without running or enabling coverage. Best-effort — any failure yields `undefined` (no gate).
+ */
+async function readCoverageThresholds(
+  createVitest: VitestNode["createVitest"],
+): Promise<unknown> {
+  try {
+    const vitest = await createVitest("test", { watch: false });
+    try {
+      return vitest.config?.coverage?.thresholds;
+    } finally {
+      await vitest.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 /** Resolve `p`, or `fallback` if it doesn't settle within `ms`. The abandoned promise is left to
  *  settle on its own (its own finally cleans up); we never hang the whole build on one file. */
 function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
@@ -490,6 +511,8 @@ async function buildAndPersistCoverageMap(
       ? files.map((f) => path.resolve(cwd, f))
       : await discoverTestFiles(createVitest);
 
+  // The project's own coverage thresholds for the gate (Story 6.3 AC4) — read, never invented.
+  const thresholds = await readCoverageThresholds(createVitest);
   const baseline = await measureSetupBaseline(startVitest, cwd);
   const budgetMs = Number(process.env.TEST_MCP_MEASURE_BUDGET_MS ?? 120_000);
 
@@ -522,7 +545,7 @@ async function buildAndPersistCoverageMap(
   });
   saveCoverageMap(cwd, file);
 
-  const coverage = persistAndCombine(cwd, projectId, rawData, perTestSources, freshSources);
+  const coverage = persistAndCombine(cwd, projectId, rawData, perTestSources, freshSources, thresholds);
   return { delta: { ...summary }, coverage };
 }
 
@@ -537,6 +560,7 @@ function persistAndCombine(
   rawData: Record<string, IstanbulCoverageData>,
   perTestSources: Record<string, string[]>,
   freshSources: ReadonlySet<string>,
+  thresholds: unknown,
 ): TestResult["coverage"] | undefined {
   try {
     const now = new Date().toISOString();
@@ -560,7 +584,7 @@ function persistAndCombine(
       for (const s of Object.keys(tc.sourceHashes)) allSources.add(s);
     }
     const currentHashes = computeHashes(cwd, [...allSources]);
-    return combineCoverage(updated, cwd, currentHashes, freshSources) ?? undefined;
+    return combineCoverage(updated, cwd, currentHashes, freshSources, thresholds) ?? undefined;
   } catch (err) {
     process.stderr.write(
       `[test-mcp] combined coverage unavailable this run: ${

@@ -10,6 +10,8 @@ import {
   updateCoverageData,
   combineCoverage,
   coveredSourceFiles,
+  parseGlobalThresholds,
+  meetsThresholds,
   type CoverageDataFile,
   type TestCoverage,
   type IstanbulCoverageData,
@@ -138,6 +140,47 @@ describe("combineCoverage (Story 6.10)", () => {
 
   it("returns null when there is no coverage data", () => {
     expect(combineCoverage(dataFile({}), ROOT, {}, new Set())).toBeNull();
+  });
+});
+
+describe("threshold gate (Story 6.3 AC4)", () => {
+  it("parses global numeric thresholds and the `100: true` shorthand", () => {
+    expect(parseGlobalThresholds({ lines: 90, branches: 80 })).toEqual({ lines: 90, branches: 80 });
+    expect(parseGlobalThresholds({ 100: true })).toEqual({
+      statements: 100,
+      branches: 100,
+      functions: 100,
+      lines: 100,
+    });
+  });
+
+  it("ignores non-% forms (negative counts, per-glob objects, perFile/autoUpdate) and empty", () => {
+    expect(parseGlobalThresholds({ lines: -10, perFile: true, autoUpdate: true })).toBeNull();
+    expect(parseGlobalThresholds({ "src/**": { lines: 100 } })).toBeNull();
+    expect(parseGlobalThresholds({})).toBeNull();
+    expect(parseGlobalThresholds(undefined)).toBeNull();
+    // Mixed: keep the global %, drop the glob object.
+    expect(parseGlobalThresholds({ lines: 95, "src/**": { lines: 100 } })).toEqual({ lines: 95 });
+  });
+
+  it("meetsThresholds compares each configured metric against the total", () => {
+    expect(meetsThresholds({ statements: 100, branches: 100, functions: 100, lines: 100 }, { lines: 100 })).toBe(true);
+    expect(meetsThresholds({ statements: 90, branches: 90, functions: 90, lines: 90 }, { lines: 100 })).toBe(false);
+  });
+
+  it("asserts thresholdsMet only at high confidence; leaves it undefined when degraded", () => {
+    const fresh = dataFile({
+      "a.test.ts": test({ "/proj/src/a.ts": fileCov("/proj/src/a.ts", 2, 2) }, { "src/a.ts": "h1" }),
+    });
+    const high = combineCoverage(fresh, ROOT, { "src/a.ts": "h1" }, new Set(), { lines: 100 });
+    expect(high!.thresholds).toEqual({ lines: 100 });
+    expect(high!.thresholdsMet).toBe(true);
+
+    // Same data but the source changed since measurement -> degraded -> met unconfirmed.
+    const degraded = combineCoverage(fresh, ROOT, { "src/a.ts": "changed" }, new Set(), { lines: 100 });
+    expect(degraded!.confidence.level).toBe("degraded");
+    expect(degraded!.thresholds).toEqual({ lines: 100 });
+    expect(degraded!.thresholdsMet).toBeUndefined();
   });
 });
 

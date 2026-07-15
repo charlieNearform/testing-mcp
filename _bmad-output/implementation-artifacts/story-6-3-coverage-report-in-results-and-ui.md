@@ -5,7 +5,7 @@
 **Type:** `feature`
 **Depends on:** `6-0` (observability baseline). Independent of 6.1/6.2; touches the same result
 + UI surfaces, so land after 6.1 to avoid churn if convenient.
-**Status:** done (AC1–AC3; AC4 deferred — see Auto Run Result)
+**Status:** done (AC1–AC4 — AC4 completed 2026-07-15 after Story 6.10 unblocked whole-project coverage)
 
 ## Source
 
@@ -94,3 +94,21 @@ Status: done for AC1–AC3; **AC4 (threshold-gate signal) DEFERRED** (escalation
 **Review:** Edge Case Hunter. 1 HIGH patched — the coverage pass now honours `changed` so a changed-only incremental run no longer silently re-measures the whole suite (cost + mismatch). 1 LOW patched — non-numeric `pct` sentinel coerced to 0 (no "NaN%"). Deferred: subset-vs-whole-project qualification and `all: false` inflation (→ Story 6.10, which combines coverage across runs), unbounded per-file table, `../..` paths for out-of-root files. → deferred-work.
 
 **Verification:** `pnpm run typecheck` exit 0; `pnpm build` exit 0; `pnpm test` exit 0 (39 files, 187 tests).
+
+### AC4 follow-up (2026-07-15) — coverage threshold gate
+
+Completed once Story 6.10 delivered the whole-project COMBINED coverage the gate needs. The worker
+reads the project's own resolved `coverage.thresholds` (via a `createVitest` config resolution — no
+run, best-effort → no gate on failure) and `combineCoverage` reports `coverage.thresholds` (the
+configured global %) + `coverage.thresholdsMet`. Per AC4, `thresholdsMet` is asserted (true/false)
+ONLY at `high` confidence; on a `degraded` combined report it is left `undefined` and the UI shows
+"gate: unconfirmed — run a full coverage pass", so "100% met" is never claimed on stale numbers.
+Only the GLOBAL numeric-% form (incl. the `100: true` shorthand) is surfaced — per-glob, `perFile`,
+`autoUpdate`, and negative (max-uncovered-count) thresholds are intentionally not turned into a
+verdict (report what we can compare, don't invent one). `success` is NOT flipped — the gate is a
+distinct signal from test pass/fail, as the AC requires.
+
+**Files:** `src/coverage/combined.ts` (`parseGlobalThresholds`, `meetsThresholds`, threshold fields
+on the combined report), `src/worker/index.ts` (`readCoverageThresholds` + threading), `src/ui/index.ts`
+(gate line), `src/types/contracts.ts` (`thresholds`/`thresholdsMet`). Tests: parse/evaluate units +
+high-vs-degraded verdict + a real project-config integration (thresholds `100` → met at high). Suite: 201 tests.

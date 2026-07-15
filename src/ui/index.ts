@@ -355,12 +355,27 @@ async function renderRun(pid, runId) {
     + ((covConf.reasons && covConf.reasons.length)
         ? '<ul class="files">' + covConf.reasons.map((r) => '<li>' + esc(r) + '</li>').join("") + '</ul>'
         : "");
+  // Threshold gate (AC4): met/failed is only asserted at high confidence; degraded => "run full".
+  const gateLine = !cov || !cov.thresholds ? "" :
+    '<div class="ts">gate: '
+    + (cov.thresholdsMet === undefined
+        ? '<span class="badge degraded">unconfirmed</span> — coverage may be stale; run a full coverage pass'
+        : cov.thresholdsMet
+          ? '<span class="badge high">met</span>'
+          : '<span class="badge degraded">failed</span>')
+    + ' <span class="loc">(thresholds: '
+    + ["statements", "branches", "functions", "lines"]
+        .filter((m) => cov.thresholds[m] != null)
+        .map((m) => m + " " + cov.thresholds[m] + "%")
+        .join(", ")
+    + ')</span></div>';
   const covBlock = !cov ? "" :
     '<div class="section-title">coverage' + (cov.combined ? " (combined)" : "") + '</div>'
     + '<div class="detail-grid">'
     + kv("statements", pctCell(cov.total.statements)) + kv("branches", pctCell(cov.total.branches))
     + kv("functions", pctCell(cov.total.functions)) + kv("lines", pctCell(cov.total.lines))
     + '</div>'
+    + gateLine
     + covConfLine
     + ((cov.files && cov.files.length)
         ? '<table class="runs"><thead><tr><th>file</th><th>stmts</th><th>branch</th><th>funcs</th><th>lines</th></tr></thead><tbody>'

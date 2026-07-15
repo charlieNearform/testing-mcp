@@ -57,6 +57,37 @@ export interface CombinedCoverage {
   combined: true;
   /** `degraded` when a changed source is unmeasured in the combined set (Story 6.8). */
   confidence: Confidence;
+  /** The project's configured global % thresholds, if any (Story 6.3 AC4). */
+  thresholds?: Partial<CoveragePct>;
+  /** Met verdict — only set (true/false) at `high` confidence; undefined when degraded. */
+  thresholdsMet?: boolean;
+}
+
+const METRICS = ["statements", "branches", "functions", "lines"] as const;
+
+/**
+ * Extract the project's GLOBAL numeric-% coverage thresholds from a Vitest `coverage.thresholds`
+ * config (Story 6.3 AC4). Handles the plain metric form (`{ lines: 90, ... }`) and the `100: true`
+ * shorthand ("require 100% everywhere"). Per-glob thresholds, `perFile`, `autoUpdate`, and negative
+ * (absolute-count) thresholds are intentionally NOT surfaced — we report only what we can compare to
+ * the combined percentages, rather than invent a verdict. Returns null when there's no global % form.
+ */
+export function parseGlobalThresholds(raw: unknown): Partial<CoveragePct> | null {
+  if (!raw || typeof raw !== "object") return null;
+  const t = raw as Record<string, unknown>;
+  if (t["100"] === true) return { statements: 100, branches: 100, functions: 100, lines: 100 };
+  const out: Partial<CoveragePct> = {};
+  for (const m of METRICS) {
+    const v = t[m];
+    // Positive 0–100 is a percentage target; a negative value is a max-uncovered-count (skipped).
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100) out[m] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** True when `total` meets every configured threshold. */
+export function meetsThresholds(total: CoveragePct, thresholds: Partial<CoveragePct>): boolean {
+  return METRICS.every((m) => thresholds[m] === undefined || total[m] >= (thresholds[m] as number));
 }
 
 /** Cap the confidence reason list so a large refactor can't bloat the result/UI unboundedly. */
@@ -162,6 +193,7 @@ export function combineCoverage(
   projectRoot: string,
   currentHashes: Record<string, string>,
   freshSources: ReadonlySet<string>,
+  rawThresholds?: unknown,
 ): CombinedCoverage | null {
   const entries = Object.values(dataFile.tests);
   if (entries.length === 0) return null;
@@ -225,15 +257,25 @@ export function combineCoverage(
     ? { level: "degraded", reasons }
     : { level: "high", reasons: [] };
 
+  const totalPct: CoveragePct = {
+    statements: num(total.data.statements.pct),
+    branches: num(total.data.branches.pct),
+    functions: num(total.data.functions.pct),
+    lines: num(total.data.lines.pct),
+  };
+
+  // Threshold gate (AC4): report the project's global % thresholds and whether they're met — but
+  // only ASSERT met/failed at high confidence; when degraded, leave it undefined ("run a full pass").
+  const thresholds = parseGlobalThresholds(rawThresholds) ?? undefined;
+  const thresholdsMet =
+    thresholds && confidence.level === "high" ? meetsThresholds(totalPct, thresholds) : undefined;
+
   return {
-    total: {
-      statements: num(total.data.statements.pct),
-      branches: num(total.data.branches.pct),
-      functions: num(total.data.functions.pct),
-      lines: num(total.data.lines.pct),
-    },
+    total: totalPct,
     files,
     combined: true,
     confidence,
+    ...(thresholds ? { thresholds } : {}),
+    ...(thresholdsMet !== undefined ? { thresholdsMet } : {}),
   };
 }

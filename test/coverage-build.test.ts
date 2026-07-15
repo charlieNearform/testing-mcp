@@ -12,14 +12,15 @@ const repoNodeModules = path.join(repoRoot, "node_modules");
 
 let proj: string;
 
-/** A tiny project whose Vitest (and @vitest/coverage-v8) resolve via a node_modules symlink. */
-function makeProject(): string {
+/** A tiny project whose Vitest (and @vitest/coverage-v8) resolve via a node_modules symlink.
+ *  `coverageConfig` is spliced into `test.coverage` (Story 6.3 AC4 threshold-gate tests). */
+function makeProject(coverageConfig = ""): string {
   // realpath so V8's absolute coverage paths match the project root on macOS (/var vs /private/var).
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-cov-")));
   fs.symlinkSync(repoNodeModules, path.join(dir, "node_modules"), "dir");
   fs.writeFileSync(
     path.join(dir, "vitest.config.ts"),
-    `import { defineConfig } from "vitest/config";\nexport default defineConfig({ test: { include: ["**/*.test.ts"], environment: "node" } });\n`,
+    `import { defineConfig } from "vitest/config";\nexport default defineConfig({ test: { include: ["**/*.test.ts"], environment: "node"${coverageConfig ? `, coverage: { ${coverageConfig} }` : ""} } });\n`,
   );
   fs.writeFileSync(path.join(dir, "math.ts"), `export const add = (a: number, b: number) => a + b;\n`);
   fs.writeFileSync(path.join(dir, "other.ts"), `export const sub = (a: number, b: number) => a - b;\n`);
@@ -108,5 +109,23 @@ describe("coverage reverse-map build & persist", () => {
     expect(otherRow!.fresh).toBe(true);
     expect(incr.coverage!.confidence?.level).toBe("degraded");
     expect(incr.coverage!.confidence?.reasons.join(" ")).toContain("math.ts");
+  }, 120_000);
+
+  // Story 6.3 AC4: report the PROJECT's configured Vitest thresholds + a met/failed verdict,
+  // asserted only at high confidence.
+  it("reports the project's coverage thresholds and a met verdict at high confidence", async () => {
+    // The fixture's two sources are each fully exercised by their tests -> 100% -> gate met.
+    proj = makeProject("thresholds: { lines: 100, statements: 100, functions: 100, branches: 100 }");
+    const o = new Orchestrator({ workerPath });
+    const result = await o.runTests({ projectId: "cov1", path: proj }, { coverage: true });
+
+    expect(result.coverage!.confidence?.level).toBe("high");
+    expect(result.coverage!.thresholds).toEqual({
+      statements: 100,
+      branches: 100,
+      functions: 100,
+      lines: 100,
+    });
+    expect(result.coverage!.thresholdsMet).toBe(true);
   }, 120_000);
 });

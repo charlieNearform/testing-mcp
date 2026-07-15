@@ -65,6 +65,17 @@ export interface TestResult {
     files: Array<{ file: string; fresh?: boolean; stale?: boolean } & CoveragePct>;
     combined?: boolean;
     confidence?: Confidence;
+    /**
+     * The project's own configured global Vitest coverage % thresholds (Story 6.3 AC4) — test-mcp
+     * reports them, it does not invent its own. Only the global numeric-% form is surfaced.
+     */
+    thresholds?: Partial<CoveragePct>;
+    /**
+     * Whether the combined coverage meets every configured threshold (Story 6.3 AC4). Only asserted
+     * (true/false) when `confidence` is `high`; `undefined` on a `degraded` report means "numbers may
+     * be stale — run a full coverage pass to confirm the gate" rather than a false verdict.
+     */
+    thresholdsMet?: boolean;
   };
   /** Timing breakdown so daemon/worker overhead is observable (NFR7). Optional; added in Story 2.1. */
   metadata?: {

@@ -125,7 +125,7 @@ development_status:
   6-7-changed-since-last-run-baseline: done                # dev-auto 2026-07-15 (3 patches; 3 deferred, dyn-import risk → 6.8)
   6-1-per-passing-test-detail: done                # dev-auto 2026-07-15 (2 review patches; 2 low deferred)
   6-2-on-disk-run-history-persistence: done        # dev-auto 2026-07-15 (5 review patches; 1 low deferred)
-  6-3-coverage-report-in-results-and-ui: done      # dev-auto 2026-07-15 (AC1-3; AC4 threshold-gate deferred; 2 review patches)
+  6-3-coverage-report-in-results-and-ui: done      # dev-auto 2026-07-15 (AC1-3 + AC4 threshold-gate completed after 6.10; 2 review patches)
   6-8-selection-confidence-signal: done                     # dev-auto 2026-07-15 (6 patches; 6 deferred → 6.10 + pre-existing)
   6-10-combined-incremental-coverage: done                  # dev-auto 2026-07-15 (istanbul-lib-coverage authorized; 4 review patches for number/confidence soundness)
   6-9-optional-crg-impact-analysis: backlog                 # spike; use CRG blast-radius when present
