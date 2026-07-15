@@ -125,4 +125,6 @@ development_status:
   6-1-per-passing-test-detail: ready-for-dev       # + persistent project status banner
   6-2-on-disk-run-history-persistence: ready-for-dev
   6-3-coverage-report-in-results-and-ui: ready-for-dev
+  # 6-8-selection-confidence-signal: pending bmad-correct-course (softens invariant 5)
+  6-9-optional-crg-impact-analysis: backlog       # spike; use CRG blast-radius when present
   epic-6-retrospective: optional

@@ -705,3 +705,25 @@ So that a long uncommitted session doesn't grow the delta back toward the full s
 **Then** the baseline is selectable (e.g. `since: "last-run" | "head"`) with a documented default; git-HEAD remains available for CI.
 
 > Changes documented selection behaviour and the default baseline — reconcile with the architecture spine before implementing (see the story's escalation triggers, incl. the partial-run snapshot-advance safety rule).
+
+### Story 6.9: Optional CRG-Backed Impact Analysis (backlog / spike)
+
+As a developer on a project that already runs code-review-graph (CRG),
+I want test-mcp to use CRG's blast-radius for impact analysis when it's available,
+So that selection is richer where the graph exists — without ever depending on it.
+
+**Acceptance Criteria:**
+
+**Given** CRG is present and current in a project
+**When** an incremental selection is computed
+**Then** its blast-radius for the changed files is unioned into the affected-test set (augmenting, not replacing, the runtime coverage map).
+
+**Given** CRG is absent or its graph is stale/unreadable
+**When** selection runs
+**Then** test-mcp falls back to the Vitest `--changed` static graph with no error and no hard dependency.
+
+**Given** CRG informed a selection
+**When** the result is reported
+**Then** the reason (6.4) notes CRG's contribution and it feeds the confidence signal (6.8).
+
+> Spike-first; introduces an optional external-tool dependency (daemon possibly acting as an MCP client) — confirm the seam with the architecture spine. Backlog: sequence after the core refinements + 6.8.
