@@ -106,11 +106,15 @@ describe("orchestrator surfaces the real selection reason (Story 6.4)", () => {
         alwaysRun: [],
       }),
     );
+    // A tracked source the map has never seen. It must be committed (tracked) so that a later
+    // edit is a MODIFIED-unmapped change — which forces a full run for a specific reason.
+    // (A brand-new/untracked unmapped source is instead bounded by --changed as of Story 6.6.)
+    fs.writeFileSync(path.join(dir, "mystery.ts"), `export const x = 1;\n`);
     // Worker runs the full suite and labels it generically.
     stageWorkerResult(dir, { strategy: "full", reason: "full suite", files: ["math.test.ts"] });
     commitAll(dir);
-    // A brand-new source the map has never seen — forces a full run for a specific reason.
-    fs.writeFileSync(path.join(dir, "mystery.ts"), `export const x = 1;\n`);
+    // Modify the tracked, unmapped source → orchestrator decides full for a specific reason.
+    fs.appendFileSync(path.join(dir, "mystery.ts"), `export const y = 2;\n`);
 
     const orch = new Orchestrator({ workerPath });
     const result = await orch.runTests({ projectId: "sr", path: dir }, { mode: "incremental" });

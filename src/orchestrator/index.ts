@@ -250,8 +250,10 @@ export class Orchestrator {
   ): ResolvedSelection {
     const explicit = opts.files ?? [];
     if (opts.mode === "incremental" && explicit.length === 0) {
+      const changed = getChangedFiles(project.path);
       const plan = SelectionEngine.plan({
-        changedFiles: getChangedFiles(project.path),
+        changedFiles: changed?.files ?? null,
+        addedFiles: changed?.added,
         map: loadCoverageMap(project.path),
       });
       if (plan.strategy === "full") {

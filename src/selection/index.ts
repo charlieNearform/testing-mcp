@@ -28,6 +28,12 @@ export type SelectionPlan =
 export interface SelectionInput {
   /** Repo-relative changed files (working tree vs HEAD, incl. untracked); null if undeterminable. */
   changedFiles: string[] | null;
+  /**
+   * Repo-relative NEW (untracked) subset of `changedFiles` (Story 6.6). A new source unknown
+   * to the map has no prior runtime dependents, so the git static-graph union (`--changed`)
+   * bounds it — it does NOT force a full suite the way a MODIFIED unmapped source does.
+   */
+  addedFiles?: string[];
   /** The project's coverage map, or null if none has been built. */
   map: CoverageMapFile | null;
 }
@@ -39,7 +45,7 @@ export function isTestFile(rel: string): boolean {
 
 export class SelectionEngine {
   static plan(input: SelectionInput): SelectionPlan {
-    const { changedFiles, map } = input;
+    const { changedFiles, addedFiles, map } = input;
 
     // Can't tell what changed (e.g. not a git repo) -> safest is the full suite.
     if (changedFiles === null) {
@@ -72,13 +78,21 @@ export class SelectionEngine {
 
     // Source files changed WITH a map -> map selection, unioned with the static graph at run time.
     const selected = new Set<string>(changedTests);
+    let boundedNewFiles = false;
     for (const src of changedSources) {
       if (map.fullSuiteTriggers.includes(src)) {
         return { strategy: "full", reason: `changed file is a full-suite trigger: ${src}` };
       }
       const entry = map.map[src];
       if (!entry) {
-        // Unknown to the map -> we can't bound the blast radius safely (AC3).
+        // Unknown to the map. A NEW (untracked) source has no prior runtime dependents, so the
+        // `union: true` git static-graph pass (`--changed`) already bounds it to its new test and
+        // any existing importer — no need to force the full suite (Story 6.6). A MODIFIED unmapped
+        // source stays conservative: we can't bound its blast radius safely (AC3, invariant 5).
+        if (addedFiles?.includes(src)) {
+          boundedNewFiles = true;
+          continue;
+        }
         return { strategy: "full", reason: `changed source unknown to coverage map: ${src}` };
       }
       for (const t of entry.tests) selected.add(t);
@@ -88,7 +102,9 @@ export class SelectionEngine {
 
     return {
       strategy: "incremental",
-      reason: "coverage-map selection unioned with git static-graph",
+      reason: boundedNewFiles
+        ? "coverage-map selection unioned with git static-graph (new files bounded by --changed)"
+        : "coverage-map selection unioned with git static-graph",
       testFiles: [...selected].sort(),
       union: true,
     };
@@ -208,8 +224,14 @@ function readIgnorePatterns(projectRoot: string): string[] {
  * Test-irrelevant paths (built-in defaults + optional `.test-mcp-ignore`) are filtered out
  * here (Story 6.5); an all-filtered set collapses to `[]`, which `plan()` treats as the
  * existing "no changes detected" incremental no-op — not a full suite.
+ *
+ * `added` is the NEW subset — untracked files (`git ls-files --others --exclude-standard`) plus
+ * staged additions (`git diff --cached --diff-filter=A`, so `git add`-ed-but-uncommitted new
+ * files still count as new). Normalized and run through the SAME filter as `files`, so the
+ * Selection Engine can tell a NEW source (bounded by the git static graph) from a MODIFIED one
+ * (still conservative, full suite) (Story 6.6).
  */
-export function getChangedFiles(projectRoot: string): string[] | null {
+export function getChangedFiles(projectRoot: string): { files: string[]; added: string[] } | null {
   try {
     const gitOpts = {
       cwd: projectRoot,
@@ -218,12 +240,26 @@ export function getChangedFiles(projectRoot: string): string[] | null {
     };
     const tracked = execFileSync("git", ["diff", "--name-only", "HEAD"], gitOpts);
     const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], gitOpts);
-    const files = [...tracked.split("\n"), ...untracked.split("\n")]
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((s) => s.split(path.sep).join("/"));
+    // Staged-but-uncommitted additions are already in `git diff HEAD` (so in `files`), but not in
+    // `ls-files --others`; include them here so a `git add`-ed new file is still classified NEW.
+    const stagedAdded = execFileSync(
+      "git",
+      ["diff", "--cached", "--name-only", "--diff-filter=A"],
+      gitOpts,
+    );
     const patterns = [...DEFAULT_IGNORE_PATTERNS, ...readIgnorePatterns(projectRoot)];
-    return unique(filterChangedPaths(files, patterns));
+    const normalize = (raw: string): string[] =>
+      raw
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => s.split(path.sep).join("/"));
+    const untrackedPaths = normalize(untracked);
+    const files = unique(filterChangedPaths([...normalize(tracked), ...untrackedPaths], patterns));
+    const added = unique(
+      filterChangedPaths([...untrackedPaths, ...normalize(stagedAdded)], patterns),
+    );
+    return { files, added };
   } catch {
     return null;
   }

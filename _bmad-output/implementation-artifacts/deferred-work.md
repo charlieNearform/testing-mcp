@@ -32,3 +32,13 @@
 - source_spec: `spec-6-5-ignore-test-irrelevant-changes.md`
   summary: keep-always allowlist is not exhaustive for all build/test configs, and `readIgnorePatterns` swallows non-ENOENT errors.
   evidence: `babel.config.json`, `jest.config.json`, `.mocharc.*`, `.swcrc`, `.env*`, `vitest.workspace.*` are not on keep-always (safe unless a broad user pattern like `*.json` drops them). A present-but-unreadable `.test-mcp-ignore` (EACCES/EISDIR) is treated as absent with no warning.
+
+## Deferred from: spec-6-6-new-file-bounded-by-static-graph (2026-07-15)
+
+- source_spec: `spec-6-6-new-file-bounded-by-static-graph.md`
+  summary: **[for Story 6.8]** Bounding a NEW source by the git `--changed` static graph can silently under-run when the new file is reached via a dynamic import / side-effect / DI / config, and the worker's UNION branch has no full-suite fallback (unlike the lone-`--changed` branch), which `alwaysRun` can force it into.
+  evidence: `--changed` is a static import graph; a never-measured new file has no coverage-map signal, so a dynamic edge from an existing unchanged test is invisible → that test isn't selected and a regression can ship green. This is the ratified invariant-5 relaxation whose designed mitigation is **6.8's confidence signal** — 6.8 MUST mark bounded-new-file runs as `degraded` confidence (so the agent runs a full pass), and the worker's union branch should gain the same full-suite fallback the `files.length===0` `--changed` branch has. Land these in 6.8.
+  evidence-tests: no test yet for (a) a new source reached only by an existing test's dynamic import, (b) the `alwaysRun`-present case removing the worker fallback, (c) a staged-new file (the getChangedFiles staged-add patch is covered only by existing new-file cases).
+- source_spec: `spec-6-6-new-file-bounded-by-static-graph.md`
+  summary: Pre-existing `getChangedFiles` edges: git `core.quotePath` octal-quotes non-ASCII filenames (never match map keys → misclassified unknown → full), and an unborn HEAD (no commits) makes `git diff HEAD` fatal → null → full.
+  evidence: Both predate 6.6 and fail to the SAFE (full-suite) direction, so they're correctness-safe but defeat incremental selection for those repos. Fix with `-z`/`core.quotePath=false` parsing and an empty-tree fallback ref respectively.

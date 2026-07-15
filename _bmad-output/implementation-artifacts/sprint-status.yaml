@@ -121,7 +121,7 @@ development_status:
   # Recommended order: 6-4 → 6-5 → 6-6 → 6-7 → 6-8 → 6-1 → 6-2 → 6-3 → 6-10  (6-9 backlog)
   6-4-surface-real-selection-reason: done                 # dev-auto 2026-07-15 (2 review patches applied)
   6-5-ignore-test-irrelevant-changes: done                # dev-auto 2026-07-15 (1 review patch; 3 deferred)
-  6-6-new-file-bounded-by-static-graph: ready-for-dev     # narrows arch step 4 — reconcile first
+  6-6-new-file-bounded-by-static-graph: done              # dev-auto 2026-07-15 (1 patch; high-sev risk deferred to 6.8)
   6-7-changed-since-last-run-baseline: ready-for-dev       # new default baseline — reconcile first
   6-1-per-passing-test-detail: ready-for-dev       # + persistent project status banner
   6-2-on-disk-run-history-persistence: ready-for-dev

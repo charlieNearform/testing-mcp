@@ -70,6 +70,41 @@ describe("SelectionEngine.plan", () => {
     );
   });
 
+  it("bounds a NEW (untracked) unmapped source via the static-graph union, not full (Story 6.6)", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["src/date.ts", "test/date.test.ts"],
+      addedFiles: ["src/date.ts", "test/date.test.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts"] }),
+    });
+    expect(plan).toMatchObject({ strategy: "incremental", union: true });
+    if (plan.strategy === "incremental") {
+      expect(plan.testFiles).toEqual(["test/date.test.ts"]);
+      expect(plan.reason).toContain("new files bounded by --changed");
+    }
+  });
+
+  it("still runs full for a MODIFIED unmapped source not in addedFiles (Story 6.6)", () => {
+    expect(
+      SelectionEngine.plan({
+        changedFiles: ["src/legacy.ts"],
+        addedFiles: [],
+        map: mapWith({ "a.ts": ["a.test.ts"] }),
+      }),
+    ).toMatchObject({ strategy: "full" });
+  });
+
+  it("plans a lone new source as union:true with no explicit testFiles (Story 6.6)", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["src/date.ts"],
+      addedFiles: ["src/date.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts"] }),
+    });
+    expect(plan).toMatchObject({ strategy: "incremental", union: true });
+    if (plan.strategy === "incremental") {
+      expect(plan.testFiles).toEqual([]);
+    }
+  });
+
   it("runs the full suite when a changed source is a full-suite trigger", () => {
     expect(
       SelectionEngine.plan({

@@ -47,6 +47,26 @@ function makeProject(withGit: boolean): string {
   return dir;
 }
 
+/** Commit a `.gitignore` for `.test-mcp/` and drop a coverage map so the map is "present". */
+function seedCoverageMap(dir: string, map: Record<string, string[]>): void {
+  fs.writeFileSync(path.join(dir, ".gitignore"), ".test-mcp/\n");
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["commit", "-q", "-m", "ignore state dir"], { cwd: dir, env: GIT_ENV });
+  const now = "2026-07-15T00:00:00.000Z";
+  const file = {
+    schemaVersion: 3,
+    projectId: "g",
+    updatedAt: now,
+    map: Object.fromEntries(
+      Object.entries(map).map(([s, tests]) => [s, { tests, lastMeasured: now }]),
+    ),
+    fullSuiteTriggers: [],
+    alwaysRun: [],
+  };
+  fs.mkdirSync(path.join(dir, ".test-mcp"), { recursive: true });
+  fs.writeFileSync(path.join(dir, ".test-mcp", "coverage-map.json"), JSON.stringify(file, null, 2));
+}
+
 afterEach(() => {
   if (proj) fs.rmSync(proj, { recursive: true, force: true });
 });
@@ -137,5 +157,43 @@ describe("git-aware delta selection", () => {
 
     // Not the incremental no-op: package.json survived filtering and drove a real run.
     expect(result.total).toBeGreaterThan(0);
+  }, 60_000);
+
+  // Story 6.6: a NEW source unknown to the map is bounded by the git static graph, not full.
+  it("bounds a new untracked source + its new test via --changed (not the full suite)", async () => {
+    proj = makeProject(true);
+    seedCoverageMap(proj, { "math.ts": ["math.test.ts"], "other.ts": ["other.test.ts"] });
+    // Add a brand-new source and its test, both untracked and unknown to the map.
+    fs.mkdirSync(path.join(proj, "src"), { recursive: true });
+    fs.mkdirSync(path.join(proj, "test"), { recursive: true });
+    fs.writeFileSync(path.join(proj, "src", "date.ts"), `export const iso = () => "2026-07-15";\n`);
+    fs.writeFileSync(
+      path.join(proj, "test", "date.test.ts"),
+      `import { test, expect } from "vitest";\nimport { iso } from "../src/date.ts";\ntest("iso", () => expect(iso()).toBe("2026-07-15"));\n`,
+    );
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    // Bounded, not full: only the new test ran (existing math/other tests did not).
+    expect(result.selection.strategy).toBe("incremental");
+    expect(result.total).toBe(1);
+    expect(result.selection.files.some((f) => f.includes("date.test.ts"))).toBe(true);
+    expect(result.selection.files.some((f) => f.includes("math.test.ts"))).toBe(false);
+    expect(result.selection.files.some((f) => f.includes("other.test.ts"))).toBe(false);
+  }, 60_000);
+
+  // Story 6.6: a MODIFIED (tracked) source unknown to the map still forces the full suite.
+  it("runs the full suite when a modified tracked source is unknown to the map", async () => {
+    proj = makeProject(true);
+    seedCoverageMap(proj, { "math.ts": ["math.test.ts"], "other.ts": ["other.test.ts"] });
+    // unrelated.ts is tracked, modified, and absent from the map -> conservative full suite.
+    fs.appendFileSync(path.join(proj, "unrelated.ts"), `// touched\n`);
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    expect(result.selection.strategy).toBe("full");
+    expect(result.total).toBe(2);
   }, 60_000);
 });
