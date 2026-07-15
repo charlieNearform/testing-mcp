@@ -85,7 +85,12 @@ These must hold across every component and story:
   no longer rotates per start. The live token is also mirrored into the `0600`
   `daemon.lock` alongside pid/port; the CLI reads it and injects `Authorization: Bearer
   <token>`. MCP requests without it are rejected. (Host/Origin validation above is the
-  primary DNS-rebinding defense; the token is defense-in-depth plus multi-user protection.)
+  primary DNS-rebinding defense; the token is defense-in-depth and stops other local users
+  from *driving* the daemon — running tests / mutating state via `/mcp`.)
+- **`/ui` and `/health` are intentionally unauthenticated** (loopback + Host/Origin only, no
+  bearer). `/ui*` is strictly **read-only** — it lists projects and reports run state, and
+  cannot trigger any action the token guards. The trade-off is that it discloses project
+  paths and results to any local user; acceptable for the on-machine, single-user model.
 - Sessions: `StreamableHTTPServerTransport({ sessionIdGenerator })` with a
   session→transport map keyed by `Mcp-Session-Id`.
 
