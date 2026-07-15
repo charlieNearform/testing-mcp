@@ -19,6 +19,26 @@ Security**, referencing the GitHub issue (`#123`) where applicable.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Coverage watch mode no longer self-loops.** A coverage-enabled watch run wrote+deleted a
+  transient baseline test in the project root, which the watcher saw and re-triggered
+  forever; the watcher now ignores `__test-mcp-*` files.
+- **`test-mcp link --force` no longer deletes a real file.** `--force` now overwrites only an
+  existing symlink; it refuses to clobber a regular file, matching `unlink`.
+- **`registry.json` is written atomically** (temp file + rename) so an interrupted write can
+  no longer truncate it and lose every registered project.
+- **External input is validated with Zod at the boundary**: fork() IPC messages
+  (`parseToWorker`/`parseFromWorker`), `config.json`, and `registry.json` entries — malformed
+  data is rejected instead of corrupting daemon state.
+- **Global worker concurrency is bounded** by `maxConcurrentWorkers` (previously loaded but
+  unused), preventing an unbounded fork storm across many projects.
+- Expired dry-run plans are swept from the in-memory cache; a partial/hand-edited coverage
+  map can no longer throw in the selection path; a dispatched run that matches zero tests is
+  reported as success (nothing failed); the live daemon no longer self-closes on a transient
+  socket error; CLI output is flushed before exit so piped output isn't truncated; the
+  "not found" bin hint says `pnpm build`; IPv6 loopback Host/Origin parsing is corrected.
+
 ### Added
 
 - `docs/usage.md`: a how-to-run guide covering the daemon lifecycle, project registration,

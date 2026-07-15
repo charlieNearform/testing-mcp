@@ -51,7 +51,8 @@ These must hold across every component and story:
 **Components:**
 
 - **CLI (`test-mcp`)** — thin launcher/client, no Vitest coupling; safe to install
-  globally or run via `npx`. Commands: `init`, `register`, `start`, `stop`, `status`.
+  globally or run via `npx`. Commands: `init`, `register`, `start`, `stop`, `status`,
+  `link`, `unlink`.
 - **MCP Layer** — `McpServer` + tool registration; Streamable HTTP transport (primary)
   and optional stdio single-project mode. Handles auth, Host/Origin validation, sessions.
 - **Project Registry** — central record of registered projects (`projectId` → path,
@@ -124,19 +125,24 @@ All files are JSON with a `schemaVersion`. Locations per invariant 3.
 }
 ```
 
-**Coverage map** (repo, `<git-root>/.test-mcp/coverage-map.json`)
+**Coverage map** (repo, `<git-root>/.test-mcp/coverage-map.json`, schemaVersion 3)
 ```jsonc
 {
-  "schemaVersion": 1,
-  "builtAt": "2026-07-10T12:00:00Z",
-  "entries": {
-    "src/foo.ts": { "tests": ["test/foo.test.ts"], "measuredHash": "…" }
-  }
+  "schemaVersion": 3,
+  "projectId": "a1b2c3…",           // keyed by project so a copied map is unambiguous
+  "updatedAt": "2026-07-10T12:00:00Z",
+  "map": {
+    "src/foo.ts": { "tests": ["test/foo.test.ts"], "lastMeasured": "2026-07-10T12:00:00Z" }
+  },
+  "fullSuiteTriggers": ["src/i18n.ts"], // setup-baseline modules: a change here runs everything
+  "alwaysRun": ["test/heavy.test.tsx"]  // unmeasurable tests: always selected on a relevant change
 }
 ```
 
-**Run history** (repo, `<git-root>/.test-mcp/history/*.json`) — per-run records:
-counts, duration, failures, selection reasoning, and (Phase 2) failure/flake stats.
+**Run history** (repo, `<git-root>/.test-mcp/history/*.json`) — **planned, not yet
+implemented**: per-run records (counts, duration, failures, selection reasoning, and
+Phase-2 failure/flake stats). Today run results are held only in memory
+(`get_test_status.lastResult`).
 
 **Plan cache** (in-memory, daemon) — `planId → { projectId, files, reasoning, createdAt }`
 with short TTL; used by the dry-run → commit flow.
@@ -151,20 +157,25 @@ Input schemas are Zod; `outputSchema` gives structured results. Summary contract
 | `register_project` | `{ path }` | `{ projectId, path, status }` |
 | `list_projects` | `{}` | `{ projects: [{ projectId, path, status }] }` |
 | `unregister_project` | `{ projectId, purge? }` | `{ projectId, removed: true }` |
-| `run_tests` | `{ projectId, mode?, files?, suite?, dryRun?, planId? }` | `TestResult` \| `TestPlan` |
-| `get_test_status` | `{ projectId }` | `{ state: idle\|running\|complete\|error, latest?: TestResult }` |
-| `get_failure_details` | `{ projectId, failureId }` | `{ name, file, message, stack, assertion? }` |
+| `run_tests` | `{ projectId, mode?, coverage?, files?, suite?, dryRun?, planId? }` | `TestResult` \| `TestPlan` |
+| `get_test_status` | `{ projectId }` | `{ state, progress?, lastResult?, lastError?, updatedAt?, watch? }` |
+| `start_watch` | `{ projectId, fastMode? }` | `WatchStatus` |
+| `stop_watch` | `{ projectId }` | `{ stopped }` |
+| `get_failure_details` | `{ projectId, failureId }` | `{ name, file, message, stack, expected?, actual?, diff? }` |
 
 ```typescript
 interface TestResult {
-  success: boolean; duration: number;
+  success: boolean; summary: string; duration: number;
   total: number; passed: number; failed: number; skipped: number;
   failures: Array<{ id: string; name: string; file: string; message: string }>; // details via get_failure_details
   selection: { strategy: "full" | "incremental"; reason: string; files: string[] };
+  metadata?: { wallClockMs: number; testExecMs: number; overheadMs: number; isolate: boolean };
 }
 
 interface TestPlan {   // returned when dryRun=true
-  planId: string; files: string[]; reasoning: string; expiresAt: string;
+  planId: string; projectId: string; strategy: "full" | "incremental";
+  files: string[]; reasoning: string; createdAt: string; expiresAt: string;
+  metadata: { latencyMs: number };
 }
 ```
 
@@ -201,15 +212,17 @@ executes exactly that plan (re-derives if the plan expired).
 
 ## Concurrency & Lifecycle
 
-- **Worker pool**: at most one warm worker per active project (`createVitest({ watch: true })`),
-  bounded by `maxConcurrentWorkers` globally. LRU-evict/reap idle workers after
-  `workerIdleTtlMs`.
+- **Worker model** *(current)*: the orchestrator **cold-forks a fresh worker per run** and
+  kills it when the run settles. Total concurrent workers across all projects are bounded by
+  a global semaphore sized to `maxConcurrentWorkers`.
 - **Per-project serialization**: a project handles one run at a time; concurrent requests
   for the same project queue.
-- **Cancellation**: `run_tests` can be cancelled (client disconnect or explicit) → IPC
-  cancel message → `vitest.cancelCurrentRun()`.
-- **Crash handling**: a crashed worker is respawned on next request; project status →
-  `error` with the captured cause until a successful run.
+- **Crash handling**: a worker that crashes/exits before returning fails the run with
+  `WorkerFailure` and sets project status → `error`; the next request forks a fresh worker.
+- **Planned (not yet implemented)**: a *warm* per-project pool
+  (`createVitest({ watch: true })`) with LRU/idle reaping after `workerIdleTtlMs`, and
+  in-flight **cancellation** on client disconnect (IPC `cancel` → `vitest.cancelCurrentRun()`).
+  The `cancel` IPC message and `workerIdleTtlMs` config exist but are inert today.
 
 ## Daemon ↔ Worker IPC
 
@@ -218,17 +231,20 @@ executes exactly that plan (re-derives if the plan expired).
 ```typescript
 // daemon → worker
 type ToWorker =
-  | { type: "run"; runId: string; files: string[]; coverage: boolean; allTestsRun: boolean }
-  | { type: "cancel"; runId: string }
+  | { type: "run"; runId: string; projectId: string; files: string[]; coverage: boolean; allTestsRun: boolean; changed: boolean }
+  | { type: "cancel"; runId: string }   // defined but not yet handled by the worker
   | { type: "shutdown" };
 
 // worker → daemon
 type FromWorker =
   | { type: "ready" }
   | { type: "progress"; runId: string; completed: number; total: number }
-  | { type: "result"; runId: string; result: TestResult; coverageDelta?: CoverageDelta }
+  | { type: "result"; runId: string; result: TestResult; coverageDelta?: CoverageDelta; failureDetails?: FailureDetail[] }
   | { type: "error"; runId: string; message: string; stack?: string };
 ```
+
+Both ends validate the received message with Zod at the process boundary (`parseToWorker` /
+`parseFromWorker`) and reject malformed messages rather than acting on garbage fields.
 
 `progress` messages map to MCP `notifications/progress` (with a `progressToken`) on the
 originating tool call. The final `result` is the authoritative `tools/call` response.
@@ -236,9 +252,13 @@ originating tool call. The final `result` is the authoritative `tools/call` resp
 ## Coverage Map Build (primary technical risk — spike VALIDATED)
 
 Per `docs/patterns.md` (Coverage-to-Test Mapping): run test files with V8 precise
-coverage in a **single pass** (serially in one process), snapshot cumulative coverage
-after each file, diff to attribute execution → source→test-file map. Granularity is
-**test-file level**. Incremental: hash each test file; re-measure only changed/new files.
+coverage, attributing execution → source→test-file map. Granularity is **test-file level**.
+
+> **Implementation note (current):** the engine measures **per test file** (each in its own
+> Vitest run) and tracks freshness with a `lastMeasured` timestamp per entry; it re-measures
+> the explicit set of target files it is given. The **single-pass** snapshot-diff and
+> **content-hash**-driven incremental re-measure described below are the intended design but
+> are not yet implemented (see `deferred-work.md`).
 
 Validated by the spike (`docs/coverage-spike-findings.md`) on the real target repo. Two
 mandatory refinements came out of it:
@@ -266,11 +286,13 @@ Tool errors return structured MCP error responses (never crash the daemon):
 - `PlanExpired` — `planId` no longer cached (client should re-plan).
 - `ValidationError` — schema validation of tool input failed.
 - `DaemonUnavailable` — CLI-side: cannot reach/boot the daemon.
+- `NotImplemented` — a tool was invoked before its backing subsystem was wired in
+  (internal guard; not expected in a fully-initialized daemon).
 
 ## Cross-Cutting
 
-- **Logging**: structured logs to stderr (stdout is reserved for stdio JSON-RPC);
-  per-run logs retained in history.
+- **Logging**: structured logs to stderr (stdout is reserved for stdio JSON-RPC).
+  (Per-run history persistence is planned — see Data Model.)
 - **Versioning/migration**: on load, if a file's `schemaVersion` is older, run a migration;
   unknown newer version → refuse and warn.
 - **Testing the tool itself**: unit-test the Selection/Coverage engines with fixtures;

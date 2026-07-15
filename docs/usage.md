@@ -145,7 +145,7 @@ daemon crash). Codes: `UnknownProject`, `InvalidConfig`, `WorkerFailure`, `PlanE
 | `list_projects` | `{}` | `{ projects: [...] }` |
 | `unregister_project` | `{ projectId, purge? }` | `{ projectId, removed }` — `purge` also deletes the project's `.test-mcp/` state |
 | `run_tests` | `{ projectId, mode?, coverage?, files?, suite?, dryRun?, planId? }` | `TestResult`, or a `TestPlan` when `dryRun` |
-| `get_test_status` | `{ projectId }` | `{ state, latest?, watch? }` |
+| `get_test_status` | `{ projectId }` | `{ state, progress?, lastResult?, lastError?, watch? }` |
 | `start_watch` | `{ projectId, fastMode? }` | watch status |
 | `stop_watch` | `{ projectId }` | `{ stopped }` |
 | `get_failure_details` | `{ projectId, failureId }` | `{ name, file, message, stack, assertion? }` |
@@ -222,7 +222,6 @@ check that also needs no auth.
 | Project registry | `~/.test-mcp/registry.json` | central record of registered projects |
 | Per-project config | `<git-root>/.test-mcp/config.json` | `projectId`, `stateDir`; git-ignored |
 | Coverage map | `<git-root>/.test-mcp/coverage-map.json` | source→test reverse map |
-| Run history | `<git-root>/.test-mcp/history/*.json` | per-run records |
 
 Environment overrides:
 
