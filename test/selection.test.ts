@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { SelectionEngine, isTestFile } from "../src/selection/index.ts";
+import {
+  SelectionEngine,
+  isTestFile,
+  filterChangedPaths,
+  DEFAULT_IGNORE_PATTERNS,
+} from "../src/selection/index.ts";
 import type { CoverageMapFile } from "../src/coverage/index.ts";
 
 function mapWith(
@@ -93,5 +98,72 @@ describe("isTestFile", () => {
     expect(isTestFile("a.spec.tsx")).toBe(true);
     expect(isTestFile("src/__tests__/a.ts")).toBe(true);
     expect(isTestFile("src/a.ts")).toBe(false);
+  });
+});
+
+describe("filterChangedPaths (Story 6.5)", () => {
+  const defaults = [...DEFAULT_IGNORE_PATTERNS];
+
+  it("drops test-irrelevant paths via the built-in default set", () => {
+    const files = [
+      "README.md",
+      "docs/guide.mdx",
+      "notes.txt",
+      "docs/deep/page.md",
+      ".gitignore",
+      "CLAUDE.md",
+      ".vscode/settings.json",
+      "LICENSE",
+      ".github/workflows/ci.yml",
+    ];
+    expect(filterChangedPaths(files, defaults)).toEqual([]);
+  });
+
+  it("keeps code and build/test config via keep-always even against a matching ignore pattern", () => {
+    const files = ["package.json", "tsconfig.json", "src/x.ts"];
+    // A user pattern that would otherwise match all of these.
+    expect(filterChangedPaths(files, [...defaults, "*.json", "src/**"])).toEqual([
+      "package.json",
+      "tsconfig.json",
+      "src/x.ts",
+    ]);
+  });
+
+  it("keeps lockfiles, config files, and vitest.setup via keep-always", () => {
+    const files = ["pnpm-lock.yaml", "vitest.config.ts", "vitest.setup.ts", "tsconfig.build.json"];
+    expect(filterChangedPaths(files, ["*.yaml", "*.ts", "tsconfig*.json"])).toEqual(files);
+  });
+
+  it("keeps relevant files while dropping only the matched ones (mixed set)", () => {
+    const files = ["README.md", "src/app.ts", ".gitignore"];
+    expect(filterChangedPaths(files, defaults)).toEqual(["src/app.ts"]);
+  });
+
+  it("keeps .mts/.cts modules and uppercase-extension sources via keep-always", () => {
+    // isTestFile recognizes .mts/.cts; keep-always must too, and be case-insensitive.
+    const files = ["feature.test.mts", "util.cts", "Widget.TS"];
+    expect(filterChangedPaths(files, ["*.mts", "*.cts", "*.ts"])).toEqual(files);
+  });
+
+  it("supports the documented matcher forms", () => {
+    // *.ext basename glob at any depth
+    expect(filterChangedPaths(["a/b/foo.snap"], ["*.snap"])).toEqual([]);
+    // bare name matches basename at any depth
+    expect(filterChangedPaths(["config/robots.txt", "robots.txt"], ["robots.txt"])).toEqual([]);
+    // dir/** subtree
+    expect(filterChangedPaths(["assets/img/logo.png", "assets/x.json"], ["assets/**"])).toEqual([]);
+    // leading-/ root anchoring: only matches at the root
+    expect(filterChangedPaths(["build.log", "nested/build.log"], ["/build.log"])).toEqual([
+      "nested/build.log",
+    ]);
+    // a non-code file that matches nothing survives
+    expect(filterChangedPaths(["data.csv"], ["*.snap"])).toEqual(["data.csv"]);
+  });
+
+  it("ignores comment and blank lines in the pattern list", () => {
+    const patterns = ["# a comment", "", "   ", "*.snap"];
+    expect(filterChangedPaths(["foo.snap", "keep.csv"], patterns)).toEqual(["keep.csv"]);
+    // A comment must not accidentally act as a pattern.
+    expect(filterChangedPaths(["# a comment"], ["# a comment"])).toEqual(["# a comment"]);
   });
 });

@@ -87,4 +87,55 @@ describe("git-aware delta selection", () => {
     expect(result.selection.strategy).toBe("full");
     expect(result.total).toBe(2);
   }, 60_000);
+
+  // Story 6.5: test-irrelevant changes are filtered before selection.
+  it("collapses to an incremental no-op when only a non-code file changed (not full)", async () => {
+    proj = makeProject(true);
+    fs.writeFileSync(path.join(proj, "README.md"), "# docs only\n");
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    expect(result.selection.strategy).toBe("incremental");
+    expect(result.total).toBe(0);
+  }, 60_000);
+
+  it("still runs when a non-code file changes alongside a real (unmapped) source", async () => {
+    proj = makeProject(true);
+    fs.writeFileSync(path.join(proj, "README.md"), "# docs only\n");
+    // unrelated.ts is imported by no test -> git --changed finds nothing -> full-suite fallback.
+    fs.appendFileSync(path.join(proj, "unrelated.ts"), `// touched\n`);
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    expect(result.selection.strategy).toBe("full");
+    expect(result.total).toBe(2);
+  }, 60_000);
+
+  it("honours a project .test-mcp-ignore pattern for a non-code file (no-op)", async () => {
+    proj = makeProject(true);
+    // Commit the ignore file so it is not itself an outstanding change.
+    fs.writeFileSync(path.join(proj, ".test-mcp-ignore"), "# custom\n*.snap\n");
+    execFileSync("git", ["add", "-A"], { cwd: proj });
+    execFileSync("git", ["commit", "-q", "-m", "add ignore"], { cwd: proj, env: GIT_ENV });
+    fs.writeFileSync(path.join(proj, "foo.snap"), "snapshot\n");
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    expect(result.selection.strategy).toBe("incremental");
+    expect(result.total).toBe(0);
+  }, 60_000);
+
+  it("never filters package.json (keep-always) so it still triggers a run", async () => {
+    proj = makeProject(true);
+    fs.writeFileSync(path.join(proj, "package.json"), `{ "name": "tmp", "version": "0.0.0" }\n`);
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    // Not the incremental no-op: package.json survived filtering and drove a real run.
+    expect(result.total).toBeGreaterThan(0);
+  }, 60_000);
 });

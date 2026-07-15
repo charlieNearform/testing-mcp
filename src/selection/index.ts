@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { CoverageMapFile } from "../coverage/index.js";
 
@@ -95,9 +96,118 @@ export class SelectionEngine {
 }
 
 /**
+ * Keep-always allowlist (Story 6.5) — files that could change JS/TS test behaviour and so
+ * must NEVER be dropped, even if a user `.test-mcp-ignore` pattern would match them. This is
+ * the load-bearing safety net for architecture invariant 5 and is checked BEFORE any ignore
+ * rule. Paths are POSIX-relative; we match on the basename except for the code-extension rule.
+ */
+function isKeepAlways(rel: string): boolean {
+  const base = rel.split("/").pop() ?? rel;
+  // Any JS/TS source (covers *.config.{js,ts,mjs,cjs} and the .mts/.cts module extensions
+  // that isTestFile also recognizes). Case-insensitive for case-insensitive filesystems.
+  if (/\.(js|jsx|ts|tsx|mjs|cjs|mts|cts)$/i.test(base)) return true;
+  if (base === "package.json") return true;
+  if (base === "pnpm-lock.yaml" || base === "package-lock.json" || base === "yarn.lock") return true;
+  if (/^tsconfig.*\.json$/.test(base)) return true;
+  if (/^vitest\.setup\./.test(base)) return true;
+  return false;
+}
+
+/**
+ * Built-in default ignore set (Story 6.5): provably test-irrelevant non-code and
+ * VCS/editor/agent dotfiles. Combined with any project `.test-mcp-ignore` patterns.
+ */
+export const DEFAULT_IGNORE_PATTERNS: readonly string[] = [
+  "*.md",
+  "*.mdx",
+  "*.txt",
+  "docs/**",
+  "LICENSE*",
+  ".gitignore",
+  ".gitattributes",
+  ".editorconfig",
+  ".mcp.json",
+  "CLAUDE.md",
+  ".cursor/**",
+  ".cursorrules",
+  ".vscode/**",
+  ".idea/**",
+  ".github/**",
+];
+
+/**
+ * Minimal gitignore-style glob → RegExp. Supported forms:
+ *   - `*.ext` / bare-name / bare-path globs (`*` → `[^/]*`, does not cross `/`)
+ *   - `dir/**` subtrees (`**` → `.*`, crosses `/`)
+ *   - leading-`/` root anchoring; a pattern containing a `/` is also root-anchored
+ *     (per gitignore), while a slash-free pattern matches the basename at any depth.
+ * NOTE: `!` negation and `?` single-char wildcards are intentionally UNSUPPORTED — a `?`
+ * is treated as a literal character, and a leading `!` has no special meaning here.
+ */
+function globToRegExp(glob: string): RegExp {
+  let pattern = glob;
+  let anchored = false;
+  if (pattern.startsWith("/")) {
+    anchored = true;
+    pattern = pattern.slice(1);
+  } else if (pattern.includes("/")) {
+    anchored = true;
+  }
+
+  let body = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === "*") {
+      if (pattern[i + 1] === "*") {
+        body += ".*";
+        i++;
+      } else {
+        body += "[^/]*";
+      }
+    } else if (".+?^${}()|[]\\".includes(c)) {
+      body += "\\" + c;
+    } else {
+      body += c;
+    }
+  }
+
+  const prefix = anchored ? "^" : "(?:^|/)";
+  return new RegExp(prefix + body + "$");
+}
+
+/**
+ * Pure filter (Story 6.5): drop paths matched by any ignore `pattern`, EXCEPT keep-always
+ * members which are evaluated first and never dropped. Blank lines and `#` comments in
+ * `patterns` are skipped. Exported so the matcher + allowlist are unit-testable without git.
+ */
+export function filterChangedPaths(files: string[], patterns: string[]): string[] {
+  const regexps = patterns
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0 && !p.startsWith("#"))
+    .map(globToRegExp);
+  return files.filter((f) => {
+    if (isKeepAlways(f)) return true;
+    return !regexps.some((re) => re.test(f));
+  });
+}
+
+/** Read `<projectRoot>/.test-mcp-ignore` lines; missing/unreadable → no extra patterns. */
+function readIgnorePatterns(projectRoot: string): string[] {
+  try {
+    return fs.readFileSync(path.join(projectRoot, ".test-mcp-ignore"), "utf8").split(/\r?\n/);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Repo-relative changed files: working tree vs HEAD (tracked) plus untracked files.
  * Returns null when git is unavailable/not a repo so callers fall back to the full suite.
  * Paths are POSIX-style relative to the project root (which is the git root for registered projects).
+ *
+ * Test-irrelevant paths (built-in defaults + optional `.test-mcp-ignore`) are filtered out
+ * here (Story 6.5); an all-filtered set collapses to `[]`, which `plan()` treats as the
+ * existing "no changes detected" incremental no-op — not a full suite.
  */
 export function getChangedFiles(projectRoot: string): string[] | null {
   try {
@@ -112,7 +222,8 @@ export function getChangedFiles(projectRoot: string): string[] | null {
       .map((s) => s.trim())
       .filter(Boolean)
       .map((s) => s.split(path.sep).join("/"));
-    return unique(files);
+    const patterns = [...DEFAULT_IGNORE_PATTERNS, ...readIgnorePatterns(projectRoot)];
+    return unique(filterChangedPaths(files, patterns));
   } catch {
     return null;
   }

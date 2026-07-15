@@ -20,3 +20,15 @@
 - source_spec: `spec-6-4-surface-real-selection-reason.md`
   summary: A run's `TestResult` object is shared by reference across `recordRun` (history), `setRunState` (`lastResult`), and `resolve` (the returned value); any later in-place mutation of one silently corrupts the others.
   evidence: Pre-existing pattern (predates Story 6.4); the 6.4 stamp mutates `result.selection` before all three consumers, which is consistent today but entrenches the shared-mutable-reference hazard. A defensive clone of the run result before fan-out would remove the latent risk.
+
+## Deferred from: spec-6-5-ignore-test-irrelevant-changes (2026-07-15)
+
+- source_spec: `spec-6-5-ignore-test-irrelevant-changes.md`
+  summary: Default-ignoring non-code files (`*.md`/`*.txt`/`docs/**`) can silence a rerun for a *fixture-driven* test that reads such a file, and an all-filtered changeset is indistinguishable from a clean tree (no signal).
+  evidence: The filter runs before `plan()`, so a non-code fixture a test reads at runtime — which coverage never maps — is dropped instead of forcing the "unknown source → full suite" safeguard. Ratified as the intended "ignore non-code" default, but Story 6.8 (confidence signal) should surface when a run's entire changed set was filtered so a fixture-only edit isn't a silent no-op. Users can also keep specific paths out of the default set (future: allow un-ignoring).
+- source_spec: `spec-6-5-ignore-test-irrelevant-changes.md`
+  summary: The `.test-mcp-ignore` matcher supports only a documented subset of gitignore syntax; several forms are unsupported and fail toward MORE running.
+  evidence: `!` negation compiles to a literal, `?`/`[…]` are literal, trailing-slash `dir/` and bare `dir` don't match a directory's contents (need `dir/**`), leading `**/x` and middle `a/**/b` don't collapse zero dirs, and backslash-separated patterns don't match POSIX paths. All fail safe (nothing excluded → more runs), but silently — a fuller matcher or startup validation/warning would help.
+- source_spec: `spec-6-5-ignore-test-irrelevant-changes.md`
+  summary: keep-always allowlist is not exhaustive for all build/test configs, and `readIgnorePatterns` swallows non-ENOENT errors.
+  evidence: `babel.config.json`, `jest.config.json`, `.mocharc.*`, `.swcrc`, `.env*`, `vitest.workspace.*` are not on keep-always (safe unless a broad user pattern like `*.json` drops them). A present-but-unreadable `.test-mcp-ignore` (EACCES/EISDIR) is treated as absent with no warning.
