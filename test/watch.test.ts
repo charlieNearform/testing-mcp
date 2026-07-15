@@ -76,12 +76,16 @@ describe("WatchManager", () => {
     // Change a source the map attributes to math.test.ts.
     fs.appendFileSync(path.join(proj, "math.ts"), `// touched\n`);
 
-    await poll(() => manager!.status("w1").runsCompleted >= 1, 60_000);
+    // This test forks a real project-local Vitest worker; under the full suite's parallel load
+    // (many worker-forking integration tests at once) that fork+run can be starved well past a few
+    // seconds, so the poll is given generous headroom to avoid a contention flake (it completes in
+    // ~2s in isolation). See deferred-work.md "Testing infrastructure".
+    await poll(() => manager!.status("w1").runsCompleted >= 1, 150_000);
     const st = manager.status("w1");
     expect(st.state).toBe("complete");
     expect(st.lastResult?.selection.files.some((f) => f.includes("math.test.ts"))).toBe(true);
     expect(st.lastResult?.selection.files.some((f) => f.includes("other.test.ts"))).toBe(false);
-  }, 90_000);
+  }, 180_000);
 
   it("reports not-watching status and stop() is a no-op for unknown projects", () => {
     const orch = new Orchestrator({ workerPath });

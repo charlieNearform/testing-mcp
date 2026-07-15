@@ -110,5 +110,5 @@ These are residual edges the review surfaced, all safe-direction or narrow.)
 ## Testing infrastructure (2026-07-15)
 
 - source: Epic 6 dev-auto runs
-  summary: `test/watch.test.ts` ("re-runs affected tests when a source file changes") intermittently times out (~60s poll) when the FULL suite runs in parallel — worker/CPU starvation, not a logic bug. It passes reliably in isolation (~1.6s) and on a clean full run.
-  evidence: Recurs across several Epic 6 runs. Not introduced by any Epic 6 story. Options: give the watch test its own non-parallel pool/`describe.sequential`, raise its internal poll timeout, or run watch tests in a separate Vitest project. Flaky-green risk in CI — worth stabilizing before relying on `pnpm test` as a hard gate.
+  summary: `test/watch.test.ts` ("re-runs affected tests when a source file changes") intermittently timed out (~60s poll) when the FULL suite runs in parallel — worker/CPU starvation, not a logic bug. It passes reliably in isolation (~2s).
+  evidence: MITIGATED 2026-07-15 by raising its poll timeout to 150s / test timeout to 180s so the worker fork+run isn't cut off under full-suite contention (it still completes in ~2s normally; the headroom only matters under load). This TOLERATES the contention rather than removing it — a genuine hang now takes up to 150s to surface. A cleaner root-cause fix remains available: give the worker-forking integration tests their own non-parallel Vitest pool (or lower `maxWorkers` for them) so they don't starve each other. Revisit if the timeout bump proves insufficient in CI.
