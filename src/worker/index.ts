@@ -297,6 +297,16 @@ export async function runVitest(
       if (!byId.has(m.moduleId)) byId.set(m.moduleId, m);
     }
     const mergedModules = [...byId.values()];
+    // Both signals selected zero test files for a change we were told exists -> never silently
+    // report "0 passed" (a silent skip). Fall back to the full suite, matching the lone `--changed`
+    // branch below (Story 6.8; closes the 6.6 union-branch gap).
+    if (mergedModules.length === 0) {
+      const full = await runOnce(startVitest, [], {}, onProgress);
+      return build(full, {
+        strategy: "full",
+        reason: "incremental selection matched no test files; ran full suite",
+      });
+    }
     const mergedUnhandled = [...primary.unhandled, ...(staticRun?.unhandled ?? [])];
     const wall = primary.wallClockMs + (staticRun?.wallClockMs ?? 0);
     return {

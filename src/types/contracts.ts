@@ -1,5 +1,17 @@
 import { z } from "zod";
 
+/**
+ * How confident selection is that the tests it ran fully cover the changes (Story 6.8).
+ * `high` = provably complete (a full run, only-test-file changes, or all changed sources mapped);
+ * `degraded` = bounded but not provably complete (an unmapped source, a deletion we can't bound,
+ * or no coverage map), with `reasons` naming each cause so the agent can run a full pass.
+ * Single source of truth — the Selection Engine and orchestrator import this shape.
+ */
+export interface Confidence {
+  level: "high" | "degraded";
+  reasons: string[];
+}
+
 export interface TestResult {
   success: boolean;
   /** One-line, failure-forward summary for cheap agent consumption (Story 4.3). */
@@ -20,6 +32,8 @@ export interface TestResult {
     reason: string;
     files: string[];
   };
+  /** Selection confidence (Story 6.8). Optional/additive — absent on runs that predate the signal. */
+  confidence?: Confidence;
   /** Timing breakdown so daemon/worker overhead is observable (NFR7). Optional; added in Story 2.1. */
   metadata?: {
     wallClockMs: number;
@@ -49,6 +63,8 @@ export interface TestPlan {
   /** Concrete test files to run; empty means "determined at run time" (full suite or git --changed). */
   files: string[];
   reasoning: string;
+  /** Selection confidence for this plan (Story 6.8), so a dry-run preview surfaces the verdict too. */
+  confidence?: Confidence;
   createdAt: string;
   expiresAt: string;
   metadata: {

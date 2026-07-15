@@ -2,6 +2,9 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { CoverageMapFile } from "../coverage/index.js";
+import type { Confidence } from "../types/contracts.js";
+
+export type { Confidence };
 
 /**
  * Selection Engine (Story 3.5) — decides the minimum SAFE set of test files to run
@@ -20,10 +23,16 @@ import type { CoverageMapFile } from "../coverage/index.js";
  */
 
 export type SelectionPlan =
-  | { strategy: "full"; reason: string }
+  | { strategy: "full"; reason: string; confidence: Confidence }
   /** No map yet: defer to the worker's git `--changed` pass (Story 3.1). */
-  | { strategy: "changed-only"; reason: string }
-  | { strategy: "incremental"; reason: string; testFiles: string[]; union: boolean };
+  | { strategy: "changed-only"; reason: string; confidence: Confidence }
+  | {
+      strategy: "incremental";
+      reason: string;
+      testFiles: string[];
+      union: boolean;
+      confidence: Confidence;
+    };
 
 export interface SelectionInput {
   /** Repo-relative changed files (working tree vs HEAD, incl. untracked); null if undeterminable. */
@@ -31,11 +40,21 @@ export interface SelectionInput {
   /**
    * Repo-relative NEW (untracked) subset of `changedFiles` (Story 6.6). A new source unknown
    * to the map has no prior runtime dependents, so the git static-graph union (`--changed`)
-   * bounds it — it does NOT force a full suite the way a MODIFIED unmapped source does.
+   * bounds it — flagged `degraded` (Story 6.8) rather than forcing a full suite.
    */
   addedFiles?: string[];
   /** The project's coverage map, or null if none has been built. */
   map: CoverageMapFile | null;
+  /**
+   * Opt-out (Story 6.8, AC5): restore the old force-full-on-uncertainty behaviour. When true, a
+   * source unknown to the map forces the full suite instead of a bounded+degraded incremental run.
+   */
+  strict?: boolean;
+}
+
+const HIGH: Confidence = { level: "high", reasons: [] };
+function degraded(reasons: string[]): Confidence {
+  return { level: "degraded", reasons };
 }
 
 /** A test file by convention (path- or name-based). Matches the Coverage Engine's rule. */
@@ -45,68 +64,106 @@ export function isTestFile(rel: string): boolean {
 
 export class SelectionEngine {
   static plan(input: SelectionInput): SelectionPlan {
-    const { changedFiles, addedFiles, map } = input;
+    const { changedFiles, addedFiles, map, strict } = input;
 
-    // Can't tell what changed (e.g. not a git repo) -> safest is the full suite.
+    // Can't tell what changed (e.g. not a git repo) -> full suite, which IS complete -> high.
     if (changedFiles === null) {
-      return { strategy: "full", reason: "cannot determine changed files (not a git repo?)" };
+      return {
+        strategy: "full",
+        reason: "cannot determine changed files (not a git repo?)",
+        confidence: HIGH,
+      };
     }
     if (changedFiles.length === 0) {
-      return { strategy: "incremental", reason: "no changes detected", testFiles: [], union: false };
+      return {
+        strategy: "incremental",
+        reason: "no changes detected",
+        testFiles: [],
+        union: false,
+        confidence: HIGH,
+      };
     }
 
     const changedTests = changedFiles.filter(isTestFile);
     const changedSources = changedFiles.filter((f) => !isTestFile(f));
 
-    // Only test files changed -> run exactly those (AC1).
+    // Only test files changed -> run exactly those (AC1): provably complete.
     if (changedSources.length === 0) {
       return {
         strategy: "incremental",
         reason: "only test files changed",
         testFiles: unique(changedTests),
         union: false,
+        confidence: HIGH,
       };
     }
 
-    // Source files changed but no map yet -> use the git static-graph pass (Story 3.1 behaviour).
+    // Source files changed but no map yet. `strict` (AC5) wants force-full on ANY unmapped-source
+    // uncertainty — and "no map at all" is the maximal such case — so honour it here too. Otherwise
+    // defer to the git static-graph pass (Story 3.1); we can't confirm the static graph catches
+    // every dependent (dynamic imports are invisible), so the run is degraded.
     if (!map) {
+      if (strict) {
+        return {
+          strategy: "full",
+          reason: "source changed; no coverage map (strict)",
+          confidence: HIGH,
+        };
+      }
       return {
         strategy: "changed-only",
         reason: "source changed; no coverage map yet — using git static-graph",
+        confidence: degraded(["no coverage map yet — relying on the git static import graph"]),
       };
     }
 
     // Source files changed WITH a map -> map selection, unioned with the static graph at run time.
     const selected = new Set<string>(changedTests);
-    let boundedNewFiles = false;
+    const reasons: string[] = [];
     for (const src of changedSources) {
       if (map.fullSuiteTriggers.includes(src)) {
-        return { strategy: "full", reason: `changed file is a full-suite trigger: ${src}` };
+        // A full run IS complete -> high, regardless of any other changed file.
+        return {
+          strategy: "full",
+          reason: `changed file is a full-suite trigger: ${src}`,
+          confidence: HIGH,
+        };
       }
       const entry = map.map[src];
       if (!entry) {
-        // Unknown to the map. A NEW (untracked) source has no prior runtime dependents, so the
-        // `union: true` git static-graph pass (`--changed`) already bounds it to its new test and
-        // any existing importer — no need to force the full suite (Story 6.6). A MODIFIED unmapped
-        // source stays conservative: we can't bound its blast radius safely (AC3, invariant 5).
-        if (addedFiles?.includes(src)) {
-          boundedNewFiles = true;
-          continue;
+        // Unknown to the map. `strict` (AC5) restores the old force-full behaviour. Otherwise the
+        // `union: true` git static-graph pass (`--changed`) bounds it — a NEW source has no prior
+        // runtime dependents (Story 6.6); a MODIFIED/DELETED one is softened from full to bounded
+        // (Story 6.8). Either way we can't prove the static graph caught every dependent (dynamic
+        // imports are invisible), so we flag the run degraded and name the file.
+        if (strict) {
+          return {
+            strategy: "full",
+            reason: `changed source unknown to coverage map: ${src} (strict)`,
+            confidence: HIGH,
+          };
         }
-        return { strategy: "full", reason: `changed source unknown to coverage map: ${src}` };
+        reasons.push(
+          addedFiles?.includes(src)
+            ? `new source bounded by the git static graph (dynamic imports may be missed): ${src}`
+            : `modified or deleted source not in the coverage map, bounded by the git static graph: ${src}`,
+        );
+        continue;
       }
       for (const t of entry.tests) selected.add(t);
     }
-    // Unmeasurable tests always run on a relevant (source) change (Story 3.4).
+    // Unmeasurable tests always run on a relevant (source) change (Story 3.4). They are force-run,
+    // so they do not reduce confidence — running them all IS complete coverage for them.
     for (const t of map.alwaysRun) selected.add(t);
 
     return {
       strategy: "incremental",
-      reason: boundedNewFiles
-        ? "coverage-map selection unioned with git static-graph (new files bounded by --changed)"
+      reason: reasons.length
+        ? "coverage-map selection unioned with git static-graph (unmapped changes bounded by --changed)"
         : "coverage-map selection unioned with git static-graph",
       testFiles: [...selected].sort(),
       union: true,
+      confidence: reasons.length ? degraded(reasons) : HIGH,
     };
   }
 }

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { TestResult, FailureDetail, TestPlan } from "../types/contracts.js";
 import { parseFromWorker, type ToWorker, type FromWorker } from "../types/ipc.js";
 import { loadCoverageMap } from "../coverage/index.js";
-import { SelectionEngine, getChangedFiles } from "../selection/index.js";
+import { SelectionEngine, getChangedFiles, type Confidence } from "../selection/index.js";
 import {
   selectionDelta,
   snapshotPayload,
@@ -81,6 +81,8 @@ interface ResolvedSelection {
    * never baselined as validated (invariant 5). Undefined for non-delta / non-git runs.
    */
   pendingSnapshot?: SnapshotFile | null;
+  /** Selection confidence verdict (Story 6.8), attached to the returned TestResult. */
+  confidence: Confidence;
 }
 
 interface StoredPlan {
@@ -89,6 +91,7 @@ interface StoredPlan {
   changed: boolean;
   empty: boolean;
   expiresAtMs: number;
+  confidence: Confidence;
 }
 
 type ProgressFn = (completed: number, total: number) => void;
@@ -160,6 +163,8 @@ export class Orchestrator {
       coverage?: boolean;
       /** Incremental baseline: "last-run" (default, hash-diff vs snapshot) or "head" (git HEAD). */
       since?: "last-run" | "head";
+      /** Opt-out (Story 6.8): force full on any unmapped-source uncertainty (old behaviour). */
+      strict?: boolean;
       onProgress?: ProgressFn;
     } = {},
   ): Promise<TestResult> {
@@ -178,7 +183,7 @@ export class Orchestrator {
   /** Compute a plan without executing (Story 4.1 dry-run). */
   plan(
     project: ProjectRef,
-    opts: { files?: string[]; mode?: string; since?: "last-run" | "head" },
+    opts: { files?: string[]; mode?: string; since?: "last-run" | "head"; strict?: boolean },
   ): TestPlan {
     this.sweepExpiredPlans();
     const started = Date.now();
@@ -192,6 +197,7 @@ export class Orchestrator {
       changed: sel.changed,
       empty: sel.empty,
       expiresAtMs,
+      confidence: sel.confidence,
     });
     return {
       planId,
@@ -199,6 +205,7 @@ export class Orchestrator {
       strategy: sel.strategy,
       files: sel.files,
       reasoning: sel.reason,
+      confidence: sel.confidence,
       createdAt: new Date(started).toISOString(),
       expiresAt: new Date(expiresAtMs).toISOString(),
       metadata: { latencyMs },
@@ -232,6 +239,7 @@ export class Orchestrator {
         // A committed plan replays a frozen selection; conservatively it does not advance the
         // last-run snapshot (never under-selects — the snapshot just stays on its prior baseline).
         deltaDriven: false,
+        confidence: stored.confidence,
       },
       false,
       opts.onProgress,
@@ -249,6 +257,7 @@ export class Orchestrator {
     const run = prev.catch(() => undefined).then(() => {
       if (sel.empty) {
         const result = emptyResult(sel.reason);
+        result.confidence = sel.confidence;
         const now = new Date().toISOString();
         this.advanceSnapshotIfDeltaRun(project, sel, result);
         this.recordRun({
@@ -278,7 +287,7 @@ export class Orchestrator {
   /** Resolve a request into concrete {files, changed} via the Selection Engine (Story 3.5). */
   private resolveSelection(
     project: ProjectRef,
-    opts: { files?: string[]; mode?: string; since?: "last-run" | "head" },
+    opts: { files?: string[]; mode?: string; since?: "last-run" | "head"; strict?: boolean },
   ): ResolvedSelection {
     const explicit = opts.files ?? [];
     if (opts.mode === "incremental" && explicit.length === 0) {
@@ -302,17 +311,18 @@ export class Orchestrator {
         changedFiles: changed?.files ?? null,
         addedFiles: changed?.added,
         map: loadCoverageMap(project.path),
+        strict: opts.strict,
       });
       if (plan.strategy === "full") {
-        return { files: [], changed: false, strategy: "full", reason: plan.reason, empty: false, deltaDriven: true, pendingSnapshot };
+        return { files: [], changed: false, strategy: "full", reason: plan.reason, empty: false, deltaDriven: true, pendingSnapshot, confidence: plan.confidence };
       }
       if (plan.strategy === "changed-only") {
         // worker runs `--changed` with a full-suite fallback (Story 3.1)
-        return { files: [], changed: true, strategy: "incremental", reason: plan.reason, empty: false, deltaDriven: true, pendingSnapshot };
+        return { files: [], changed: true, strategy: "incremental", reason: plan.reason, empty: false, deltaDriven: true, pendingSnapshot, confidence: plan.confidence };
       }
       // Nothing to run and no static-graph union requested -> short-circuit (empty filter would be a full run).
       if (plan.testFiles.length === 0 && !plan.union) {
-        return { files: [], changed: false, strategy: "incremental", reason: plan.reason, empty: true, deltaDriven: true, pendingSnapshot };
+        return { files: [], changed: false, strategy: "incremental", reason: plan.reason, empty: true, deltaDriven: true, pendingSnapshot, confidence: plan.confidence };
       }
       return {
         files: plan.testFiles,
@@ -322,6 +332,7 @@ export class Orchestrator {
         empty: false,
         deltaDriven: true,
         pendingSnapshot,
+        confidence: plan.confidence,
       };
     }
     if (explicit.length > 0) {
@@ -332,9 +343,11 @@ export class Orchestrator {
         reason: "explicit file selection",
         empty: false,
         deltaDriven: false,
+        // The caller pinned these files; completeness of that choice is theirs to own -> high.
+        confidence: { level: "high", reasons: [] },
       };
     }
-    return { files: [], changed: false, strategy: "full", reason: "full suite", empty: false, deltaDriven: false };
+    return { files: [], changed: false, strategy: "full", reason: "full suite", empty: false, deltaDriven: false, confidence: { level: "high", reasons: [] } };
   }
 
   private async execute(
@@ -468,6 +481,10 @@ export class Orchestrator {
               result.selection.reason = sel.reason;
               result.selection.strategy = sel.strategy;
             }
+            // Attach the selection confidence (Story 6.8). A full run — planned OR reached via the
+            // worker's `--changed`→full execution fallback — actually ran everything, so it is
+            // complete: force `high` in that case regardless of the plan's (now moot) verdict.
+            result.confidence = executionFallback ? { level: "high", reasons: [] } : sel.confidence;
             // Advance the last-run snapshot only after a successful delta-driven run (Story 6.7):
             // a failing run leaves it untouched so its changed files stay in the next delta.
             this.advanceSnapshotIfDeltaRun(project, sel, result);
@@ -516,6 +533,11 @@ export class Orchestrator {
    * edit landing mid-run isn't silently baselined as validated (its selection-time hash is what
    * we persist, so a later edit still differs and stays in the next delta). A write failure must
    * never fail the run (invariant: never crash the daemon) — it is logged to stderr only.
+   *
+   * A `degraded` run (Story 6.8) is NOT allowed to advance the snapshot: the selection was bounded
+   * but not provably complete, so baselining its files as "validated" would drop them from future
+   * deltas and hide a regression the bounded run never exercised. They stay in the next delta until
+   * a `high` run (all sources mapped, or a full run) validates them — the safe, self-healing choice.
    */
   private advanceSnapshotIfDeltaRun(
     project: ProjectRef,
@@ -523,6 +545,7 @@ export class Orchestrator {
     result: TestResult,
   ): void {
     if (!sel.deltaDriven || !result.success || !sel.pendingSnapshot) return;
+    if (result.confidence?.level === "degraded") return;
     try {
       saveSnapshot(project.path, sel.pendingSnapshot);
     } catch (err) {

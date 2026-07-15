@@ -44,6 +44,7 @@ describe("SelectionEngine.plan", () => {
       reason: "only test files changed",
       testFiles: ["a.test.ts", "b.test.ts"],
       union: false,
+      confidence: { level: "high", reasons: [] },
     });
   });
 
@@ -64,13 +65,18 @@ describe("SelectionEngine.plan", () => {
     }
   });
 
-  it("runs the full suite when a changed source is unknown to the map (AC3)", () => {
-    expect(SelectionEngine.plan({ changedFiles: ["mystery.ts"], map: mapWith({ "a.ts": ["a.test.ts"] }) })).toMatchObject(
-      { strategy: "full" },
-    );
+  it("bounds a MODIFIED unmapped source (not full) but flags degraded confidence (Story 6.8)", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["mystery.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts"] }),
+    });
+    expect(plan).toMatchObject({ strategy: "incremental", union: true });
+    expect(plan.confidence.level).toBe("degraded");
+    expect(plan.confidence.reasons.join(" ")).toContain("mystery.ts");
+    expect(plan.confidence.reasons.join(" ")).toContain("modified or deleted source");
   });
 
-  it("bounds a NEW (untracked) unmapped source via the static-graph union, not full (Story 6.6)", () => {
+  it("bounds a NEW (untracked) unmapped source via the static-graph union, degraded (Story 6.6/6.8)", () => {
     const plan = SelectionEngine.plan({
       changedFiles: ["src/date.ts", "test/date.test.ts"],
       addedFiles: ["src/date.ts", "test/date.test.ts"],
@@ -79,18 +85,27 @@ describe("SelectionEngine.plan", () => {
     expect(plan).toMatchObject({ strategy: "incremental", union: true });
     if (plan.strategy === "incremental") {
       expect(plan.testFiles).toEqual(["test/date.test.ts"]);
-      expect(plan.reason).toContain("new files bounded by --changed");
+      expect(plan.reason).toContain("unmapped changes bounded by --changed");
+      expect(plan.confidence.level).toBe("degraded");
+      expect(plan.confidence.reasons.join(" ")).toContain("new source");
     }
   });
 
-  it("still runs full for a MODIFIED unmapped source not in addedFiles (Story 6.6)", () => {
-    expect(
-      SelectionEngine.plan({
-        changedFiles: ["src/legacy.ts"],
-        addedFiles: [],
-        map: mapWith({ "a.ts": ["a.test.ts"] }),
-      }),
-    ).toMatchObject({ strategy: "full" });
+  it("strict forces the full suite for an unmapped source, high confidence (Story 6.8 opt-out)", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["src/legacy.ts"],
+      addedFiles: [],
+      map: mapWith({ "a.ts": ["a.test.ts"] }),
+      strict: true,
+    });
+    expect(plan).toMatchObject({ strategy: "full", confidence: { level: "high", reasons: [] } });
+    expect(plan.reason).toContain("strict");
+  });
+
+  it("strict forces full even when there is no coverage map at all (Story 6.8 opt-out)", () => {
+    const plan = SelectionEngine.plan({ changedFiles: ["src/legacy.ts"], map: null, strict: true });
+    expect(plan).toMatchObject({ strategy: "full", confidence: { level: "high", reasons: [] } });
+    expect(plan.reason).toContain("strict");
   });
 
   it("plans a lone new source as union:true with no explicit testFiles (Story 6.6)", () => {
@@ -124,6 +139,47 @@ describe("SelectionEngine.plan", () => {
     } else {
       throw new Error(`expected incremental, got ${plan.strategy}`);
     }
+  });
+});
+
+describe("SelectionEngine.plan confidence (Story 6.8)", () => {
+  it("is high when all changed sources are mapped", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["a.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts"] }),
+    });
+    expect(plan.confidence).toEqual({ level: "high", reasons: [] });
+  });
+
+  it("is high for a full-suite trigger (a full run is complete)", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["i18n.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts"] }, { fullSuiteTriggers: ["i18n.ts"] }),
+    });
+    expect(plan).toMatchObject({ strategy: "full" });
+    expect(plan.confidence).toEqual({ level: "high", reasons: [] });
+  });
+
+  it("is high when changed files are undeterminable (full run)", () => {
+    expect(SelectionEngine.plan({ changedFiles: null, map: null }).confidence).toEqual({
+      level: "high",
+      reasons: [],
+    });
+  });
+
+  it("is degraded when a source changed but no coverage map exists", () => {
+    const plan = SelectionEngine.plan({ changedFiles: ["a.ts"], map: null });
+    expect(plan).toMatchObject({ strategy: "changed-only" });
+    expect(plan.confidence.level).toBe("degraded");
+    expect(plan.confidence.reasons.join(" ")).toContain("no coverage map");
+  });
+
+  it("does not degrade merely because unmeasurable (alwaysRun) tests exist", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["a.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts"] }, { alwaysRun: ["heavy.test.ts"] }),
+    });
+    expect(plan.confidence).toEqual({ level: "high", reasons: [] });
   });
 });
 

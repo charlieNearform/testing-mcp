@@ -4,7 +4,7 @@
 **Slice:** `src/selection`, `src/types`, `src/orchestrator`, `src/ui`
 **Type:** `feature`
 **Depends on:** `6-5`, `6-6`, `6-7` (they produce the inputs the confidence verdict summarizes)
-**Status:** ready-for-dev
+**Status:** done
 
 ## Source
 

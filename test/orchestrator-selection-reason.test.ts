@@ -106,24 +106,67 @@ describe("orchestrator surfaces the real selection reason (Story 6.4)", () => {
         alwaysRun: [],
       }),
     );
-    // A tracked source the map has never seen. It must be committed (tracked) so that a later
-    // edit is a MODIFIED-unmapped change — which forces a full run for a specific reason.
-    // (A brand-new/untracked unmapped source is instead bounded by --changed as of Story 6.6.)
+    // A tracked source the map has never seen. As of Story 6.8 a modified-unmapped source is
+    // bounded+degraded rather than forced full, so we use `strict: true` (the 6.8 opt-out) to get
+    // a genuine full decision whose specific reason the orchestrator must stamp over the worker's.
     fs.writeFileSync(path.join(dir, "mystery.ts"), `export const x = 1;\n`);
     // Worker runs the full suite and labels it generically.
     stageWorkerResult(dir, { strategy: "full", reason: "full suite", files: ["math.test.ts"] });
     commitAll(dir);
-    // Modify the tracked, unmapped source → orchestrator decides full for a specific reason.
+    // Modify the tracked, unmapped source → with strict, orchestrator decides full for a reason.
+    fs.appendFileSync(path.join(dir, "mystery.ts"), `export const y = 2;\n`);
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests(
+      { projectId: "sr", path: dir },
+      { mode: "incremental", strict: true },
+    );
+
+    expect(result.selection.strategy).toBe("full");
+    expect(result.selection.reason).toBe(
+      "changed source unknown to coverage map: mystery.ts (strict)",
+    );
+    expect(result.selection.reason).not.toBe("full suite");
+    // A full run is complete -> high confidence.
+    expect(result.confidence).toEqual({ level: "high", reasons: [] });
+    // selection.files stays exactly what the worker ran — never rewritten.
+    expect(result.selection.files).toEqual(["math.test.ts"]);
+  }, 20_000);
+
+  it("attaches degraded confidence for a modified unmapped source, naming it (Story 6.8)", async () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-sr-")));
+    proj = dir;
+    fs.writeFileSync(path.join(dir, "math.ts"), `export const add = (a: number, b: number) => a + b;\n`);
+    fs.mkdirSync(path.join(dir, ".test-mcp"), { recursive: true });
+    const now = new Date().toISOString();
+    fs.writeFileSync(
+      path.join(dir, ".test-mcp", "coverage-map.json"),
+      JSON.stringify({
+        schemaVersion: COVERAGE_MAP_SCHEMA_VERSION,
+        projectId: "sr",
+        updatedAt: now,
+        map: { "math.ts": { tests: ["math.test.ts"], lastMeasured: now } },
+        fullSuiteTriggers: [],
+        alwaysRun: [],
+      }),
+    );
+    fs.writeFileSync(path.join(dir, "mystery.ts"), `export const x = 1;\n`);
+    // Worker runs the bounded union and labels it; the run succeeds.
+    stageWorkerResult(dir, {
+      strategy: "incremental",
+      reason: "coverage-map selection unioned with git static-graph",
+      files: ["math.test.ts"],
+    });
+    commitAll(dir);
     fs.appendFileSync(path.join(dir, "mystery.ts"), `export const y = 2;\n`);
 
     const orch = new Orchestrator({ workerPath });
     const result = await orch.runTests({ projectId: "sr", path: dir }, { mode: "incremental" });
 
-    expect(result.selection.strategy).toBe("full");
-    expect(result.selection.reason).toBe("changed source unknown to coverage map: mystery.ts");
-    expect(result.selection.reason).not.toBe("full suite");
-    // selection.files stays exactly what the worker ran — never rewritten.
-    expect(result.selection.files).toEqual(["math.test.ts"]);
+    // Bounded (not full) but flagged so the agent knows to run a full pass — never a silent skip.
+    expect(result.selection.strategy).toBe("incremental");
+    expect(result.confidence?.level).toBe("degraded");
+    expect(result.confidence?.reasons.join(" ")).toContain("mystery.ts");
   }, 20_000);
 
   it("reports the resolved reason/strategy on the empty path (no changes)", async () => {

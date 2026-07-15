@@ -184,11 +184,30 @@ describe("git-aware delta selection", () => {
     expect(result.selection.files.some((f) => f.includes("other.test.ts"))).toBe(false);
   }, 60_000);
 
-  // Story 6.6: a MODIFIED (tracked) source unknown to the map still forces the full suite.
-  it("runs the full suite when a modified tracked source is unknown to the map", async () => {
+  // Story 6.6/6.8: a MODIFIED unmapped source is bounded by --changed, not forced full by the
+  // plan. Here `unrelated.ts` is imported by NO test, so the worker's --changed pass finds nothing
+  // and falls back to the full suite (no silent skip) — the run reports full for that reason.
+  it("runs the full suite when a modified tracked unmapped source has no importing test", async () => {
     proj = makeProject(true);
     seedCoverageMap(proj, { "math.ts": ["math.test.ts"], "other.ts": ["other.test.ts"] });
-    // unrelated.ts is tracked, modified, and absent from the map -> conservative full suite.
+    fs.appendFileSync(path.join(proj, "unrelated.ts"), `// touched\n`);
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    // Execution-time --changed fallback ran everything -> full, and a full run IS complete -> high.
+    expect(result.selection.strategy).toBe("full");
+    expect(result.total).toBe(2);
+    expect(result.confidence?.level).toBe("high");
+  }, 60_000);
+
+  // Story 6.8: the union branch must not silently report "0 tests" when BOTH signals select
+  // nothing runnable for a real change — it falls back to the full suite (closes the 6.6 gap).
+  it("union branch falls back to full when the merged selection matches no test file", async () => {
+    proj = makeProject(true);
+    // Map a source to a test file that does not exist; the source itself is imported by no test,
+    // so the coverage-map filter matches nothing AND --changed finds nothing -> merged is empty.
+    seedCoverageMap(proj, { "unrelated.ts": ["ghost.test.ts"] });
     fs.appendFileSync(path.join(proj, "unrelated.ts"), `// touched\n`);
 
     const orch = new Orchestrator({ workerPath });
@@ -196,7 +215,58 @@ describe("git-aware delta selection", () => {
 
     expect(result.selection.strategy).toBe("full");
     expect(result.total).toBe(2);
+    expect(result.confidence?.level).toBe("high");
   }, 60_000);
+
+  // Story 6.8: a MODIFIED unmapped source that an existing test DOES statically import is bounded
+  // (not full) and flagged degraded, so the agent knows to run a full pass.
+  it("bounds a modified unmapped source via --changed and flags degraded confidence", async () => {
+    proj = makeProject(true);
+    // `math.ts` is imported by math.test.ts but deliberately LEFT OUT of the map, so it is a
+    // modified-unmapped source with a real static importer.
+    seedCoverageMap(proj, { "other.ts": ["other.test.ts"] });
+    fs.appendFileSync(path.join(proj, "math.ts"), `// touched\n`);
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    // Bounded to the statically-affected test, NOT the full suite.
+    expect(result.selection.strategy).toBe("incremental");
+    expect(result.selection.files.some((f) => f.includes("math.test.ts"))).toBe(true);
+    expect(result.selection.files.some((f) => f.includes("other.test.ts"))).toBe(false);
+    // Flagged so the agent runs a full pass before calling the feature done.
+    expect(result.confidence?.level).toBe("degraded");
+    expect(result.confidence?.reasons.join(" ")).toContain("math.ts");
+  }, 60_000);
+
+  // Story 6.8: a degraded run must NOT advance the last-run snapshot — otherwise its
+  // incompletely-covered files would drop out of future deltas (a cross-run silent skip).
+  it("a degraded (bounded) run leaves the last-run snapshot unadvanced", async () => {
+    proj = makeProject(true);
+    seedCoverageMap(proj, { "other.ts": ["other.test.ts"] }); // math.ts deliberately unmapped
+    fs.appendFileSync(path.join(proj, "math.ts"), `// touched\n`);
+
+    expect(loadSnapshot(proj)).toBeNull();
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    expect(result.success).toBe(true);
+    expect(result.confidence?.level).toBe("degraded");
+    // No snapshot written -> math.ts stays in the next delta until a high (mapped/full) run.
+    expect(loadSnapshot(proj)).toBeNull();
+  }, 60_000);
+
+  // Story 6.8: the dry-run plan preview carries the confidence verdict too.
+  it("dry-run plan surfaces the confidence verdict", () => {
+    proj = makeProject(true);
+    seedCoverageMap(proj, { "other.ts": ["other.test.ts"] });
+    fs.appendFileSync(path.join(proj, "math.ts"), `// touched\n`);
+
+    const orch = new Orchestrator({ workerPath });
+    const plan = orch.plan({ projectId: "g", path: proj }, { mode: "incremental" });
+    expect(plan.confidence?.level).toBe("degraded");
+    expect(plan.confidence?.reasons.join(" ")).toContain("math.ts");
+  });
 });
 
 // Story 6.7: the "changed since last run" incremental baseline (content-hash snapshot).

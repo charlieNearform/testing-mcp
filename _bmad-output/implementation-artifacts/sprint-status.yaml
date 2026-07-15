@@ -126,7 +126,7 @@ development_status:
   6-1-per-passing-test-detail: ready-for-dev       # + persistent project status banner
   6-2-on-disk-run-history-persistence: ready-for-dev
   6-3-coverage-report-in-results-and-ui: ready-for-dev
-  6-8-selection-confidence-signal: ready-for-dev            # softens invariant 5 (ratified)
+  6-8-selection-confidence-signal: done                     # dev-auto 2026-07-15 (6 patches; 6 deferred → 6.10 + pre-existing)
   6-10-combined-incremental-coverage: ready-for-dev         # merge coverage across runs
   6-9-optional-crg-impact-analysis: backlog                 # spike; use CRG blast-radius when present
   epic-6-retrospective: optional

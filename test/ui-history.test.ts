@@ -37,6 +37,7 @@ const rec: RunRecord = {
     skipped: 0,
     failures: [],
     selection: { strategy: "incremental", reason: "coverage-map selection", files: ["test/math.test.js"] },
+    confidence: { level: "degraded", reasons: ["modified source not in the coverage map, bounded by the git static graph: src/x.ts"] },
   },
   failures: [],
 };
@@ -67,6 +68,11 @@ describe("UI run-history endpoints", () => {
     const body = JSON.parse(res.body) as RunRecord;
     expect(body.runId).toBe("run-1");
     expect(body.result?.selection.files).toEqual(["test/math.test.js"]);
+    // Confidence (Story 6.8) rides the run detail through to the UI client's badge.
+    expect(body.result?.confidence).toEqual({
+      level: "degraded",
+      reasons: ["modified source not in the coverage map, bounded by the git static graph: src/x.ts"],
+    });
   });
 
   it("404s an unknown run id", async () => {

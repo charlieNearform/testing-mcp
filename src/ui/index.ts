@@ -192,6 +192,8 @@ const UI_HTML = `<!doctype html>
   .badge.running{ background:rgba(210,153,34,.15); color:var(--run); }
   .badge.complete{ background:rgba(63,185,80,.15); color:var(--ok); }
   .badge.error{ background:rgba(248,81,73,.15); color:var(--fail); }
+  .badge.high{ background:rgba(63,185,80,.15); color:var(--ok); }
+  .badge.degraded{ background:rgba(210,153,34,.15); color:var(--run); }
   .summary { margin-top:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
   .summary.fail { color:var(--fail); }
   .counts { margin-top:10px; display:flex; gap:14px; font-size:13px; }
@@ -294,6 +296,17 @@ async function renderRun(pid, runId) {
   const files = (sel.files && sel.files.length)
     ? '<ul class="files">' + sel.files.map((f) => '<li>' + esc(f) + '</li>').join("") + '</ul>'
     : '<div class="ts">' + (sel.strategy === "full" ? "full suite (all test files)" : "no specific files") + '</div>';
+  // Selection confidence (Story 6.8): degraded means the run may not fully cover the changes.
+  // A degraded run can still PASS, so it gets its own amber badge — never the red failure style.
+  const conf = res.confidence;
+  const confClass = conf && conf.level === "high" ? "high" : "degraded";
+  const confBlock = !conf ? "" :
+    '<div class="section-title">confidence</div>'
+    + '<div class="ts"><span class="badge ' + confClass + '">' + esc(conf.level) + '</span>'
+    + (conf.level === "degraded" ? " — run a full pass before calling the feature done" : "") + '</div>'
+    + ((conf.reasons && conf.reasons.length)
+        ? '<ul class="files">' + conf.reasons.map((r) => '<li>' + esc(r) + '</li>').join("") + '</ul>'
+        : "");
   const fails = (rec.failures && rec.failures.length)
     ? '<div class="section-title">failures</div>' + rec.failures.map((f) =>
         '<div class="fail-item"><div class="name">' + esc(f.name) + '</div>'
@@ -306,6 +319,7 @@ async function renderRun(pid, runId) {
     + '<div class="ts">' + fmtTime(rec.startedAt) + ' · ' + esc(sel.reason || "") + '</div>'
     + grid
     + '<div class="section-title">selection (' + esc(sel.strategy || "?") + ')</div>' + files
+    + confBlock
     + fails;
 }
 
