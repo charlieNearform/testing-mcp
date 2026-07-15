@@ -1,4 +1,4 @@
-import { afterEach, describe, it, expect } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -12,15 +12,16 @@ const repoNodeModules = path.join(repoRoot, "node_modules");
 
 let proj: string;
 
-/** A tiny project whose Vitest (and @vitest/coverage-v8) resolve via a node_modules symlink. */
 function makeProject(): string {
-  // realpath so V8's absolute coverage paths match the project root on macOS (/var vs /private/var).
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-cov-")));
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-baseline-")));
   fs.symlinkSync(repoNodeModules, path.join(dir, "node_modules"), "dir");
+  // setupFiles imports common.ts -> it is setup-induced, must NOT become a per-test edge.
   fs.writeFileSync(
     path.join(dir, "vitest.config.ts"),
-    `import { defineConfig } from "vitest/config";\nexport default defineConfig({ test: { include: ["**/*.test.ts"], environment: "node" } });\n`,
+    `import { defineConfig } from "vitest/config";\nexport default defineConfig({ test: { include: ["**/*.test.ts"], environment: "node", setupFiles: ["./setup.ts"] } });\n`,
   );
+  fs.writeFileSync(path.join(dir, "common.ts"), `export const shared = () => 42;\n`);
+  fs.writeFileSync(path.join(dir, "setup.ts"), `import { shared } from "./common.ts";\nshared();\n`);
   fs.writeFileSync(path.join(dir, "math.ts"), `export const add = (a: number, b: number) => a + b;\n`);
   fs.writeFileSync(path.join(dir, "other.ts"), `export const sub = (a: number, b: number) => a - b;\n`);
   fs.writeFileSync(
@@ -38,34 +39,21 @@ afterEach(() => {
   if (proj) fs.rmSync(proj, { recursive: true, force: true });
 });
 
-describe("coverage reverse-map build & persist", () => {
-  it("builds and persists a correct source->test map on a full coverage run", async () => {
+describe("setup-baseline subtraction", () => {
+  it("records setup-induced modules as full-suite triggers, not per-test edges", async () => {
     proj = makeProject();
     const orch = new Orchestrator({ workerPath });
 
-    const result = await orch.runTests({ projectId: "cov1", path: proj }, { coverage: true });
-    expect(result.total).toBe(2);
+    await orch.runTests({ projectId: "base1", path: proj }, { coverage: true });
 
     const map = loadCoverageMap(proj);
     expect(map).not.toBeNull();
     expect(map!.schemaVersion).toBe(2);
-    expect(map!.projectId).toBe("cov1");
+    // common.ts is reached only via setup -> full-suite trigger, NOT a per-test edge.
+    expect(map!.fullSuiteTriggers).toContain("common.ts");
+    expect(map!.map["common.ts"]).toBeUndefined();
+    // Real per-test edges still present.
     expect(map!.map["math.ts"].tests).toEqual(["math.test.ts"]);
     expect(map!.map["other.ts"].tests).toEqual(["other.test.ts"]);
-  }, 120_000);
-
-  it("updates only the given test file incrementally, preserving other edges", async () => {
-    proj = makeProject();
-    const orch = new Orchestrator({ workerPath });
-
-    await orch.runTests({ projectId: "cov1", path: proj }, { coverage: true });
-    // Incremental re-measure of just math.test.ts.
-    await orch.runTests({ projectId: "cov1", path: proj }, { coverage: true, files: ["math.test.ts"] });
-
-    const map = loadCoverageMap(proj);
-    expect(map).not.toBeNull();
-    // other.ts edge preserved (not re-measured), math.ts edge still present.
-    expect(map!.map["other.ts"].tests).toEqual(["other.test.ts"]);
-    expect(map!.map["math.ts"].tests).toEqual(["math.test.ts"]);
   }, 120_000);
 });

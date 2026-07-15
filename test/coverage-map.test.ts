@@ -25,9 +25,10 @@ describe("buildCoverageMap (pure)", () => {
       targetTestFiles: [`${ROOT}/a.test.ts`, `${ROOT}/b.test.ts`],
       existing: null,
       measure: stubMeasure({ "a.test.ts": ["a.ts", "shared.ts"], "b.test.ts": ["b.ts", "shared.ts"] }),
+      baseline: [],
     });
 
-    expect(file.schemaVersion).toBe(1);
+    expect(file.schemaVersion).toBe(2);
     expect(file.projectId).toBe("p1");
     expect(file.map["a.ts"].tests).toEqual(["a.test.ts"]);
     expect(file.map["b.ts"].tests).toEqual(["b.test.ts"]);
@@ -44,6 +45,7 @@ describe("buildCoverageMap (pure)", () => {
       targetTestFiles: [`${ROOT}/a.test.ts`, `${ROOT}/b.test.ts`],
       existing: null,
       measure: stubMeasure({ "a.test.ts": ["a.ts", "shared.ts"], "b.test.ts": ["b.ts", "shared.ts"] }),
+      baseline: [],
     });
 
     // a.test.ts now covers c.ts instead of a.ts; b.test.ts is untouched.
@@ -53,6 +55,7 @@ describe("buildCoverageMap (pure)", () => {
       targetTestFiles: [`${ROOT}/a.test.ts`],
       existing: first.file,
       measure: stubMeasure({ "a.test.ts": ["c.ts", "shared.ts"] }),
+      baseline: [],
     });
 
     expect(summary.incremental).toBe(true);

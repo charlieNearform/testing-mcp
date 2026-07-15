@@ -25,8 +25,8 @@ Thumbs.db
 *.log
 logs/
 
-# Coverage
-coverage/
+# Coverage (root-anchored so it does not swallow src/coverage/)
+/coverage/
 .nyc_output/
 
 # Vitest

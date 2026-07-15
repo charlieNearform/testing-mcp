@@ -47,6 +47,8 @@ project_key: NOKEY
 tracking_system: file-system
 story_location: "{project-root}/_bmad-output/implementation-artifacts"
 
+# Story 3.3 moved ready-for-dev → review on 2026-07-14 (Story 3.3 implementation complete)
+
 # 3-1 moved ready-for-dev → review on 2026-07-14 (Story 3.1 implementation complete)
 # 3-1 moved review → done on 2026-07-14 (code review: 1 patch applied, 5 defer)
 # 2-3 moved ready-for-dev → in-progress on 2026-07-14 (Story 2.3 implementation started)
@@ -88,8 +90,8 @@ development_status:
   epic-3: in-progress
   3-1-git-aware-delta-selection: done
   3-2-coverage-reverse-map-build-persist: done
-  3-3-setup-baseline-subtraction: ready-for-dev
-  3-4-always-run-unmeasurable-tests: backlog
+  3-3-setup-baseline-subtraction: done
+  3-4-always-run-unmeasurable-tests: ready-for-dev
   3-5-smart-re-run-decision-union-fallback: backlog
   3-6-watch-incremental-mode: backlog
   epic-3-retrospective: optional

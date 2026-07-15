@@ -278,6 +278,21 @@ export async function runVitest(
   });
 }
 
+/** Measure the source files reached purely by setupFiles (a no-op test triggers only setup). */
+async function measureSetupBaseline(
+  startVitest: VitestNode["startVitest"],
+  projectRoot: string,
+): Promise<string[]> {
+  const baselineTest = path.join(projectRoot, "__test-mcp-baseline__.test.ts");
+  fs.writeFileSync(baselineTest, `import { test } from "vitest";\ntest("baseline", () => {});\n`);
+  try {
+    const { sources, measured } = await measureCoverage(startVitest, projectRoot, baselineTest);
+    return measured ? sources : [];
+  } finally {
+    fs.rmSync(baselineTest, { force: true });
+  }
+}
+
 /** Measure one test file's coverage by running the project's Vitest with V8 coverage. */
 async function measureCoverage(
   startVitest: VitestNode["startVitest"],
@@ -346,12 +361,14 @@ async function buildAndPersistCoverageMap(
       ? files.map((f) => path.resolve(cwd, f))
       : await discoverTestFiles(createVitest);
 
+  const baseline = await measureSetupBaseline(startVitest, cwd);
   const { file, summary } = await buildCoverageMap({
     projectRoot: cwd,
     projectId,
     targetTestFiles,
     existing: loadCoverageMap(cwd),
     measure: (abs) => measureCoverage(startVitest, cwd, abs),
+    baseline,
   });
   saveCoverageMap(cwd, file);
   return { ...summary };

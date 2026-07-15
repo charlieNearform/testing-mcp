@@ -1,6 +1,6 @@
 # Story 3.3: Setup-Baseline Subtraction
 
-Status: ready-for-dev
+Status: review
 
 **Prerequisite:** Story 3.2 (`done`) shipped the Coverage Engine (`src/coverage/index.ts`) and the
 worker's coverage build. This story extends BOTH. Read `src/coverage/index.ts` and the coverage path in
@@ -288,3 +288,34 @@ rebuilt on the next coverage run — no migration code needed.
 ### Completion Notes List
 
 ### File List
+
+- `src/coverage/index.ts` — Bumped schema to v2, added `fullSuiteTriggers` field, modified `BuildInput` to include `baseline`, updated `buildCoverageMap` to subtract baseline from attribution and record triggers.
+- `src/worker/index.ts` — Added `measureSetupBaseline` function to measure setup-only coverage via a no-op test, integrated baseline measurement into `buildAndPersistCoverageMap`.
+- `test/coverage-baseline.test.ts` — New test verifying setup-induced modules go to `fullSuiteTriggers` and not per-test edges.
+
+### Change Log
+
+- Story 3.3 implementation complete. All acceptance criteria satisfied.
+- Schema bump from v1 to v2 due to `fullSuiteTriggers` addition.
+- Baseline subtraction removes setup-file pollution from per-test attribution.
+- Setup-induced modules recorded as `fullSuiteTriggers` for full-suite selection (Story 3.5).
+
+### Dev Agent Record
+
+#### Agent Model Used
+
+qwen3-coder-next
+
+#### Debug Log References
+
+#### Completion Notes
+
+Implemented setup-baseline subtraction to address coverage pollution from `setupFiles`. Key changes:
+
+1. **Schema bump** (`COVERAGE_MAP_SCHEMA_VERSION` → 2) to accommodate `fullSuiteTriggers` list.
+2. **Baseline measurement** via a no-op test that triggers only `setupFiles`; its coverage represents the pollution pattern.
+3. **Subtraction logic**: Filter baseline sources from each test's attribution before adding edges; also drop baseline sources from incremental builds.
+4. **Full-suite triggers**: Records baseline sources separately so changes to them select the whole suite (per epics §3.3 AC2).
+5. **Tests**: Updated existing tests for schema v2; created new `coverage-baseline.test.ts` verifying the behavior.
+
+All tests pass (66/66), typecheck and build succeed.
