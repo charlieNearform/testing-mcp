@@ -127,6 +127,6 @@ development_status:
   6-2-on-disk-run-history-persistence: done        # dev-auto 2026-07-15 (5 review patches; 1 low deferred)
   6-3-coverage-report-in-results-and-ui: done      # dev-auto 2026-07-15 (AC1-3; AC4 threshold-gate deferred; 2 review patches)
   6-8-selection-confidence-signal: done                     # dev-auto 2026-07-15 (6 patches; 6 deferred → 6.10 + pre-existing)
-  6-10-combined-incremental-coverage: ready-for-dev         # merge coverage across runs
+  6-10-combined-incremental-coverage: blocked               # ESCALATED 2026-07-15: accurate coverage union needs an orchestrator-authorized merge dependency (istanbul-lib-coverage) — Block-If hit; see story Auto Run Result
   6-9-optional-crg-impact-analysis: backlog                 # spike; use CRG blast-radius when present
   epic-6-retrospective: optional

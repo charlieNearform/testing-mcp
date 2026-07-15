@@ -92,6 +92,12 @@
   summary: The per-file coverage table (`result.coverage.files`) is unbounded — a large repo's coverage run persists (Story 6.2) and re-renders a very large array, unlike the Story-6.1 `tests` list which is capped.
   evidence: LOW-MEDIUM. Bound it like `tests` (cap + a `filesTruncated` flag, ideally keeping the lowest-coverage files as the most actionable) so history records and UI payloads stay bounded. Also cosmetic: files outside the project root render as `../..` paths (`path.relative` fallback only fires on identical paths).
 
+## Blocked/escalated: story-6-10-combined-incremental-coverage (2026-07-15)
+
+- source_story: `story-6-10-combined-incremental-coverage.md`
+  summary: **BLOCKED — needs orchestrator decision.** Accurate combined (union-of-latest) coverage requires line-hit-level merging, which needs a coverage-merge capability (`istanbul-lib-coverage` / c8) that is NOT in this repo (runtime deps are only sdk/commander/zod; `@vitest/coverage-v8` is dev-only; istanbul is not installed). Adding a runtime dep is forbidden mid-story (CLAUDE.md + the story's own escalation trigger). Percentages can't be unioned, so the "store summaries instead" fallback can't produce an accurate combined number.
+  evidence: See the story's Auto Run Result for the three decision paths (authorize a merge dep; re-scope to full-run-only whole-project coverage — largely already delivered by 6.3; or approve a hand-rolled merge spec). All of 6.10's ACs hang off the combined number, so no safe partial ships value. Companion items: the Story-6.3 deferred "subset vs whole-project qualification" and `all: false` inflation notes.
+
 ## Testing infrastructure (2026-07-15)
 
 - source: Epic 6 dev-auto runs

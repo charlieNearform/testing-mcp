@@ -4,7 +4,7 @@
 **Slice:** `src/coverage`, `src/worker`, `src/types`, `src/ui`
 **Type:** `feature`
 **Depends on:** `6-3` (coverage report), `6-7` (snapshot/change model), `6-8` (confidence)
-**Status:** ready-for-dev
+**Status:** blocked (escalated — needs an orchestrator-authorized coverage-merge dependency)
 
 ## Source
 
@@ -74,3 +74,44 @@ flagged).
   already in `package.json`, STOP and hand back — dependencies are orchestrator-authorized only.
 - If per-test-file V8 data proves too large to persist, escalate the storage approach (e.g.
   store per-file summary percentages rather than full hit maps) before implementing.
+
+## Auto Run Result
+
+Status: **BLOCKED — escalated to the orchestrator (dev-auto 2026-07-15).** No code changed.
+
+**Blocking condition:** The core of AC1 — "combined project coverage = the union of every test
+file's *latest* measurement" — requires merging per-test-file coverage at the **line-hit level**
+(a line covered by ANY test is covered). Percentages cannot be unioned (two tests each covering
+"50%" of a file may cover the same or different lines), so the escalation-trigger's fallback of
+"store per-file summary percentages rather than full hit maps" cannot produce an accurate combined
+number either. Accurate union needs a coverage-merge capability, and this repo has none available:
+
+- Runtime deps are only `@modelcontextprotocol/sdk`, `commander`, `zod`. `@vitest/coverage-v8` is a
+  **dev** dependency (the daemon resolves the *project's* vitest, never ships its own), and
+  `istanbul-lib-coverage` is **not installed at all** (not even transitively).
+- Adding `istanbul-lib-coverage` (or similar) as a runtime dep is **forbidden** here — CLAUDE.md
+  ("Do not add/remove dependencies") and this story's own first escalation trigger both say STOP
+  and hand back; dependencies are orchestrator-authorized only.
+- Hand-rolling the V8-byte-range → line-coverage conversion and union (what `@vitest/coverage-v8`
+  does internally via istanbul) is a large, error-prone reimplementation that can't be verified
+  against ground truth in an unattended run — it fails "correctness over cleverness".
+- Reusing the *project's* transitively-installed istanbul via the project `require` is a fragile,
+  version-drifting, effectively-unauthorized runtime dependency for the daemon.
+
+No safe partial delivers value: AC3/AC4/AC5 (staleness, threshold+confidence, UI) all hang off a
+combined number that can't be produced yet, and bumping the map schema to persist per-test-file
+data would be speculative scaffolding for a merge that isn't authorized (scope discipline).
+
+**Decision needed from the orchestrator (one of):**
+1. **Authorize a coverage-merge runtime dependency** (e.g. pin `istanbul-lib-coverage`), then this
+   story proceeds: store per-test-file V8/istanbul coverage in the map (schema 3→4), merge latest
+   measurements into a combined `CoverageMap`, derive the summary, key staleness on the Story-6.7
+   source hashes, and attach Story-6.8 confidence + the project's threshold verdict.
+2. **Re-scope 6.10** to a full-run-only whole-project report (no incremental combination) — which
+   Story 6.3 already largely delivers for full runs — and drop the "combine across runs" goal.
+3. Provide an approved hand-rolled merge design/spec if a dependency is undesirable.
+
+Story 6.3's deferred notes (subset vs whole-project qualification, `all: false` inflation) are the
+natural companions to whichever path is chosen.
+
+**Verification:** n/a — no code changed; `pnpm test` remains green at the Story-6.3 baseline (187).
