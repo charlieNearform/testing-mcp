@@ -43,3 +43,6 @@ dist/
 
 # Test server MCP state
 .test-mcp/
+
+# code-review-graph local graph DB (if used in this project)
+.code-review-graph/
