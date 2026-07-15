@@ -104,3 +104,35 @@ the user's CRG graph, and bundling CRG.
    that's the intended semantics (it's the only safe reading given finding #1).
 
 Note: the spike left the local `.code-review-graph/` graph freshly rebuilt (it's git-ignored — no repo impact).
+
+## UPDATE (2026-07-15) — CLI seam VERIFIED INSUFFICIENT; seam re-decision needed
+
+Sign-off was: **A (CLI shell-out), verify first; else fall back to B (MCP client)**. Verified:
+
+- CRG's CLI has no `impact` command. The closest is **`detect-changes`** (`uvx code-review-graph
+  detect-changes --base <ref> --repo <root>`), which emits JSON by default, read-only. Its keys:
+  `changed_functions`, `affected_flows`, `test_gaps`, `review_priorities`, `risk_score`, `summary`.
+- **It does NOT return the blast-radius → affected *test files* that AC1 needs.** The only test-file
+  paths in its output are the *changed* test files themselves, not tests that *cover* the changed
+  sources. `changed_functions` entries carry no covering-tests field; there is no `impacted_files`.
+- That capability — `impacted_files` filtered by `is_test` — exists **only via the MCP
+  `get_impact_radius` tool** (which I proved returns the 5 affected test files), not the CLI.
+
+So **seam A is ruled out** for AC1. The remaining options and their *true* cost:
+
+- **B — MCP client.** Achievable with **no new dependency** (the daemon already depends on
+  `@modelcontextprotocol/sdk`, which ships a `Client` + `StdioClientTransport`). BUT `serve` loads
+  the whole graph into memory at startup, so spawning it per selection (cold `uvx` + graph load) is
+  **seconds of latency on every incremental run** — which would defeat the "fast incremental" value.
+  Making it usable needs a **pooled, long-lived CRG server + client per project** — real lifecycle
+  management inside the daemon (spawn, health, staleness, teardown). That is the "notable
+  architectural change" the story's escalation trigger names.
+- **C — direct SQLite read** of `.code-review-graph/graph.db` (nodes + `TESTED_BY`). Fast, no
+  process/handshake — but Node 20 (the repo's floor) has **no built-in SQLite**, so it needs a new
+  runtime dep (`better-sqlite3`) AND couples to CRG's DB schema. Two strikes.
+
+**Recommendation:** the honest first increment is **B with a pooled long-lived client**, but that is
+materially heavier than the git-style shell-out that was signed off, so it warrants re-confirmation
+before building. A cheap intermediate: build the **provider seam + a fake/stub provider + all the
+union/confidence/reason plumbing and tests now** (pure, no CRG process), and land the real CRG
+transport (pooled MCP client) as a focused follow-up once the lifecycle approach is confirmed.
