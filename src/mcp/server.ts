@@ -7,8 +7,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { toAppError, type AppError } from "../types/errors.js";
 import { ProjectRegistry, RegistryError } from "../registry/project-registry.js";
-import { Orchestrator } from "../orchestrator/index.js";
+import { Orchestrator, PlanError } from "../orchestrator/index.js";
 import { WatchManager } from "../watch/index.js";
+import { handleUiRequest } from "../ui/index.js";
 
 export interface McpServerDeps {
   /** Shared project registry (owned by the daemon). Absent in bare unit tests. */
@@ -106,16 +107,34 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
         planId: z.string().optional().describe("Execute a previously computed plan"),
       },
     },
-    async ({ projectId, files, mode, coverage }) => {
+    async ({ projectId, files, mode, coverage, dryRun, planId }, extra) => {
       const project = registry?.get(projectId);
       if (!project) return unknownProject(projectId);
       if (!orchestrator) {
         return errorResult(toAppError("NotImplemented", "orchestrator unavailable"));
       }
+      // Forward per-file progress as notifications/progress when the client supplied a token (Story 4.2).
+      const progressToken = extra?._meta?.progressToken;
+      const onProgress =
+        progressToken != null
+          ? (completed: number, total: number) => {
+              void extra.sendNotification({
+                method: "notifications/progress",
+                params: { progressToken, progress: completed, total },
+              });
+            }
+          : undefined;
       try {
-        const result = await orchestrator.runTests(project, { files, mode, coverage });
+        if (dryRun) {
+          const plan = orchestrator.plan(project, { files, mode });
+          return { content: [{ type: "text" as const, text: JSON.stringify(plan) }] };
+        }
+        const result = planId
+          ? await orchestrator.runPlan(project, planId, { onProgress })
+          : await orchestrator.runTests(project, { files, mode, coverage, onProgress });
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
       } catch (err) {
+        if (err instanceof PlanError) return errorResult(toAppError("PlanExpired", err.message));
         return errorResult(
           toAppError("WorkerFailure", err instanceof Error ? err.message : String(err)),
         );
@@ -131,13 +150,10 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
     },
     async ({ projectId }) => {
       if (!isRegistered(projectId)) return unknownProject(projectId);
-      // Watch mode (Story 3.6) is the only stateful runner in Phase 1; poll it here.
-      if (watchManager) {
-        return { content: [{ type: "text" as const, text: JSON.stringify(watchManager.status(projectId)) }] };
-      }
-      return errorResult(
-        toAppError("NotImplemented", "Status polling arrives with watch mode / Story 4.2"),
-      );
+      // Run state (Story 4.2) plus watch state (Story 3.6) — a single pollable snapshot.
+      const run = orchestrator?.getRunStatus(projectId) ?? { state: "idle" as const };
+      const watch = watchManager?.status(projectId);
+      return { content: [{ type: "text" as const, text: JSON.stringify({ ...run, watch }) }] };
     },
   );
 
@@ -277,6 +293,15 @@ export function createMcpRequestListener(deps: McpListenerDeps): RequestListener
       // Health route — no auth (preserves Story 1.1 behaviour).
       if (method === "GET" && (path === "/" || path === "/health")) {
         return sendJson(res, 200, { status: "ok", daemon: "test-mcp" });
+      }
+
+      // Human Monitoring UI (Epic 5) — loopback-gated, GET-only, no bearer (like /health).
+      if (path === "/ui" || path.startsWith("/ui/")) {
+        const handled = await handleUiRequest(req, res, {
+          registry: deps.registry,
+          orchestrator: deps.orchestrator,
+        });
+        if (handled) return;
       }
 
       if (path !== "/mcp") {

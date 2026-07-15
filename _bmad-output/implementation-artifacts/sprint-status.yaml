@@ -81,7 +81,7 @@ development_status:
   epic-1-retrospective: optional
 
   # Epic 2: Test Execution via Project-Local Vitest (Phase 1)
-  epic-2: in-progress
+  epic-2: done
   2-1-run-tests-via-project-local-worker: done
   2-2-structured-results-failure-detail: done
   2-3-test-isolation-verification: done
@@ -98,14 +98,14 @@ development_status:
   epic-3-retrospective: optional
 
   # Epic 4: Agent Workflow — Dry Run, Output & Status (Phase 1)
-  epic-4: backlog
-  4-1-dry-run-plan-commit: backlog
-  4-2-status-progress: backlog
-  4-3-minimal-failure-focused-output: backlog
+  epic-4: done
+  4-1-dry-run-plan-commit: done
+  4-2-status-progress: done
+  4-3-minimal-failure-focused-output: done
   epic-4-retrospective: optional
 
   # Epic 5: Human Monitoring UI (Phase 2)
-  epic-5: backlog
-  5-1-http-status-ui: backlog
-  5-2-real-time-updates-resilience: backlog
+  epic-5: done
+  5-1-http-status-ui: done
+  5-2-real-time-updates-resilience: done
   epic-5-retrospective: optional

@@ -70,10 +70,21 @@ async function runOnce(
   startVitest: VitestNode["startVitest"],
   filters: string[],
   extraOptions: Record<string, unknown>,
+  onProgress?: (completed: number, total: number) => void,
 ): Promise<RunOnceResult> {
   let modules: ReadonlyArray<VTestModule> = [];
   let unhandled: ReadonlyArray<VError> = [];
+  let total = 0;
+  let completed = 0;
   const reporter = {
+    onTestRunStart(specifications: ReadonlyArray<unknown>) {
+      total = specifications.length;
+      onProgress?.(0, total);
+    },
+    onTestModuleEnd() {
+      completed += 1;
+      onProgress?.(completed, total);
+    },
     onTestRunEnd(testModules: ReadonlyArray<VTestModule>, unhandledErrors: ReadonlyArray<VError>) {
       modules = testModules;
       unhandled = unhandledErrors;
@@ -162,6 +173,7 @@ export function mapModulesToResult(
   const total = passed + failed + skipped;
   return {
     success: total > 0 && failed === 0,
+    summary: buildSummary(passed, failed, skipped, total, wallClockMs, failures),
     duration: wallClockMs,
     total,
     passed,
@@ -180,6 +192,23 @@ export function mapModulesToResult(
       isolate,
     },
   };
+}
+
+/** A one-line, failure-forward summary (Story 4.3) — counts first, then the first few failing names. */
+function buildSummary(
+  passed: number,
+  failed: number,
+  skipped: number,
+  total: number,
+  wallClockMs: number,
+  failures: TestResult["failures"],
+): string {
+  if (total === 0) return `no tests run (${wallClockMs}ms)`;
+  const counts = `${passed}/${total} passed, ${failed} failed, ${skipped} skipped (${wallClockMs}ms)`;
+  if (failed === 0) return counts;
+  const names = failures.slice(0, 3).map((f) => f.name);
+  const more = failures.length > 3 ? ` +${failures.length - 3} more` : "";
+  return `${counts} — FAILED: ${names.join("; ")}${more}`;
 }
 
 /** Build the on-demand failure detail list. Ids match mapModulesToResult's compact failures. */
@@ -237,6 +266,7 @@ export function mapFailureDetails(
 export async function runVitest(
   cwd: string,
   opts: { files: string[]; changed: boolean },
+  onProgress?: (completed: number, total: number) => void,
 ): Promise<{ result: TestResult; failureDetails: FailureDetail[] }> {
   const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
   const { startVitest } = projectRequire("vitest/node") as VitestNode;
@@ -252,7 +282,7 @@ export async function runVitest(
   // Union (Story 3.5): an explicit coverage-map selection PLUS the git static-graph (--changed),
   // merged so we run everything either signal deems affected.
   if (opts.changed && opts.files.length > 0) {
-    const primary = await runOnce(startVitest, opts.files, {});
+    const primary = await runOnce(startVitest, opts.files, {}, onProgress);
     let staticRun: RunOnceResult | null = null;
     try {
       staticRun = await runOnce(startVitest, [], { changed: true });
@@ -282,7 +312,7 @@ export async function runVitest(
   // Incremental (git-aware) selection — only when the caller did not pin explicit files.
   if (opts.changed && opts.files.length === 0) {
     try {
-      const inc = await runOnce(startVitest, [], { changed: true });
+      const inc = await runOnce(startVitest, [], { changed: true }, onProgress);
       if (inc.modules.length > 0) {
         return build(inc, {
           strategy: "incremental",
@@ -293,7 +323,7 @@ export async function runVitest(
     } catch {
       // Not a git repo / --changed unusable -> fall through to a full run.
     }
-    const full = await runOnce(startVitest, [], {});
+    const full = await runOnce(startVitest, [], {}, onProgress);
     return build(full, {
       strategy: "full",
       reason: "incremental found no affected tests (unmapped change or non-git); ran full suite",
@@ -301,7 +331,7 @@ export async function runVitest(
   }
 
   // Full run, or an explicit file selection.
-  const run = await runOnce(startVitest, opts.files, {});
+  const run = await runOnce(startVitest, opts.files, {}, onProgress);
   return build(run, {
     strategy: opts.files.length ? "incremental" : "full",
     reason: opts.files.length ? "explicit file selection" : "full suite",
@@ -429,7 +459,9 @@ async function handleRun(
   msg: Extract<ToWorker, { type: "run" }>,
 ): Promise<{ result: TestResult; failureDetails: FailureDetail[]; coverageDelta?: CoverageDelta }> {
   const cwd = process.cwd();
-  const base = await runVitest(cwd, { files: msg.files, changed: msg.changed });
+  const base = await runVitest(cwd, { files: msg.files, changed: msg.changed }, (completed, total) =>
+    send({ type: "progress", runId: msg.runId, completed, total }),
+  );
   if (!msg.coverage) return base;
   const coverageDelta = await buildAndPersistCoverageMap(cwd, msg.projectId, msg.files);
   return { ...base, coverageDelta };

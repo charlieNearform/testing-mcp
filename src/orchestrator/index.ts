@@ -2,7 +2,7 @@ import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { TestResult, FailureDetail } from "../types/contracts.js";
+import type { TestResult, FailureDetail, TestPlan } from "../types/contracts.js";
 import type { ToWorker, FromWorker } from "../types/ipc.js";
 import { loadCoverageMap } from "../coverage/index.js";
 import { SelectionEngine, getChangedFiles } from "../selection/index.js";
@@ -22,71 +22,202 @@ export class WorkerError extends Error {
   }
 }
 
+/** Error carrying the PlanExpired code (Story 4.1) for the MCP envelope. */
+export class PlanError extends Error {
+  readonly code = "PlanExpired" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "PlanError";
+  }
+}
+
+/** Pollable run state for a project (Story 4.2). */
+export interface RunStatus {
+  state: "idle" | "running" | "complete" | "error";
+  progress?: { completed: number; total: number };
+  lastResult?: TestResult;
+  lastError?: string;
+  updatedAt?: string;
+}
+
+/** Concrete, resolved execution parameters plus human-facing selection info. */
+interface ResolvedSelection {
+  files: string[];
+  changed: boolean;
+  strategy: "full" | "incremental";
+  reason: string;
+  /** Nothing to run (e.g. incremental with no changes) — do not dispatch a worker. */
+  empty: boolean;
+}
+
+interface StoredPlan {
+  projectId: string;
+  files: string[];
+  changed: boolean;
+  empty: boolean;
+  expiresAtMs: number;
+}
+
+type ProgressFn = (completed: number, total: number) => void;
+
 export interface OrchestratorOptions {
   /** Absolute path to the built worker (dist/worker/index.js). Tests inject this. */
   workerPath?: string;
   /** Hard ceiling for a single run before the worker is killed. */
   runTimeoutMs?: number;
+  /** How long a dry-run plan stays valid before it must be re-planned (Story 4.1). */
+  planTtlMs?: number;
 }
 
 export class Orchestrator {
   private readonly workerPath: string;
   private readonly runTimeoutMs: number;
+  private readonly planTtlMs: number;
   /** Per-project promise chain so a project runs one suite at a time (architecture: per-project serialization). */
   private readonly queues = new Map<string, Promise<unknown>>();
   /** Most recent run's failure details per project, keyed projectId -> (failureId -> detail). */
   private readonly lastFailures = new Map<string, Map<string, FailureDetail>>();
+  /** Dry-run plans awaiting commit (Story 4.1), keyed by planId. */
+  private readonly plans = new Map<string, StoredPlan>();
+  /** Pollable run state per project (Story 4.2). */
+  private readonly runState = new Map<string, RunStatus>();
+  /** Status-change subscribers (Story 5.1 UI push). */
+  private readonly statusListeners = new Set<() => void>();
 
   constructor(opts: OrchestratorOptions = {}) {
     // In production this module runs from dist/, so ../worker/index.js resolves to dist/worker/index.js.
     this.workerPath =
       opts.workerPath ?? fileURLToPath(new URL("../worker/index.js", import.meta.url));
     this.runTimeoutMs = opts.runTimeoutMs ?? 120_000;
+    this.planTtlMs = opts.planTtlMs ?? 300_000;
   }
 
   /** Run a project's tests in a fresh project-local worker. Rejects with WorkerError on failure. */
   async runTests(
     project: ProjectRef,
-    opts: { files?: string[]; mode?: string; coverage?: boolean } = {},
+    opts: { files?: string[]; mode?: string; coverage?: boolean; onProgress?: ProgressFn } = {},
+  ): Promise<TestResult> {
+    const sel = this.resolveSelection(project, opts);
+    return this.enqueue(project, sel, opts.coverage === true, opts.onProgress);
+  }
+
+  /** Compute a plan without executing (Story 4.1 dry-run). */
+  plan(project: ProjectRef, opts: { files?: string[]; mode?: string }): TestPlan {
+    const started = Date.now();
+    const sel = this.resolveSelection(project, opts);
+    const latencyMs = Date.now() - started;
+    const planId = randomUUID();
+    const expiresAtMs = Date.now() + this.planTtlMs;
+    this.plans.set(planId, {
+      projectId: project.projectId,
+      files: sel.files,
+      changed: sel.changed,
+      empty: sel.empty,
+      expiresAtMs,
+    });
+    return {
+      planId,
+      projectId: project.projectId,
+      strategy: sel.strategy,
+      files: sel.files,
+      reasoning: sel.reason,
+      createdAt: new Date(started).toISOString(),
+      expiresAt: new Date(expiresAtMs).toISOString(),
+      metadata: { latencyMs },
+    };
+  }
+
+  /** Execute a previously computed plan exactly (Story 4.1 commit). Throws PlanError if expired/unknown. */
+  async runPlan(
+    project: ProjectRef,
+    planId: string,
+    opts: { onProgress?: ProgressFn } = {},
+  ): Promise<TestResult> {
+    const stored = this.plans.get(planId);
+    if (!stored || stored.projectId !== project.projectId || stored.expiresAtMs < Date.now()) {
+      this.plans.delete(planId);
+      throw new PlanError(`Plan ${planId} is expired or unknown; re-plan with dryRun`);
+    }
+    this.plans.delete(planId); // one-shot commit
+    return this.enqueue(
+      project,
+      {
+        files: stored.files,
+        changed: stored.changed,
+        empty: stored.empty,
+        strategy: stored.files.length ? "incremental" : "full",
+        reason: "committed plan",
+      },
+      false,
+      opts.onProgress,
+    );
+  }
+
+  /** Serialize a resolved selection onto the project's queue (short-circuiting empty plans). */
+  private enqueue(
+    project: ProjectRef,
+    sel: ResolvedSelection,
+    coverage: boolean,
+    onProgress?: ProgressFn,
   ): Promise<TestResult> {
     const prev = this.queues.get(project.projectId) ?? Promise.resolve();
-    const run = prev.catch(() => undefined).then(() => this.planAndExecute(project, opts));
+    const run = prev.catch(() => undefined).then(() => {
+      if (sel.empty) {
+        const result = emptyResult(sel.reason);
+        this.setRunState(project.projectId, {
+          state: "complete",
+          lastResult: result,
+          progress: undefined,
+        });
+        return result;
+      }
+      return this.execute(project, sel.files, sel.changed, coverage, onProgress);
+    });
     // Keep the chain alive even if this run rejects, so the next run still serializes after it.
     this.queues.set(project.projectId, run.catch(() => undefined));
     return run;
   }
 
-  /** Resolve an incremental request into a concrete worker run via the Selection Engine (Story 3.5). */
-  private planAndExecute(
+  /** Resolve a request into concrete {files, changed} via the Selection Engine (Story 3.5). */
+  private resolveSelection(
     project: ProjectRef,
-    opts: { files?: string[]; mode?: string; coverage?: boolean },
-  ): Promise<TestResult> {
-    let files = opts.files ?? [];
-    let changed = false;
-
-    // Selection only applies to an incremental request with no explicit file list.
-    if (opts.mode === "incremental" && files.length === 0) {
+    opts: { files?: string[]; mode?: string },
+  ): ResolvedSelection {
+    const explicit = opts.files ?? [];
+    if (opts.mode === "incremental" && explicit.length === 0) {
       const plan = SelectionEngine.plan({
         changedFiles: getChangedFiles(project.path),
         map: loadCoverageMap(project.path),
       });
       if (plan.strategy === "full") {
-        files = [];
-        changed = false;
-      } else if (plan.strategy === "changed-only") {
-        files = [];
-        changed = true; // worker runs `--changed` with a full-suite fallback (Story 3.1)
-      } else {
-        // Nothing to run and no static-graph union requested -> short-circuit (no empty-filter = full).
-        if (plan.testFiles.length === 0 && !plan.union) {
-          return Promise.resolve(emptyResult(plan.reason));
-        }
-        files = plan.testFiles;
-        changed = plan.union;
+        return { files: [], changed: false, strategy: "full", reason: plan.reason, empty: false };
       }
+      if (plan.strategy === "changed-only") {
+        // worker runs `--changed` with a full-suite fallback (Story 3.1)
+        return { files: [], changed: true, strategy: "incremental", reason: plan.reason, empty: false };
+      }
+      // Nothing to run and no static-graph union requested -> short-circuit (empty filter would be a full run).
+      if (plan.testFiles.length === 0 && !plan.union) {
+        return { files: [], changed: false, strategy: "incremental", reason: plan.reason, empty: true };
+      }
+      return {
+        files: plan.testFiles,
+        changed: plan.union,
+        strategy: "incremental",
+        reason: plan.reason,
+        empty: false,
+      };
     }
-
-    return this.execute(project, files, changed, opts.coverage === true);
+    if (explicit.length > 0) {
+      return {
+        files: explicit,
+        changed: false,
+        strategy: "incremental",
+        reason: "explicit file selection",
+        empty: false,
+      };
+    }
+    return { files: [], changed: false, strategy: "full", reason: "full suite", empty: false };
   }
 
   private execute(
@@ -94,11 +225,18 @@ export class Orchestrator {
     files: string[],
     changed: boolean,
     coverage: boolean,
+    onProgress?: ProgressFn,
   ): Promise<TestResult> {
     return new Promise<TestResult>((resolve, reject) => {
       const runId = randomUUID();
+      this.setRunState(project.projectId, {
+        state: "running",
+        progress: undefined,
+        lastError: undefined,
+      });
       const failRun = (err: WorkerError): void => {
         this.lastFailures.delete(project.projectId);
+        this.setRunState(project.projectId, { state: "error", lastError: err.message, progress: undefined });
         reject(err);
       };
       const workerEnv: NodeJS.ProcessEnv = {
@@ -147,6 +285,12 @@ export class Orchestrator {
           if (!child.send(runMsg)) {
             finish(() => failRun(new WorkerError("IPC send failed")));
           }
+        } else if (msg.type === "progress" && msg.runId === runId) {
+          this.setRunState(project.projectId, {
+            state: "running",
+            progress: { completed: msg.completed, total: msg.total },
+          });
+          onProgress?.(msg.completed, msg.total);
         } else if (msg.type === "result" && msg.runId === runId) {
           if (!msg.result) {
             finish(() => failRun(new WorkerError("worker returned no result")));
@@ -154,7 +298,13 @@ export class Orchestrator {
             const map = new Map<string, FailureDetail>();
             for (const d of msg.failureDetails ?? []) map.set(d.id, d);
             this.lastFailures.set(project.projectId, map);
-            finish(() => resolve(msg.result));
+            const result = msg.result;
+            this.setRunState(project.projectId, {
+              state: "complete",
+              lastResult: result,
+              progress: undefined,
+            });
+            finish(() => resolve(result));
           }
         } else if (msg.type === "error" && msg.runId === runId) {
           finish(() => failRun(new WorkerError(msg.message)));
@@ -181,12 +331,36 @@ export class Orchestrator {
   getFailureDetail(projectId: string, failureId: string): FailureDetail | undefined {
     return this.lastFailures.get(projectId)?.get(failureId);
   }
+
+  /** Current pollable run state for a project (Story 4.2). */
+  getRunStatus(projectId: string): RunStatus {
+    return this.runState.get(projectId) ?? { state: "idle" };
+  }
+
+  /** Subscribe to run-state changes (Story 5.1 UI push). Returns an unsubscribe fn. */
+  onStatusChange(listener: () => void): () => void {
+    this.statusListeners.add(listener);
+    return () => this.statusListeners.delete(listener);
+  }
+
+  private setRunState(projectId: string, patch: Partial<RunStatus>): void {
+    const prev = this.runState.get(projectId) ?? { state: "idle" as const };
+    this.runState.set(projectId, { ...prev, ...patch, updatedAt: new Date().toISOString() });
+    for (const fn of this.statusListeners) {
+      try {
+        fn();
+      } catch {
+        // a broken subscriber must never break a run
+      }
+    }
+  }
 }
 
 /** A trivially-successful result for "nothing to run" (e.g. incremental with no changes). */
 function emptyResult(reason: string): TestResult {
   return {
     success: true,
+    summary: "no tests run (0ms)",
     duration: 0,
     total: 0,
     passed: 0,
