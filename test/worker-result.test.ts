@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mapModulesToResult, mapCoverageSummary } from "../src/worker/index.ts";
+import { mapModulesToResult } from "../src/worker/index.ts";
 
 /**
  * Story 6.1 — mapModulesToResult now emits a per-test `tests` list (every case that ran, by
@@ -90,40 +90,6 @@ describe("mapModulesToResult per-test detail (Story 6.1)", () => {
     expect(result.failed).toBe(1);
     expect(result.tests).toContainEqual({ name: "(unhandled error)", file: "", status: "failed" });
     expect(result.tests?.filter((t) => t.status === "passed")).toHaveLength(1);
-  });
-
-  it("maps coverage-summary.json to the contract, relativizing file paths (Story 6.3)", () => {
-    const json = {
-      total: {
-        statements: { pct: 92.5 },
-        branches: { pct: 80 },
-        functions: { pct: 100 },
-        lines: { pct: 92.5 },
-      },
-      "/proj/src/math.ts": {
-        statements: { pct: 100 },
-        branches: { pct: 100 },
-        functions: { pct: 100 },
-        lines: { pct: 100 },
-      },
-    };
-    const cov = mapCoverageSummary(json, "/proj");
-    expect(cov!.total).toEqual({ statements: 92.5, branches: 80, functions: 100, lines: 92.5 });
-    expect(cov!.files).toEqual([
-      { file: "src/math.ts", statements: 100, branches: 100, functions: 100, lines: 100 },
-    ]);
-  });
-
-  it("defaults missing coverage metrics to 0 (Story 6.3)", () => {
-    const cov = mapCoverageSummary({ total: {} }, "/proj");
-    expect(cov!.total).toEqual({ statements: 0, branches: 0, functions: 0, lines: 0 });
-    expect(cov!.files).toEqual([]);
-  });
-
-  it("coerces a non-numeric pct sentinel to 0 (no NaN%) (Story 6.3)", () => {
-    const json = { total: { lines: { pct: "Unknown" as unknown as number } } };
-    const cov = mapCoverageSummary(json, "/proj");
-    expect(cov!.total.lines).toBe(0);
   });
 
   it("includes a module load error as a failed test entry", () => {

@@ -30,9 +30,11 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.12.1",
     "commander": "13.1.0",
+    "istanbul-lib-coverage": "3.2.2",
     "zod": "3.24.4"
   },
   "devDependencies": {
+    "@types/istanbul-lib-coverage": "2.0.6",
     "@types/node": "22.15.21",
     "@vitest/coverage-v8": "4.1.9",
     "typescript": "5.8.3",

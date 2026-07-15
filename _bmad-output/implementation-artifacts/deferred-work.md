@@ -92,11 +92,20 @@
   summary: The per-file coverage table (`result.coverage.files`) is unbounded — a large repo's coverage run persists (Story 6.2) and re-renders a very large array, unlike the Story-6.1 `tests` list which is capped.
   evidence: LOW-MEDIUM. Bound it like `tests` (cap + a `filesTruncated` flag, ideally keeping the lowest-coverage files as the most actionable) so history records and UI payloads stay bounded. Also cosmetic: files outside the project root render as `../..` paths (`path.relative` fallback only fires on identical paths).
 
-## Blocked/escalated: story-6-10-combined-incremental-coverage (2026-07-15)
+## Deferred from: story-6-10-combined-incremental-coverage (2026-07-15)
+
+(6.10 itself is DONE — the user authorized `istanbul-lib-coverage`, unblocking the accurate merge.
+These are residual edges the review surfaced, all safe-direction or narrow.)
 
 - source_story: `story-6-10-combined-incremental-coverage.md`
-  summary: **BLOCKED — needs orchestrator decision.** Accurate combined (union-of-latest) coverage requires line-hit-level merging, which needs a coverage-merge capability (`istanbul-lib-coverage` / c8) that is NOT in this repo (runtime deps are only sdk/commander/zod; `@vitest/coverage-v8` is dev-only; istanbul is not installed). Adding a runtime dep is forbidden mid-story (CLAUDE.md + the story's own escalation trigger). Percentages can't be unioned, so the "store summaries instead" fallback can't produce an accurate combined number.
-  evidence: See the story's Auto Run Result for the three decision paths (authorize a merge dep; re-scope to full-run-only whole-project coverage — largely already delivered by 6.3; or approve a hand-rolled merge spec). All of 6.10's ACs hang off the combined number, so no safe partial ships value. Companion items: the Story-6.3 deferred "subset vs whole-project qualification" and `all: false` inflation notes.
+  summary: Lost-update (6.7 class): a source edited BETWEEN its coverage measurement and the post-run source hashing gets a stored hash matching the post-edit disk while the persisted coverage reflects the pre-edit run → not flagged stale → `high` confidence with slightly-stale numbers.
+  evidence: Narrow (edit during a long coverage run). Fix by hashing each source at the moment its test is measured (inside the measure callback) rather than once after the whole build. Same family as the accepted 6.7 window.
+- source_story: `story-6-10-combined-incremental-coverage.md`
+  summary: `coverage-data.json` and the per-file coverage list inside each persisted history record grow with project size; deleted TEST files are now pruned, but per-run I/O still hashes every source any surviving test measured, and large projects bloat every `.test-mcp/history/<runId>.json` (Story 6.2).
+  evidence: MEDIUM on very large repos. Consider: prune `sourceHashes`/rows for sources no longer on disk; store combined coverage once (latest) rather than per-history-record, or trim the per-file list from history and keep only total+confidence there.
+- source_story: `story-6-10-combined-incremental-coverage.md`
+  summary: Minor accuracy edges: a 0-statement source's istanbul pct sentinel is coerced to 0 and folded into the total (slight under-report); a run where ALL measurements fail but prior data exists reports the carried combined numbers (arguably fine if sources unchanged, but it "measured nothing" this run).
+  evidence: LOW. The confidence signal covers the second case when sources changed; when unchanged, reporting carried coverage is reasonable.
 
 ## Testing infrastructure (2026-07-15)
 

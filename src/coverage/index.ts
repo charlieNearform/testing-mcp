@@ -59,6 +59,11 @@ export interface FileMeasurement {
   sources: string[];
   /** False if the file could not be measured (no coverage produced). */
   measured: boolean;
+  /**
+   * Raw `coverage-final.json` content (istanbul-shaped, absolute-path keyed) for this test file,
+   * captured for the combined-coverage merge (Story 6.10). Optional — the reverse-map build ignores it.
+   */
+  data?: Record<string, unknown>;
 }
 
 export function coverageMapPath(projectRoot: string): string {
@@ -244,7 +249,9 @@ export function extractCoveredSources(
   return [...sources].sort();
 }
 
-function isTestFile(rel: string): boolean {
+/** Path/name convention for a test file. Exported so the combined-coverage report (Story 6.10)
+ *  excludes test files with the SAME rule the map build uses (no drift). */
+export function isTestFile(rel: string): boolean {
   return (
     /\.(test|spec)\.[cm]?[jt]sx?$/.test(rel) ||
     rel.split(path.sep).includes("__tests__")

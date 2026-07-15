@@ -14,10 +14,16 @@ importers:
       commander:
         specifier: 13.1.0
         version: 13.1.0
+      istanbul-lib-coverage:
+        specifier: 3.2.2
+        version: 3.2.2
       zod:
         specifier: 3.24.4
         version: 3.24.4
     devDependencies:
+      '@types/istanbul-lib-coverage':
+        specifier: 2.0.6
+        version: 2.0.6
       '@types/node':
         specifier: 22.15.21
         version: 22.15.21
@@ -192,6 +198,9 @@ packages:
 
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
+
+  '@types/istanbul-lib-coverage@2.0.6':
+    resolution: {integrity: sha512-2QF/t/auWm0lsy8XtKVPG19v3sSOQlJe/YHZgfjb/KBBHOGSV+J2q/S671rcq9uTBrLAXmZpqJiaQbMT+zNU1w==}
 
   '@types/node@22.15.21':
     resolution: {integrity: sha512-EV/37Td6c+MgKAbkcLG6vqZ2zEYHD7bvSrzqqs2RIhbA6w3x+Dqz8MZM3sP6kGTeLrdoOgKZe+Xja7tUB2DNkQ==}
@@ -1027,6 +1036,8 @@ snapshots:
   '@types/deep-eql@4.0.2': {}
 
   '@types/estree@1.0.9': {}
+
+  '@types/istanbul-lib-coverage@2.0.6': {}
 
   '@types/node@22.15.21':
     dependencies:

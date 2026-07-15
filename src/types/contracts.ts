@@ -51,13 +51,20 @@ export interface TestResult {
   /** True when `tests` was capped and no longer lists every case (Story 6.1). */
   testsTruncated?: boolean;
   /**
-   * Coverage summary for a `coverage: true` run (Story 6.3) — overall + per-file percentages
-   * (statements/branches/functions/lines), read from Vitest's `coverage-summary.json`. Absent on
-   * plain runs (coverage is only measured when requested) and when no coverage provider is present.
+   * Coverage report for a `coverage: true` run — overall + per-file percentages
+   * (statements/branches/functions/lines). Absent on plain runs (coverage is only measured when
+   * requested) and when no coverage provider is present. As of Story 6.10 this is the COMBINED
+   * (whole-project) picture: the union of every test file's latest measurement, so an incremental
+   * run reports whole-project coverage without re-running everything. `combined` marks that; each
+   * file carries `fresh` (re-measured this run) / `stale` (source changed since measured); and
+   * `confidence` is `degraded` when a changed source is unmeasured (Story 6.8) so "100%" is only
+   * asserted at `high` confidence.
    */
   coverage?: {
     total: CoveragePct;
-    files: Array<{ file: string } & CoveragePct>;
+    files: Array<{ file: string; fresh?: boolean; stale?: boolean } & CoveragePct>;
+    combined?: boolean;
+    confidence?: Confidence;
   };
   /** Timing breakdown so daemon/worker overhead is observable (NFR7). Optional; added in Story 2.1. */
   metadata?: {

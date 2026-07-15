@@ -4,7 +4,7 @@
 **Slice:** `src/coverage`, `src/worker`, `src/types`, `src/ui`
 **Type:** `feature`
 **Depends on:** `6-3` (coverage report), `6-7` (snapshot/change model), `6-8` (confidence)
-**Status:** blocked (escalated — needs an orchestrator-authorized coverage-merge dependency)
+**Status:** done (unblocked 2026-07-15 — user authorized the `istanbul-lib-coverage` dependency)
 
 ## Source
 
@@ -77,7 +77,52 @@ flagged).
 
 ## Auto Run Result
 
-Status: **BLOCKED — escalated to the orchestrator (dev-auto 2026-07-15).** No code changed.
+Status: **DONE (dev-auto 2026-07-15).** Initially escalated as blocked (below); the user then
+authorized the `istanbul-lib-coverage` runtime dependency, unblocking the accurate line-hit merge.
+
+**Change:** `coverage: true` runs now report COMBINED whole-project coverage — the union of every
+test file's latest measurement — so an incremental run reports whole-project coverage without
+re-running everything. Each test file's istanbul-shaped `coverage-final.json` (captured during the
+existing per-file map build — **no extra suite run**, which also let me REMOVE Story 6.3's separate
+`coverage-summary` pass and its subset/`all:false` inaccuracy) is persisted to a separate
+`.test-mcp/coverage-data.json` (schema 1) — kept out of the reverse map so selection's hot read
+stays small. `combineCoverage` merges the latest data via `istanbul-lib-coverage` (a real line-hit
+union: two tests covering different halves of a file → 100%). Each test records the content hash of
+every source it measured; a source whose current hash differs from any contributing test's measured
+version is `stale` → the combined report reports `degraded` confidence (Story 6.8), so "100%" is
+only asserted at `high`. The UI run-detail shows the combined report, its confidence, and per-file
+`fresh`/`stale` tags; the run-history row shows overall line %.
+
+**Design choice vs the story note:** the note suggested bumping `COVERAGE_MAP_SCHEMA_VERSION` (3→4)
+to hold per-test data in the reverse map. I kept the reverse map lean (selection reads it on every
+run) and stored the heavy per-test istanbul data in a separate `coverage-data.json` instead — same
+intent, no schema churn on the hot path, and no discarding of existing v3 maps.
+
+**Files changed:** `src/coverage/combined.ts` (NEW — persist/merge/staleness), `src/coverage/index.ts`
+(`FileMeasurement.data?`; export `isTestFile`), `src/worker/index.ts` (capture per-test data, hash
+measured sources, `persistAndCombine`, removed the 6.3 pass), `src/types/contracts.ts` (extended
+`coverage` with `combined`/`confidence`/per-file `fresh`/`stale`), `src/ui/index.ts` (combined label,
+confidence badge, fresh/stale tags). Dependency: `istanbul-lib-coverage@3.2.2` (+ `@types/…`).
+Tests: `test/combined-coverage.test.ts` (NEW — union, staleness incl. two-version mismatch, zero-hit,
+corrupt-skip, prune-deleted-tests, persistence), `test/coverage-build.test.ts` (combined + staleness
+integration), removed the obsolete `mapCoverageSummary` unit tests.
+
+**Review:** Blind Hunter + Edge Case Hunter (parallel). The reviews caught real number/confidence
+soundness bugs; patched: (F1) a mismatched-version merge no longer falsely reports `high` — per-test
+source hashes make it `stale`/`degraded`; (F2) zero-hit sources are hashed so they aren't spuriously
+stale; (F3) deleted/renamed test files are pruned so phantom coverage can't inflate the number;
+(F6) a corrupt per-test entry is skipped (loud on stderr), not silently swallowed or allowed to
+poison the report; plus reason-cap, Windows drive-path exclusion, `isTestFile` dedup, stale-comment
+removal. Deferred (deferred-work): the 6.7-class lost-update if a source is edited mid-coverage-run;
+unbounded `coverage-data.json`/history-record growth on churn; 0-statement-file % accuracy; a
+measured-nothing run reporting from unchanged carried data.
+
+**Verification:** `pnpm run typecheck` exit 0; `pnpm build` exit 0; `pnpm test` exit 0 (40 files,
+196 tests).
+
+---
+
+### Original escalation (2026-07-15, later unblocked)
 
 **Blocking condition:** The core of AC1 — "combined project coverage = the union of every test
 file's *latest* measurement" — requires merging per-test-file coverage at the **line-hit level**

@@ -339,20 +339,33 @@ async function renderRun(pid, runId) {
     + '<ul class="tests">' + allTests.map((t) =>
         '<li><span class="' + testStatusClass(t.status) + '">' + esc(t.status) + '</span> '
         + esc(t.name) + ' <span class="loc">' + esc(t.file || "") + '</span></li>').join("") + '</ul>';
-  // Coverage report (Story 6.3): overall % as stat tiles + a per-file table. Only present on
-  // coverage runs.
+  // Coverage report (Story 6.10): a COMBINED whole-project picture (union of each test file's
+  // latest measurement) with its own confidence — degraded when a changed source is unmeasured —
+  // and per-file fresh/stale tags.
   const cov = res.coverage;
   const pctCell = (v) => (v == null ? "–" : (Math.round(v * 10) / 10) + "%");
+  const covTag = (f) => (f.stale ? ' <span class="badge degraded">stale</span>'
+    : f.fresh ? ' <span class="badge high">fresh</span>' : "");
+  const covConf = cov && cov.confidence;
+  const covConfLine = !covConf ? "" :
+    '<div class="ts"><span class="badge ' + (covConf.level === "high" ? "high" : "degraded") + '">'
+    + esc(covConf.level) + '</span>'
+    + (covConf.level === "degraded" ? " — coverage numbers may be stale; run a full coverage pass" : "")
+    + '</div>'
+    + ((covConf.reasons && covConf.reasons.length)
+        ? '<ul class="files">' + covConf.reasons.map((r) => '<li>' + esc(r) + '</li>').join("") + '</ul>'
+        : "");
   const covBlock = !cov ? "" :
-    '<div class="section-title">coverage</div>'
+    '<div class="section-title">coverage' + (cov.combined ? " (combined)" : "") + '</div>'
     + '<div class="detail-grid">'
     + kv("statements", pctCell(cov.total.statements)) + kv("branches", pctCell(cov.total.branches))
     + kv("functions", pctCell(cov.total.functions)) + kv("lines", pctCell(cov.total.lines))
     + '</div>'
+    + covConfLine
     + ((cov.files && cov.files.length)
         ? '<table class="runs"><thead><tr><th>file</th><th>stmts</th><th>branch</th><th>funcs</th><th>lines</th></tr></thead><tbody>'
           + cov.files.map((f) =>
-              '<tr><td>' + esc(f.file) + '</td><td>' + pctCell(f.statements) + '</td><td>'
+              '<tr><td>' + esc(f.file) + covTag(f) + '</td><td>' + pctCell(f.statements) + '</td><td>'
               + pctCell(f.branches) + '</td><td>' + pctCell(f.functions) + '</td><td>'
               + pctCell(f.lines) + '</td></tr>').join("")
           + '</tbody></table>'
