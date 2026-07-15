@@ -51,6 +51,8 @@ Security**, referencing the GitHub issue (`#123`) where applicable.
   agent to the daemon, with two token-safe options — a local-scope `claude mcp add` command
   (token stays out of the repo) and a committed-safe `.mcp.json` referencing
   `${TEST_MCP_TOKEN}`. `register` now points to it.
+- `test-mcp ui` CLI command: prints the monitoring UI URL (bare, on stdout, so it can be
+  piped to a browser). `register` now prints the UI link on success too.
 - BMAD scaffolding and full planning artifact set under `_bmad-output/planning-artifacts/`:
   requirements contract (`SPEC.md`), architecture spine (`ARCHITECTURE-SPINE.md`),
   epics & stories (`epics.md` — 5 epics / 18 stories), PRFAQ + distillate, and an

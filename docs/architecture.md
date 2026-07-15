@@ -51,8 +51,8 @@ These must hold across every component and story:
 **Components:**
 
 - **CLI (`test-mcp`)** — thin launcher/client, no Vitest coupling; safe to install
-  globally or run via `npx`. Commands: `init`, `register`, `mcp-config`, `start`, `stop`,
-  `status`, `link`, `unlink`.
+  globally or run via `npx`. Commands: `init`, `register`, `mcp-config`, `ui`, `start`,
+  `stop`, `status`, `link`, `unlink`.
 - **MCP Layer** — `McpServer` + tool registration; Streamable HTTP transport (primary)
   and optional stdio single-project mode. Handles auth, Host/Origin validation, sessions.
 - **Project Registry** — central record of registered projects (`projectId` → path,

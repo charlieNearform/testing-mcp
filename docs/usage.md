@@ -223,11 +223,16 @@ latest watch result; call `stop_watch` to end it.
 
 ## Monitoring UI (for humans)
 
-While the daemon is running, open a browser at:
+While the daemon is running, open a browser at `http://127.0.0.1:7420/ui`. To get the URL
+(with the live port), run `test-mcp ui` — it prints just the URL on stdout, so you can pipe
+it straight to your browser:
 
+```bash
+test-mcp ui            # http://127.0.0.1:7420/ui
+open "$(test-mcp ui)"  # macOS: open it directly
 ```
-http://127.0.0.1:7420/ui
-```
+
+(`test-mcp register` also prints the UI link on success.)
 
 - `GET /ui` — live status page (no bearer required; loopback-gated, GET-only).
 - `GET /ui/api/status` — JSON snapshot.

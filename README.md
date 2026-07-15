@@ -57,6 +57,7 @@ test-mcp stop       # graceful shutdown
 test-mcp init       # scaffold <git-root>/.test-mcp/ without touching the daemon
 test-mcp register   # scaffold + auto-boot daemon + register the current project
 test-mcp mcp-config # print MCP client config to connect an agent (two safe options)
+test-mcp ui         # print the monitoring UI URL (http://127.0.0.1:<port>/ui)
 test-mcp link       # symlink this CLI into a writable dir on your PATH
 test-mcp unlink     # remove that symlink
 ```

@@ -210,6 +210,7 @@ program
       }
       return outExit(
         `test-mcp register: registered ${payload.projectId} (${payload.path})\n` +
+          `Monitoring UI: http://127.0.0.1:${port}/ui\n` +
           "Next: run `test-mcp mcp-config` to connect your MCP client (agent).",
       );
     } catch (err) {
@@ -357,6 +358,27 @@ program
       return outExit("test-mcp unlink: no test-mcp symlink found");
     } catch (err) {
       return errExit(`test-mcp unlink: ${(err as Error).message}`);
+    }
+  });
+
+program
+  .command("ui")
+  .description("Print the human monitoring UI URL")
+  .action(() => {
+    try {
+      // Use the live daemon's port if running, else the configured/default port.
+      const lock = readLockfile();
+      let port: number;
+      if (lock && isPidAlive(lock.pid)) {
+        port = lock.port;
+      } else {
+        port = loadOrCreateConfig().port;
+        console.error("test-mcp ui: daemon not running — start it with `test-mcp start` (or `test-mcp register`)");
+      }
+      // Bare URL on stdout so it's pipeable, e.g. `open "$(test-mcp ui)"`.
+      return outExit(`http://127.0.0.1:${port}/ui`);
+    } catch (err) {
+      return errExit(`test-mcp ui: ${(err as Error).message}`);
     }
   });
 
