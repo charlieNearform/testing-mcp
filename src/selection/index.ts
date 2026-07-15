@@ -182,7 +182,13 @@ function isKeepAlways(rel: string): boolean {
   if (base === "package.json") return true;
   if (base === "pnpm-lock.yaml" || base === "package-lock.json" || base === "yarn.lock") return true;
   if (/^tsconfig.*\.json$/.test(base)) return true;
-  if (/^vitest\.setup\./.test(base)) return true;
+  if (/^vitest\.(setup|workspace)\./.test(base)) return true;
+  // Non-JS build/test configs (the JS/TS forms are already covered by the extension rule above).
+  // These can change test behaviour, so a broad user ignore (e.g. `*.json`) must not drop them.
+  if (/^(babel|jest)\.config\./.test(base)) return true;
+  if (base === ".mocharc" || /^\.mocharc\./.test(base)) return true;
+  if (base === ".swcrc") return true;
+  if (base === ".env" || base.startsWith(".env.")) return true;
   return false;
 }
 
@@ -267,11 +273,20 @@ export function filterChangedPaths(files: string[], patterns: string[]): string[
   });
 }
 
-/** Read `<projectRoot>/.test-mcp-ignore` lines; missing/unreadable → no extra patterns. */
+/** Read `<projectRoot>/.test-mcp-ignore` lines; a missing file → no extra patterns. An unexpected
+ *  read error (e.g. EACCES/EISDIR) is warned to stderr — safe (patterns just aren't applied, so more
+ *  runs) but not silently swallowed. */
 function readIgnorePatterns(projectRoot: string): string[] {
   try {
     return fs.readFileSync(path.join(projectRoot, ".test-mcp-ignore"), "utf8").split(/\r?\n/);
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      process.stderr.write(
+        `[test-mcp] could not read .test-mcp-ignore (${
+          err instanceof Error ? err.message : String(err)
+        }); ignoring it\n`,
+      );
+    }
     return [];
   }
 }
@@ -307,19 +322,21 @@ export function getChangedFiles(projectRoot: string): { files: string[]; added: 
       encoding: "utf8" as const,
       stdio: ["ignore", "pipe", "ignore"] as ("ignore" | "pipe")[],
     };
-    const tracked = execFileSync("git", ["diff", "--name-only", "HEAD"], gitOpts);
-    const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], gitOpts);
+    // `-z` (NUL-delimited) so non-ASCII / spaced paths are emitted raw, not octal-quoted — a
+    // newline+quote split would never match such a path and would silently drop it from selection.
+    const tracked = execFileSync("git", ["diff", "--name-only", "-z", "HEAD"], gitOpts);
+    const untracked = execFileSync("git", ["ls-files", "-z", "--others", "--exclude-standard"], gitOpts);
     // Staged-but-uncommitted additions are already in `git diff HEAD` (so in `files`), but not in
     // `ls-files --others`; include them here so a `git add`-ed new file is still classified NEW.
     const stagedAdded = execFileSync(
       "git",
-      ["diff", "--cached", "--name-only", "--diff-filter=A"],
+      ["diff", "--cached", "--name-only", "-z", "--diff-filter=A"],
       gitOpts,
     );
     const patterns = loadIgnorePatterns(projectRoot);
     const normalize = (raw: string): string[] =>
       raw
-        .split("\n")
+        .split("\0")
         .map((s) => s.trim())
         .filter(Boolean)
         .map((s) => s.split(path.sep).join("/"));

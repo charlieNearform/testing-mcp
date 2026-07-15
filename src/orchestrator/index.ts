@@ -605,12 +605,18 @@ export class Orchestrator {
    * swallowed so it never fails the run or crashes the daemon (the in-memory buffer still has it).
    */
   private recordRun(record: RunRecord, projectPath: string): void {
-    const list = this.history.get(record.projectId) ?? [];
-    list.unshift(record);
+    // Defensive deep copy (Story 6.4 deferral): the same TestResult is fanned out to history,
+    // run-state, and the caller. Cloning here decouples the retained/persisted copy so a later
+    // in-place mutation of the returned result (or of lastResult) can never corrupt history.
+    const stored: RunRecord = record.result
+      ? { ...record, result: structuredClone(record.result) }
+      : record;
+    const list = this.history.get(stored.projectId) ?? [];
+    list.unshift(stored);
     if (list.length > this.maxHistory) list.length = this.maxHistory;
-    this.history.set(record.projectId, list);
+    this.history.set(stored.projectId, list);
     try {
-      writeRunRecord(projectPath, record);
+      writeRunRecord(projectPath, stored);
       pruneHistory(projectPath, this.maxHistory);
     } catch (err) {
       process.stderr.write(
@@ -629,7 +635,12 @@ export class Orchestrator {
 
   private setRunState(projectId: string, patch: Partial<RunStatus>): void {
     const prev = this.runState.get(projectId) ?? { state: "idle" as const };
-    this.runState.set(projectId, { ...prev, ...patch, updatedAt: new Date().toISOString() });
+    // Clone lastResult so run-state holds a copy independent of history and the returned result
+    // (Story 6.4 deferral — see recordRun).
+    const clean = patch.lastResult
+      ? { ...patch, lastResult: structuredClone(patch.lastResult) }
+      : patch;
+    this.runState.set(projectId, { ...prev, ...clean, updatedAt: new Date().toISOString() });
     for (const fn of this.statusListeners) {
       try {
         fn();

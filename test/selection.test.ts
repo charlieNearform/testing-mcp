@@ -225,6 +225,19 @@ describe("filterChangedPaths (Story 6.5)", () => {
     expect(filterChangedPaths(files, ["*.yaml", "*.ts", "tsconfig*.json"])).toEqual(files);
   });
 
+  it("keeps non-JS build/test configs via keep-always even against a broad ignore", () => {
+    const files = [
+      "babel.config.json",
+      "jest.config.json",
+      ".mocharc.yml",
+      ".swcrc",
+      ".env.test",
+      "vitest.workspace.json",
+    ];
+    // A user pattern that would otherwise drop all of these.
+    expect(filterChangedPaths(files, ["*.json", "*.yml", ".swcrc", ".env.*"])).toEqual(files);
+  });
+
   it("keeps relevant files while dropping only the matched ones (mixed set)", () => {
     const files = ["README.md", "src/app.ts", ".gitignore"];
     expect(filterChangedPaths(files, defaults)).toEqual(["src/app.ts"]);

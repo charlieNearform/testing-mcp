@@ -109,6 +109,22 @@ describe("snapshot: changedSinceSnapshot", () => {
     expect(changed!.added).toEqual(["c.ts"]);
   });
 
+  it("detects a change to a non-ASCII / spaced filename (git -z parsing)", () => {
+    dir = makeRepo();
+    const oddName = "src/café dôme.ts";
+    fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(dir, oddName), `export const x = 1;\n`);
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "odd name"], { cwd: dir, env: GIT_ENV });
+
+    writeCurrentSnapshot(dir);
+    fs.appendFileSync(path.join(dir, oddName), `// touched\n`);
+
+    const changed = changedSinceSnapshot(dir);
+    // Before the -z fix, git octal-quoted the path and the newline split dropped it -> invisible.
+    expect(changed!.files).toContain(oddName);
+  });
+
   it("sees no diff when a change is reverted before diffing", () => {
     dir = makeRepo();
     const original = fs.readFileSync(path.join(dir, "a.ts"));

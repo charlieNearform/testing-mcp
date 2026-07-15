@@ -18,8 +18,7 @@
 ## Deferred from: spec-6-4-surface-real-selection-reason (2026-07-15)
 
 - source_spec: `spec-6-4-surface-real-selection-reason.md`
-  summary: A run's `TestResult` object is shared by reference across `recordRun` (history), `setRunState` (`lastResult`), and `resolve` (the returned value); any later in-place mutation of one silently corrupts the others.
-  evidence: Pre-existing pattern (predates Story 6.4); the 6.4 stamp mutates `result.selection` before all three consumers, which is consistent today but entrenches the shared-mutable-reference hazard. A defensive clone of the run result before fan-out would remove the latent risk.
+  summary: **RESOLVED 2026-07-15 (hardening sweep).** The shared-mutable-reference hazard is closed: `recordRun` and `setRunState` now `structuredClone` the result before retaining/persisting it, so history and run-state hold copies independent of each other and of the returned result. A later in-place mutation of one can no longer corrupt the others.
 
 ## Deferred from: spec-6-5-ignore-test-irrelevant-changes (2026-07-15)
 
@@ -30,8 +29,7 @@
   summary: The `.test-mcp-ignore` matcher supports only a documented subset of gitignore syntax; several forms are unsupported and fail toward MORE running.
   evidence: `!` negation compiles to a literal, `?`/`[…]` are literal, trailing-slash `dir/` and bare `dir` don't match a directory's contents (need `dir/**`), leading `**/x` and middle `a/**/b` don't collapse zero dirs, and backslash-separated patterns don't match POSIX paths. All fail safe (nothing excluded → more runs), but silently — a fuller matcher or startup validation/warning would help.
 - source_spec: `spec-6-5-ignore-test-irrelevant-changes.md`
-  summary: keep-always allowlist is not exhaustive for all build/test configs, and `readIgnorePatterns` swallows non-ENOENT errors.
-  evidence: `babel.config.json`, `jest.config.json`, `.mocharc.*`, `.swcrc`, `.env*`, `vitest.workspace.*` are not on keep-always (safe unless a broad user pattern like `*.json` drops them). A present-but-unreadable `.test-mcp-ignore` (EACCES/EISDIR) is treated as absent with no warning.
+  summary: **RESOLVED 2026-07-15 (hardening sweep).** keep-always now covers `babel.config.*`, `jest.config.*`, `.mocharc.*`, `.swcrc`, `.env*`, and `vitest.workspace.*`, so a broad user ignore (e.g. `*.json`) can't drop them; `readIgnorePatterns` now warns on a non-ENOENT read error instead of silently swallowing it.
 
 ## Deferred from: spec-6-6-new-file-bounded-by-static-graph (2026-07-15)
 
@@ -40,8 +38,8 @@
   evidence: `--changed` is a static import graph; a never-measured new file has no coverage-map signal, so a dynamic edge from an existing unchanged test is invisible → that test isn't selected and a regression can ship green. This is the ratified invariant-5 relaxation whose designed mitigation is **6.8's confidence signal** — 6.8 MUST mark bounded-new-file runs as `degraded` confidence (so the agent runs a full pass), and the worker's union branch should gain the same full-suite fallback the `files.length===0` `--changed` branch has. Land these in 6.8.
   evidence-tests: no test yet for (a) a new source reached only by an existing test's dynamic import, (b) the `alwaysRun`-present case removing the worker fallback, (c) a staged-new file (the getChangedFiles staged-add patch is covered only by existing new-file cases).
 - source_spec: `spec-6-6-new-file-bounded-by-static-graph.md`
-  summary: Pre-existing `getChangedFiles` edges: git `core.quotePath` octal-quotes non-ASCII filenames (never match map keys → misclassified unknown → full), and an unborn HEAD (no commits) makes `git diff HEAD` fatal → null → full.
-  evidence: Both predate 6.6 and fail to the SAFE (full-suite) direction, so they're correctness-safe but defeat incremental selection for those repos. Fix with `-z`/`core.quotePath=false` parsing and an empty-tree fallback ref respectively.
+  summary: Pre-existing `getChangedFiles` edges: non-ASCII filenames (**RESOLVED** 2026-07-15 — `getChangedFiles` now uses `git ... -z`), and an unborn HEAD (no commits) makes `git diff HEAD` fatal → null → full.
+  evidence: The non-ASCII case is fixed (NUL-delimited output, no octal-quoting). The unborn-HEAD case remains but fails to the SAFE (full-suite) direction — a fresh repo with no commits just runs full until the first commit; add an empty-tree fallback ref if incremental-on-unborn-HEAD is ever wanted.
 
 ## Deferred from: spec-6-7-changed-since-last-run-baseline (2026-07-15)
 
@@ -53,8 +51,8 @@
   summary: `listCandidateFiles`/`computeHashes` hash the ENTIRE tracked∪untracked candidate set fully into memory on every incremental run (once, at selection) — cost/latency on a large monorepo or one with large tracked binaries (`.png`/`.zip` not in the default ignore set).
   evidence: Correctness-safe (blocking synchronous work on the daemon thread, no under-select), but a real perf regression vs the pure `git diff` HEAD path for big repos. Mitigate with a `git ls-files -m`/mtime pre-filter to hash only plausibly-changed candidates, stream hashing (`createReadStream`) instead of `readFileSync`, and/or a size cap that treats oversized assets as always-changed. The Story-6.7 patch already halved the passes (capture once at selection instead of re-hashing post-run).
 - source_spec: `spec-6-7-changed-since-last-run-baseline.md`
-  summary: Minor git/FS edges in the snapshot module, all failing to the SAFE (over-select) direction: `git ls-files` is newline-split (a `core.quotePath` non-ASCII path is skipped in both snapshot and current → invisible → *under-select* — the one exception, shared with `getChangedFiles`, fix with `-z`); a symlink-to-dir / submodule gitlink / FIFO candidate throws `EISDIR`/`EINVAL` in `computeHashes` → skipped → perpetually "changed"; `saveSnapshot`'s tmp name is `${target}.${pid}.tmp` (collision-safe only because per-project runs are queue-serialized — latent if a future non-queued caller appears; `randomUUID` would harden it).
-  evidence: Except the non-ASCII case (shared with 6.6's deferred `-z` fix), all fail toward MORE running. Bundle the `-z`/`core.quotePath=false` parsing fix with the 6.6 deferral so both `getChangedFiles` and `listCandidateFiles` are corrected together.
+  summary: Minor git/FS edges in the snapshot module. The non-ASCII under-select (`git ls-files` newline-split → a non-ASCII path invisible in both snapshot and current) is **RESOLVED** 2026-07-15 (`listCandidateFiles` now uses `git ls-files -z`). Remaining, all SAFE (over-select) direction: a symlink-to-dir / submodule gitlink / FIFO candidate throws `EISDIR`/`EINVAL` in `computeHashes` → skipped → perpetually "changed"; `saveSnapshot`'s tmp name is `${target}.${pid}.tmp` (collision-safe only because per-project runs are queue-serialized — latent if a future non-queued caller appears; `randomUUID` would harden it).
+  evidence: The one non-safe edge (non-ASCII) is fixed; the rest fail toward MORE running. A `stat`+skip for non-regular files and a `randomUUID` tmp suffix would tidy the remainder.
 
 ## Deferred from: spec-6-8-selection-confidence-signal (2026-07-15)
 

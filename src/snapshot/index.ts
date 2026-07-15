@@ -53,11 +53,14 @@ export function listCandidateFiles(projectRoot: string): string[] | null {
       encoding: "utf8" as const,
       stdio: ["ignore", "pipe", "ignore"] as ("ignore" | "pipe")[],
     };
-    const tracked = execFileSync("git", ["ls-files"], gitOpts);
-    const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], gitOpts);
+    // `-z` (NUL-delimited) so non-ASCII / spaced paths are emitted raw rather than octal-quoted —
+    // a newline+quote split would drop such a file from BOTH the snapshot and the current-tree hash,
+    // making its edits invisible to the delta (an under-select — the one non-safe git-parsing edge).
+    const tracked = execFileSync("git", ["ls-files", "-z"], gitOpts);
+    const untracked = execFileSync("git", ["ls-files", "-z", "--others", "--exclude-standard"], gitOpts);
     const normalize = (raw: string): string[] =>
       raw
-        .split("\n")
+        .split("\0")
         .map((s) => s.trim())
         .filter(Boolean)
         .map((s) => s.split(path.sep).join("/"));
