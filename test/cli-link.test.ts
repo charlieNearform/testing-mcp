@@ -55,19 +55,30 @@ describe("cli link/unlink", () => {
     expect(stdout).toContain("already linked");
   });
 
-  it("refuses to overwrite an existing entry without --force", async () => {
-    fs.writeFileSync(linkPath(), "not ours");
-    const { code, stderr } = await runCli(["link", "--dir", dir]);
-    expect(code).toBe(1);
-    expect(stderr).toContain("already exists");
-    expect(fs.readFileSync(linkPath(), "utf8")).toBe("not ours"); // untouched
+  it("refuses to overwrite a real file, even with --force", async () => {
+    fs.writeFileSync(linkPath(), "a real binary");
+    const first = await runCli(["link", "--dir", dir]);
+    expect(first.code).toBe(1);
+    expect(first.stderr).toContain("not a symlink");
+    const forced = await runCli(["link", "--dir", dir, "--force"]);
+    expect(forced.code).toBe(1);
+    expect(forced.stderr).toContain("not a symlink");
+    expect(fs.readFileSync(linkPath(), "utf8")).toBe("a real binary"); // untouched both times
   });
 
-  it("overwrites with --force", async () => {
-    fs.writeFileSync(linkPath(), "not ours");
-    const { code } = await runCli(["link", "--dir", dir, "--force"]);
-    expect(code).toBe(0);
-    expect(fs.lstatSync(linkPath()).isSymbolicLink()).toBe(true);
+  it("refuses to overwrite a foreign symlink without --force, replaces it with --force", async () => {
+    const decoy = path.join(dir, "decoy-target");
+    fs.writeFileSync(decoy, "");
+    fs.symlinkSync(decoy, linkPath()); // a symlink to something that isn't our bin
+
+    const bare = await runCli(["link", "--dir", dir]);
+    expect(bare.code).toBe(1);
+    expect(bare.stderr).toContain("already links elsewhere");
+    expect(fs.realpathSync(linkPath())).toBe(fs.realpathSync(decoy)); // untouched
+
+    const forced = await runCli(["link", "--dir", dir, "--force"]);
+    expect(forced.code).toBe(0);
+    expect(fs.realpathSync(linkPath())).toBe(fs.realpathSync(binPath)); // now ours
   });
 
   it("unlinks a symlink it created", async () => {

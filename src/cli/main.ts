@@ -21,6 +21,20 @@ function daemonUnavailable(message: string): Error {
   return new Error(`DaemonUnavailable: ${message}`);
 }
 
+/**
+ * Print a final line then exit once it has flushed. Writing to a pipe is async, so a bare
+ * `console.log(x); process.exit(0)` can drop the line when stdout is piped (e.g. `| tee`);
+ * exiting from the write callback guarantees the output is delivered first.
+ */
+function outExit(message: string, code = 0): void {
+  process.stdout.write(`${message}\n`, () => process.exit(code));
+}
+
+/** Print a final error line to stderr then exit non-zero once it has flushed. */
+function errExit(message: string, code = 1): void {
+  process.stderr.write(`${message}\n`, () => process.exit(code));
+}
+
 /** Resolve the git root for a directory, or throw a clear error if not a git repo. */
 function resolveGitRoot(cwd: string): string {
   try {
@@ -151,10 +165,9 @@ program
       const gitRoot = resolveGitRoot(process.cwd());
       const projectId = ensureProjectConfig(gitRoot);
       ensureGitignore(gitRoot);
-      console.log(`test-mcp init: project ${projectId} ready at ${gitRoot}`);
+      outExit(`test-mcp init: project ${projectId} ready at ${gitRoot}`);
     } catch (err) {
-      console.error(`test-mcp init: ${(err as Error).message}`);
-      process.exit(1);
+      errExit(`test-mcp init: ${(err as Error).message}`);
     }
   });
 
@@ -182,8 +195,7 @@ program
       await client.close();
       const text = res.content?.[0]?.text;
       if (!text) {
-        console.error("test-mcp register: unexpected empty tool response");
-        process.exit(1);
+        return errExit("test-mcp register: unexpected empty tool response");
       }
       const payload = JSON.parse(text) as {
         code?: string;
@@ -192,14 +204,11 @@ program
         path?: string;
       };
       if (res.isError) {
-        console.error(`test-mcp register: ${payload.code}: ${payload.message}`);
-        process.exit(1);
+        return errExit(`test-mcp register: ${payload.code}: ${payload.message}`);
       }
-      console.log(`test-mcp register: registered ${payload.projectId} (${payload.path})`);
-      process.exit(0);
+      return outExit(`test-mcp register: registered ${payload.projectId} (${payload.path})`);
     } catch (err) {
-      console.error(`test-mcp register: ${(err as Error).message}`);
-      process.exit(1);
+      return errExit(`test-mcp register: ${(err as Error).message}`);
     }
   });
 
@@ -210,9 +219,9 @@ program
     try {
       const h = await startDaemon();
       if (h.alreadyRunning) {
-        console.log(`test-mcp daemon already running (pid ${h.pid}, port ${h.port})`);
-        process.exit(0);
+        return outExit(`test-mcp daemon already running (pid ${h.pid}, port ${h.port})`);
       }
+      // Success path stays alive — this process IS the daemon; do not exit.
       console.log(`test-mcp daemon started (pid ${h.pid}, port ${h.port})`);
       const shutdown = async () => {
         await h.close();
@@ -221,8 +230,7 @@ program
       process.once("SIGTERM", shutdown);
       process.once("SIGINT", shutdown);
     } catch (err) {
-      console.error(`test-mcp start: ${(err as Error).message}`);
-      process.exit(1);
+      return errExit(`test-mcp start: ${(err as Error).message}`);
     }
   });
 
@@ -233,18 +241,14 @@ program
     try {
       const r = await stopDaemon();
       if (r.stopped) {
-        console.log(`test-mcp daemon stopped (pid ${r.pid})`);
-        process.exit(0);
+        return outExit(`test-mcp daemon stopped (pid ${r.pid})`);
       }
       if (r.reason === "timeout") {
-        console.error(`test-mcp stop: daemon (pid ${r.pid}) did not shut down in time`);
-        process.exit(1);
+        return errExit(`test-mcp stop: daemon (pid ${r.pid}) did not shut down in time`);
       }
-      console.log("test-mcp daemon not running");
-      process.exit(0);
+      return outExit("test-mcp daemon not running");
     } catch (err) {
-      console.error(`test-mcp stop: ${(err as Error).message}`);
-      process.exit(1);
+      return errExit(`test-mcp stop: ${(err as Error).message}`);
     }
   });
 
@@ -254,15 +258,13 @@ program
   .action(async () => {
     try {
       const s = await getDaemonStatus();
-      console.log(
+      return outExit(
         s.running
           ? `test-mcp daemon: running (pid ${s.pid}, port ${s.port}, registered projects: ${s.registeredProjects.length})`
-          : "test-mcp daemon: stopped"
+          : "test-mcp daemon: stopped",
       );
-      process.exit(0);
     } catch (err) {
-      console.error(`test-mcp status: ${(err as Error).message}`);
-      process.exit(1);
+      return errExit(`test-mcp status: ${(err as Error).message}`);
     }
   });
 
@@ -285,24 +287,29 @@ program
       if (existing) {
         const current = existing.isSymbolicLink() ? fs.readlinkSync(linkPath) : undefined;
         if (current === target) {
-          console.log(`test-mcp link: already linked at ${linkPath}`);
-          process.exit(0);
+          return outExit(`test-mcp link: already linked at ${linkPath}`);
+        }
+        // Only ever overwrite our own kind of thing (a symlink). Never clobber a real file,
+        // even with --force — mirrors `unlink`'s "symlinks are the only things we delete".
+        if (!existing.isSymbolicLink()) {
+          return errExit(
+            `test-mcp link: ${linkPath} exists and is not a symlink; refusing to overwrite a real file`,
+          );
         }
         if (!opts.force) {
-          console.error(`test-mcp link: ${linkPath} already exists; pass --force to overwrite`);
-          process.exit(1);
+          return errExit(
+            `test-mcp link: ${linkPath} already links elsewhere; pass --force to overwrite`,
+          );
         }
         fs.rmSync(linkPath, { force: true });
       }
       fs.symlinkSync(target, linkPath);
-      console.log(`test-mcp link: linked -> ${linkPath}`);
       if (!new Set(pathDirs()).has(dir)) {
         console.error(`test-mcp link: warning — ${dir} is not on your PATH; add it to use \`test-mcp\` directly`);
       }
-      process.exit(0);
+      return outExit(`test-mcp link: linked -> ${linkPath}`);
     } catch (err) {
-      console.error(`test-mcp link: ${(err as Error).message}`);
-      process.exit(1);
+      return errExit(`test-mcp link: ${(err as Error).message}`);
     }
   });
 
@@ -326,30 +333,25 @@ program
         // Never remove a real binary — only symlinks are ours to delete.
         if (!st.isSymbolicLink()) {
           if (opts.dir) {
-            console.error(`test-mcp unlink: ${linkPath} is not a symlink; refusing to remove`);
-            process.exit(1);
+            return errExit(`test-mcp unlink: ${linkPath} is not a symlink; refusing to remove`);
           }
           continue;
         }
         const points = fs.readlinkSync(linkPath);
         if (points !== target && !opts.force) {
           if (opts.dir) {
-            console.error(
+            return errExit(
               `test-mcp unlink: ${linkPath} points to ${points}, not this package; pass --force`,
             );
-            process.exit(1);
           }
           continue; // a different test-mcp; leave it alone when scanning
         }
         fs.rmSync(linkPath, { force: true });
-        console.log(`test-mcp unlink: removed ${linkPath}`);
-        process.exit(0);
+        return outExit(`test-mcp unlink: removed ${linkPath}`);
       }
-      console.log("test-mcp unlink: no test-mcp symlink found");
-      process.exit(0);
+      return outExit("test-mcp unlink: no test-mcp symlink found");
     } catch (err) {
-      console.error(`test-mcp unlink: ${(err as Error).message}`);
-      process.exit(1);
+      return errExit(`test-mcp unlink: ${(err as Error).message}`);
     }
   });
 

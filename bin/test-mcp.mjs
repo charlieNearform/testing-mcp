@@ -10,7 +10,7 @@ try {
   await import(main);
 } catch (error) {
   if (error instanceof Error && "code" in error && error.code === "ERR_MODULE_NOT_FOUND") {
-    console.error("Error: dist/cli/main.js not found. Run `npm run build` first.");
+    console.error("Error: dist/cli/main.js not found. Run `pnpm build` first.");
     process.exit(1);
   }
   throw error;
