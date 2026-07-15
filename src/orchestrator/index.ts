@@ -196,7 +196,10 @@ export class Orchestrator {
         files: stored.files,
         changed: stored.changed,
         empty: stored.empty,
-        strategy: stored.files.length ? "incremental" : "full",
+        // A changed-only plan has empty `files` but still runs incrementally (git --changed),
+        // so derive from `changed` too — not `files.length` alone — or the result would be
+        // mislabelled "full" while running a bounded set.
+        strategy: stored.changed || stored.files.length ? "incremental" : "full",
         reason: "committed plan",
       },
       false,
@@ -233,7 +236,7 @@ export class Orchestrator {
         });
         return result;
       }
-      return this.execute(project, sel.files, sel.changed, coverage, onProgress);
+      return this.execute(project, sel, coverage, onProgress);
     });
     // Keep the chain alive even if this run rejects, so the next run still serializes after it.
     this.queues.set(project.projectId, run.catch(() => undefined));
@@ -284,15 +287,14 @@ export class Orchestrator {
 
   private async execute(
     project: ProjectRef,
-    files: string[],
-    changed: boolean,
+    sel: ResolvedSelection,
     coverage: boolean,
     onProgress?: ProgressFn,
   ): Promise<TestResult> {
     // Bound total concurrent workers across all projects; release the slot once settled.
     await this.acquireWorker();
     try {
-      return await this.executeWorker(project, files, changed, coverage, onProgress);
+      return await this.executeWorker(project, sel, coverage, onProgress);
     } finally {
       this.releaseWorker();
     }
@@ -300,11 +302,11 @@ export class Orchestrator {
 
   private executeWorker(
     project: ProjectRef,
-    files: string[],
-    changed: boolean,
+    sel: ResolvedSelection,
     coverage: boolean,
     onProgress?: ProgressFn,
   ): Promise<TestResult> {
+    const { files, changed } = sel;
     return new Promise<TestResult>((resolve, reject) => {
       const runId = randomUUID();
       const startedAt = new Date().toISOString();
@@ -403,6 +405,17 @@ export class Orchestrator {
             for (const d of failureDetails) map.set(d.id, d);
             this.lastFailures.set(project.projectId, map);
             const result = msg.result;
+            // Surface the orchestrator's specific decision reason over the worker's generic
+            // labels ("full suite"/"explicit file selection"). Exception: the git `--changed`
+            // execution-time fallback — the decision was incremental but the worker ran the
+            // full suite because no test was affected; there the worker's outcome is the
+            // truthful description, so preserve it. `selection.files` is always what ran.
+            const executionFallback =
+              result.selection.strategy === "full" && sel.strategy === "incremental";
+            if (!executionFallback) {
+              result.selection.reason = sel.reason;
+              result.selection.strategy = sel.strategy;
+            }
             this.recordRun({
               runId,
               projectId: project.projectId,
@@ -488,7 +501,8 @@ export class Orchestrator {
   }
 }
 
-/** A trivially-successful result for "nothing to run" (e.g. incremental with no changes). */
+/** A trivially-successful result for "nothing to run" (e.g. incremental with no changes).
+ *  An empty run is always an incremental no-op — never a full suite. */
 function emptyResult(reason: string): TestResult {
   return {
     success: true,

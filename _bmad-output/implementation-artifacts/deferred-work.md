@@ -14,3 +14,9 @@
 - Wire `dryRun`/`suite`/`planId` run_tests params — pre-existing; Story 4.1 scope
 - Consolidate `Orchestrator.execute` into options object as more run params arrive — style/refactor out of scope
 - Queue-serialization tests with `changed` flag — pre-existing coverage gap
+
+## Deferred from: spec-6-4-surface-real-selection-reason (2026-07-15)
+
+- source_spec: `spec-6-4-surface-real-selection-reason.md`
+  summary: A run's `TestResult` object is shared by reference across `recordRun` (history), `setRunState` (`lastResult`), and `resolve` (the returned value); any later in-place mutation of one silently corrupts the others.
+  evidence: Pre-existing pattern (predates Story 6.4); the 6.4 stamp mutates `result.selection` before all three consumers, which is consistent today but entrenches the shared-mutable-reference hazard. A defensive clone of the run result before fan-out would remove the latent risk.
