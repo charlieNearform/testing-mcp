@@ -77,6 +77,9 @@ export class Orchestrator {
       };
       if (process.env.TMPDIR) workerEnv.TMPDIR = process.env.TMPDIR;
       if (process.env.LANG) workerEnv.LANG = process.env.LANG;
+      if (process.env.TEST_MCP_MEASURE_BUDGET_MS) {
+        workerEnv.TEST_MCP_MEASURE_BUDGET_MS = process.env.TEST_MCP_MEASURE_BUDGET_MS;
+      }
       const child = fork(this.workerPath, [], {
         cwd: project.path, // worker resolves the project's OWN vitest from here
         execArgv: [], // do not inherit vitest/ts loaders from the parent process

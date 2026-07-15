@@ -28,8 +28,9 @@ describe("buildCoverageMap (pure)", () => {
       baseline: [],
     });
 
-    expect(file.schemaVersion).toBe(2);
+    expect(file.schemaVersion).toBe(3);
     expect(file.projectId).toBe("p1");
+    expect(file.alwaysRun).toEqual([]);
     expect(file.map["a.ts"].tests).toEqual(["a.test.ts"]);
     expect(file.map["b.ts"].tests).toEqual(["b.test.ts"]);
     expect(file.map["shared.ts"].tests).toEqual(["a.test.ts", "b.test.ts"]);
@@ -81,6 +82,31 @@ describe("buildCoverageMap (pure)", () => {
     expect(summary.unmeasuredTestFiles).toEqual(["heavy.test.ts"]);
     expect(summary.measuredTestFiles).toBe(1);
     expect(Object.values(file.map).every((e) => !e.tests.includes("heavy.test.ts"))).toBe(true);
+  });
+
+  it("records unmeasurable test files as always-run and merges incrementally", async () => {
+    const first = await buildCoverageMap({
+      projectRoot: ROOT,
+      projectId: "p1",
+      targetTestFiles: [`${ROOT}/a.test.ts`, `${ROOT}/heavy.test.ts`],
+      existing: null,
+      baseline: [],
+      measure: stubMeasure({ "a.test.ts": ["a.ts"] }, ["heavy.test.ts"]),
+    });
+    expect(first.file.alwaysRun).toEqual(["heavy.test.ts"]);
+    expect(first.file.map["heavy.test.ts"]).toBeUndefined();
+
+    // heavy.test.ts becomes measurable on a later incremental build -> drops off always-run.
+    const second = await buildCoverageMap({
+      projectRoot: ROOT,
+      projectId: "p1",
+      targetTestFiles: [`${ROOT}/heavy.test.ts`],
+      existing: first.file,
+      baseline: [],
+      measure: stubMeasure({ "heavy.test.ts": ["heavy.ts"] }),
+    });
+    expect(second.file.alwaysRun).toEqual([]);
+    expect(second.file.map["heavy.ts"].tests).toEqual(["heavy.test.ts"]);
   });
 });
 

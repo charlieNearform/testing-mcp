@@ -20,7 +20,7 @@ import * as path from "node:path";
  * Vitest coupling and is unit-testable; the worker supplies the real measurer.
  */
 
-export const COVERAGE_MAP_SCHEMA_VERSION = 2;
+export const COVERAGE_MAP_SCHEMA_VERSION = 3;
 
 export interface CoverageMapEntry {
   /** Test files (relative to the project root) that executed this source file. */
@@ -38,6 +38,8 @@ export interface CoverageMapFile {
   map: Record<string, CoverageMapEntry>;
   /** Source files reached only via setupFiles — a change to any selects the whole suite (Story 3.5). */
   fullSuiteTriggers: string[];
+  /** Test files whose deps are unknown (unmeasurable) — always run on any relevant change (Story 3.5). */
+  alwaysRun: string[];
 }
 
 export interface MeasurementSummary {
@@ -179,12 +181,24 @@ export async function buildCoverageMap(
     addEdges(map, rel, attributed, now);
   }
 
+  let alwaysRun: string[];
+  if (incremental) {
+    const prev = new Set(input.existing!.alwaysRun ?? []);
+    // Files we just re-measured: clear their prior status, then re-add if still unmeasurable.
+    for (const rel of targetRels) prev.delete(rel);
+    for (const rel of unmeasured) prev.add(rel);
+    alwaysRun = [...prev].sort();
+  } else {
+    alwaysRun = [...new Set(unmeasured)].sort();
+  }
+
   const file: CoverageMapFile = {
     schemaVersion: COVERAGE_MAP_SCHEMA_VERSION,
     projectId: input.projectId,
     updatedAt: now,
     map,
     fullSuiteTriggers: [...new Set(input.baseline)].sort(),
+    alwaysRun,
   };
   return {
     file,

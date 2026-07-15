@@ -48,7 +48,8 @@ describe("coverage reverse-map build & persist", () => {
 
     const map = loadCoverageMap(proj);
     expect(map).not.toBeNull();
-    expect(map!.schemaVersion).toBe(2);
+    expect(map!.schemaVersion).toBe(3);
+    expect(map!.alwaysRun).toEqual([]);
     expect(map!.projectId).toBe("cov1");
     expect(map!.map["math.ts"].tests).toEqual(["math.test.ts"]);
     expect(map!.map["other.ts"].tests).toEqual(["other.test.ts"]);

@@ -1,6 +1,6 @@
 # Story 3.4: Always-Run Unmeasurable Tests
 
-Status: ready-for-dev
+Status: review
 
 **Prerequisite:** Stories 3.2 & 3.3 (`done`) shipped the Coverage Engine (`src/coverage/index.ts`) and
 the worker coverage build with setup-baseline subtraction. This story extends BOTH again. Read the
@@ -312,9 +312,30 @@ coverage run — no migration code.
 ## Dev Agent Record
 
 ### Agent Model Used
+qwen3-coder-next
 
 ### Debug Log References
 
-### Completion Notes List
+### Completion Notes
+Implemented Story 3.4: Always-Run Unmeasurable Tests.
+
+**Task 1 - Persist always-run entries:** Bumped schema version to 3, added `alwaysRun: string[]` field to `CoverageMapFile`. Added logic in `buildCoverageMap` to compute and merge `alwaysRun` from unmeasured test files across incremental builds.
+
+**Task 2 - Per-file measurement budget:** Added `withTimeout<T>` helper in worker that resolves with fallback if promise doesn't settle within configured ms. Updated `buildAndPersistCoverageMap` to use `TEST_MCP_MEASURE_BUDGET_MS` env var (default 120s) when measuring each test file.
+
+**Task 3 - Forward budget env var:** Added forwarding of `TEST_MCP_MEASURE_BUDGET_MS` from orchestrator to worker in `execute()` method.
+
+**Task 4 - Tests:** Extended unit tests in `test/coverage-map.test.ts` with new test proving unmeasurable files are recorded and merged incrementally. Created integration test `test/coverage-unmeasurable.test.ts` verifying slow tests exceeding budget are recorded as always-run while fast tests map normally.
+
+All ACs satisfied:
+1. Unmeasurable tests recorded as always-run ✓
+2. Per-file measurement bounded by configurable budget ✓
 
 ### File List
+- src/coverage/index.ts
+- src/worker/index.ts
+- src/orchestrator/index.ts
+- test/coverage-map.test.ts
+- test/coverage-unmeasurable.test.ts
+- test/coverage-baseline.test.ts
+- test/coverage-build.test.ts

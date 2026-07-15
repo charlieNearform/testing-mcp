@@ -343,6 +343,24 @@ async function discoverTestFiles(createVitest: VitestNode["createVitest"]): Prom
   }
 }
 
+/** Resolve `p`, or `fallback` if it doesn't settle within `ms`. The abandoned promise is left to
+ *  settle on its own (its own finally cleans up); we never hang the whole build on one file. */
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      },
+    );
+  });
+}
+
 /**
  * Build/update and persist the reverse coverage map for this run.
  * Full when no explicit files were given; incremental (only the given test files
@@ -362,12 +380,14 @@ async function buildAndPersistCoverageMap(
       : await discoverTestFiles(createVitest);
 
   const baseline = await measureSetupBaseline(startVitest, cwd);
+  const budgetMs = Number(process.env.TEST_MCP_MEASURE_BUDGET_MS ?? 120_000);
   const { file, summary } = await buildCoverageMap({
     projectRoot: cwd,
     projectId,
     targetTestFiles,
     existing: loadCoverageMap(cwd),
-    measure: (abs) => measureCoverage(startVitest, cwd, abs),
+    measure: (abs) =>
+      withTimeout(measureCoverage(startVitest, cwd, abs), budgetMs, { sources: [], measured: false }),
     baseline,
   });
   saveCoverageMap(cwd, file);

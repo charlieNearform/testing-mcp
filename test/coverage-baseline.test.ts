@@ -48,7 +48,8 @@ describe("setup-baseline subtraction", () => {
 
     const map = loadCoverageMap(proj);
     expect(map).not.toBeNull();
-    expect(map!.schemaVersion).toBe(2);
+    expect(map!.schemaVersion).toBe(3);
+    expect(map!.alwaysRun).toEqual([]);
     // common.ts is reached only via setup -> full-suite trigger, NOT a per-test edge.
     expect(map!.fullSuiteTriggers).toContain("common.ts");
     expect(map!.map["common.ts"]).toBeUndefined();
