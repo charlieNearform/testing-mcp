@@ -117,6 +117,7 @@ development_status:
   # Epic 6: Post-v1 Enhancements — Onboarding, Hardening & Observability (Phase 2)
   epic-6: in-progress
   6-0-post-v1-onboarding-hardening: done          # as-built record (shipped on main 2026-07-15)
-  6-1-per-passing-test-detail: ready-for-dev
+  6-1-per-passing-test-detail: ready-for-dev       # + persistent project status banner
   6-2-on-disk-run-history-persistence: ready-for-dev
+  6-3-coverage-report-in-results-and-ui: ready-for-dev
   epic-6-retrospective: optional

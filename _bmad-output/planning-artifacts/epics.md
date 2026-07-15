@@ -534,7 +534,7 @@ So that the view stays accurate during long runs.
 
 Enhancements after the v1 epics closed. Story 6.0 retrospectively records work already shipped directly on `main`; stories 6.1+ are new work to run through the normal story → dev → review cycle.
 
-> **Implementation order:** 6.0 (as-built, done) → 6.1 → 6.2. Story 6.2 depends on 6.1 (persists the per-test detail 6.1 adds).
+> **Implementation order:** 6.0 (as-built, done) → 6.1 → 6.2 → 6.3. Story 6.2 depends on 6.1 (persists the per-test detail 6.1 adds); 6.3 is independent but shares the result/UI surfaces, so land it after 6.1.
 
 ### Story 6.0: Post-v1 Onboarding & Hardening (as-built)
 
@@ -562,11 +562,11 @@ So that the plan reflects what actually shipped and future work builds on an acc
 **When** runs execute
 **Then** the `/ui` page live-updates over SSE and supports drill-down (project → run history → run detail) backed by an in-memory run-history store.
 
-### Story 6.1: Per-Passing-Test Detail in Run Results
+### Story 6.1: Per-Passing-Test Detail + Persistent Project Status Banner
 
 As a human (and agent) reviewing a run,
-I want to see every test that executed with its pass/fail/skip status, not just the failures,
-So that a run's detail view shows the full picture of what actually ran.
+I want to see every test that executed with its pass/fail/skip status (not just failures), and to keep the project's live status in view while browsing its history,
+So that a run's detail shows the full picture and the project's current state is always at hand.
 
 **Acceptance Criteria:**
 
@@ -581,6 +581,30 @@ So that a run's detail view shows the full picture of what actually ran.
 **Given** a large suite
 **When** the per-test list is produced
 **Then** it stays bounded or summarized so a run record does not grow unboundedly (define a sane cap, or omit passing-test bodies while keeping names/status).
+
+**Given** the project run-history view is open
+**When** it renders and as runs progress
+**Then** the project's current run state (the same status shown on the root-page card) is pinned as a banner at the top and updates live via SSE.
+
+### Story 6.3: Coverage Report in Run Results & UI
+
+As a human developer,
+I want each coverage-enabled run to report its coverage summary and surface it in the UI,
+So that I can see overall and per-file coverage and whether a project's coverage gate passed.
+
+**Acceptance Criteria:**
+
+**Given** a run executes with `coverage: true`
+**When** the worker reports the result
+**Then** the result carries a coverage summary (overall statements/branches/functions/lines percentages, plus per-file), as an additive optional field; a run without coverage omits it.
+
+**Given** a completed coverage run in history
+**When** its detail is viewed in the UI
+**Then** the coverage report is shown (overall prominently, per-file breakdown) and the overall % is surfaced on the project card / run row.
+
+**Given** the project's own Vitest config enforces coverage thresholds (e.g. 100%)
+**When** coverage falls below threshold
+**Then** the run surfaces that the coverage gate failed distinctly from ordinary test failures (test-mcp reports the project's thresholds; it does not invent its own).
 
 ### Story 6.2: On-Disk Run-History Persistence
 

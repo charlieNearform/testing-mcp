@@ -1,4 +1,4 @@
-# Story 6.1: Per-Passing-Test Detail in Run Results
+# Story 6.1: Per-Passing-Test Detail + Persistent Project Status Banner
 
 **ID:** `6-1`
 **Slice:** `src/worker`, `src/types`, `src/ui`
@@ -8,9 +8,11 @@
 
 ## Source
 
-Follow-up from Story 6.0 / the monitoring-UI drill-down. Today the worker only itemizes
-**failing** tests, so the UI run-detail view can show counts + failures but not the individual
-tests that passed. Users want run-detail to show *everything that executed*.
+Follow-up from Story 6.0 / the monitoring-UI drill-down. Two gaps: (a) the worker only itemizes
+**failing** tests, so the UI run-detail view shows counts + failures but not the individual
+tests that passed — users want run-detail to show *everything that executed*; and (b) once you
+click into a project, the root page's live current-status is lost, so there's no at-a-glance
+"what is this project doing right now" while browsing its history.
 
 - Related story: `story-6-0-post-v1-onboarding-hardening.md`
 - Related: `docs/architecture.md` (§MCP Tool Contracts — `TestResult`), `docs/patterns.md`.
@@ -37,6 +39,12 @@ tests that passed. Users want run-detail to show *everything that executed*.
    **When** the new field is added
    **Then** it is **optional/additive** — no existing field changes shape, and `run_tests`
    output plus all current tests still pass.
+
+5. **Given** the project run-history view is open (clicked in from the root list)
+   **When** it renders and as runs progress
+   **Then** the project's **current** run state — the same status shown on the root-page card
+   (state badge + latest summary/counts) — is pinned as a **banner at the top of the view**,
+   and it updates live via SSE without leaving the view.
 
 ## Out of scope
 
@@ -66,6 +74,11 @@ tests that passed. Users want run-detail to show *everything that executed*.
   muted skip). Keep the existing failures section for message/stack. If `testsTruncated`, show a
   note. Follow the existing inline-HTML string-concat style (no template literals / regex-with-
   slashes inside the `UI_HTML` template).
+- **Status banner (AC5)** — in `renderProject`, before the run table, render a banner from the
+  project's current entry in the client-held `snapshot.projects` (same fields the root `card`
+  uses: state badge + summary/counts). The SSE `onmessage` handler already updates `snapshot`
+  and re-renders the project view, so the banner updates live for free — just make sure the
+  project view is re-rendered on snapshot ticks (it is today). Reuse the `badge()` helper.
 - Pick a cap constant (e.g. 1000) for AC3; state it in a comment.
 - Every behavioural change ships with a test (worker result includes passing tests; UI detail
   endpoint/view surfaces them). Keep tests hermetic (temp dirs / the sample fixture).
