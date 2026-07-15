@@ -203,7 +203,13 @@ const UI_HTML = `<!doctype html>
   .back { color:var(--muted); font-size:13px; display:inline-block; margin-bottom:16px; }
   .back:hover { color:var(--text); }
   h2.mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:15px; margin:0 0 4px; }
-  .ok { color:var(--ok); } .fail { color:var(--fail); }
+  .ok { color:var(--ok); } .fail { color:var(--fail); } .skip { color:var(--muted); }
+  .banner { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:12px 14px; margin-bottom:16px;
+    background:var(--card); border:1px solid var(--border); border-radius:8px; }
+  ul.tests { list-style:none; padding:0; margin:8px 0; }
+  ul.tests li { padding:3px 0; font-size:13px; border-bottom:1px solid var(--border); }
+  ul.tests li span.ok, ul.tests li span.fail, ul.tests li span.skip { display:inline-block; width:56px; font-weight:600; font-size:11px; text-transform:uppercase; }
+  ul.tests .loc { color:var(--muted); font-size:11px; }
   table.runs { width:100%; border-collapse:collapse; font-size:13px; margin-top:12px; }
   table.runs th { text-align:left; color:var(--muted); font-weight:500; padding:8px 10px; border-bottom:1px solid var(--border); }
   table.runs td { padding:8px 10px; border-bottom:1px solid var(--border); }
@@ -248,6 +254,19 @@ function card(p) {
     + badge(r.state) + counts + summary + runs + '</a>';
 }
 
+// Pinned live status banner for the project history view (Story 6.1, AC5) — the same state the
+// root card shows, sourced from the SSE-updated snapshot.projects so it ticks live for free.
+function statusBanner(pid) {
+  const p = (snapshot.projects || []).find((x) => x.projectId === pid);
+  if (!p) return "";
+  const r = p.run || {};
+  const counts = (r.total != null) ? '<div class="counts"><span>total <b>' + r.total + '</b></span>'
+    + '<span>pass <b class="ok">' + (r.passed || 0) + '</b></span>'
+    + '<span>fail <b class="fail">' + (r.failed || 0) + '</b></span></div>' : "";
+  const summary = r.summary ? '<div class="summary ' + (r.failed ? 'fail' : '') + '">' + esc(r.summary) + '</div>' : "";
+  return '<div class="banner">' + badge(r.state) + counts + summary + '</div>';
+}
+
 function renderList() {
   document.getElementById("clock").textContent = fmtTime(snapshot.serverTime);
   const ps = snapshot.projects || [];
@@ -263,7 +282,8 @@ async function renderProject(pid) {
   try { data = await getJSON("/ui/api/projects/" + encodeURIComponent(pid) + "/runs"); }
   catch (e) { app.innerHTML = head + '<div class="empty">Failed to load runs.</div>'; return; }
   const runs = data.runs || [];
-  if (!runs.length) { app.innerHTML = head + '<div class="empty">No runs yet — trigger one via run_tests.</div>'; return; }
+  const banner = statusBanner(pid);
+  if (!runs.length) { app.innerHTML = head + banner + '<div class="empty">No runs yet — trigger one via run_tests.</div>'; return; }
   const rows = runs.map((r) =>
     '<tr class="row" data-run="' + esc(r.runId) + '">'
     + '<td>' + fmtTime(r.startedAt) + '</td>'
@@ -271,7 +291,7 @@ async function renderProject(pid) {
     + '<td>' + esc(r.strategy || "") + '</td>'
     + '<td><b class="ok">' + (r.passed != null ? r.passed : "–") + '</b> / <b class="fail">' + (r.failed != null ? r.failed : "–") + '</b> of ' + (r.total != null ? r.total : "–") + '</td>'
     + '<td>' + fmtDur(r.durationMs) + '</td></tr>').join("");
-  app.innerHTML = head + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / fail</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  app.innerHTML = head + banner + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / fail</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
   app.querySelectorAll("tr.row").forEach((el) => {
     el.addEventListener("click", () => go("/project/" + encodeURIComponent(pid) + "/run/" + encodeURIComponent(el.getAttribute("data-run"))));
   });
@@ -307,6 +327,15 @@ async function renderRun(pid, runId) {
     + ((conf.reasons && conf.reasons.length)
         ? '<ul class="files">' + conf.reasons.map((r) => '<li>' + esc(r) + '</li>').join("") + '</ul>'
         : "");
+  // Per-test detail (Story 6.1): list every case that ran, badged by status. Failures still show
+  // their message/stack in the dedicated section below.
+  const allTests = res.tests || [];
+  const testStatusClass = (s) => (s === "passed" ? "ok" : s === "failed" ? "fail" : "skip");
+  const testsBlock = !allTests.length ? "" :
+    '<div class="section-title">tests (' + allTests.length + (res.testsTruncated ? "+, truncated" : "") + ')</div>'
+    + '<ul class="tests">' + allTests.map((t) =>
+        '<li><span class="' + testStatusClass(t.status) + '">' + esc(t.status) + '</span> '
+        + esc(t.name) + ' <span class="loc">' + esc(t.file || "") + '</span></li>').join("") + '</ul>';
   const fails = (rec.failures && rec.failures.length)
     ? '<div class="section-title">failures</div>' + rec.failures.map((f) =>
         '<div class="fail-item"><div class="name">' + esc(f.name) + '</div>'
@@ -320,6 +349,7 @@ async function renderRun(pid, runId) {
     + grid
     + '<div class="section-title">selection (' + esc(sel.strategy || "?") + ')</div>' + files
     + confBlock
+    + testsBlock
     + fails;
 }
 

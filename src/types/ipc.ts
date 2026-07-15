@@ -46,6 +46,18 @@ const resultShape = z
     skipped: z.number(),
     failures: z.array(z.object({}).passthrough()),
     selection: z.object({}).passthrough(),
+    // Per-test detail (Story 6.1) — optional/additive. `.catch(undefined)` so a malformed entry
+    // degrades to "no detail" instead of rejecting the whole run result (correctness over cleverness).
+    tests: z
+      .array(
+        z.object({
+          name: z.string(),
+          file: z.string(),
+          status: z.enum(["passed", "failed", "skipped"]),
+        }),
+      )
+      .optional()
+      .catch(undefined),
   })
   .passthrough();
 

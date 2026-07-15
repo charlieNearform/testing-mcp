@@ -34,6 +34,14 @@ export interface TestResult {
   };
   /** Selection confidence (Story 6.8). Optional/additive — absent on runs that predate the signal. */
   confidence?: Confidence;
+  /**
+   * Every test case that ran, by outcome (Story 6.1) — for the UI run-detail view. Passing/skipped
+   * entries carry only `{ name, file, status }` (no message/stack; those stay in `failures`).
+   * Optional/additive and bounded (see `testsTruncated`).
+   */
+  tests?: Array<{ name: string; file: string; status: "passed" | "failed" | "skipped" }>;
+  /** True when `tests` was capped and no longer lists every case (Story 6.1). */
+  testsTruncated?: boolean;
   /** Timing breakdown so daemon/worker overhead is observable (NFR7). Optional; added in Story 2.1. */
   metadata?: {
     wallClockMs: number;

@@ -107,6 +107,9 @@ async function runOnce(
   }
 }
 
+/** Cap the per-test detail list (Story 6.1) so a huge suite can't grow the result unboundedly. */
+const MAX_TEST_ENTRIES = 1000;
+
 /** Convert captured Vitest reporter data into our TestResult contract. Pure — unit-testable. */
 export function mapModulesToResult(
   modules: ReadonlyArray<VTestModule>,
@@ -121,6 +124,8 @@ export function mapModulesToResult(
   let testExecMs = 0;
   const failures: TestResult["failures"] = [];
   const filesRun: string[] = [];
+  // Per-test detail for the run-detail UI (Story 6.1) — collected in this SAME pass (no second run).
+  const tests: NonNullable<TestResult["tests"]> = [];
 
   for (const m of modules) {
     filesRun.push(m.moduleId);
@@ -134,13 +139,18 @@ export function mapModulesToResult(
         file: m.moduleId,
         message: err.message ?? "Module failed to load",
       });
+      tests.push({ name: "(module load error)", file: m.moduleId, status: "failed" });
     }
 
     for (const tc of m.children.allTests()) {
       const r = tc.result();
-      if (r.state === "passed") passed++;
-      else if (r.state === "skipped") skipped++;
-      else if (r.state === "failed") {
+      if (r.state === "passed") {
+        passed++;
+        tests.push({ name: tc.fullName, file: tc.module.moduleId, status: "passed" });
+      } else if (r.state === "skipped") {
+        skipped++;
+        tests.push({ name: tc.fullName, file: tc.module.moduleId, status: "skipped" });
+      } else if (r.state === "failed") {
         failed++;
         failures.push({
           id: tc.id,
@@ -148,6 +158,7 @@ export function mapModulesToResult(
           file: tc.module.moduleId,
           message: r.errors?.[0]?.message ?? "Test failed",
         });
+        tests.push({ name: tc.fullName, file: tc.module.moduleId, status: "failed" });
       } else if (r.state === "pending") {
         failed++;
         failures.push({
@@ -156,9 +167,12 @@ export function mapModulesToResult(
           file: tc.module.moduleId,
           message: "Test still pending",
         });
+        // A pending test counts as a failure (consistent with the counts above).
+        tests.push({ name: tc.fullName, file: tc.module.moduleId, status: "failed" });
       }
     }
   }
+
 
   unhandled.forEach((err, i) => {
     failed++;
@@ -168,7 +182,13 @@ export function mapModulesToResult(
       file: "",
       message: err.message ?? "Unhandled error during run",
     });
+    tests.push({ name: "(unhandled error)", file: "", status: "failed" });
   });
+
+  // Cap the detail list AFTER every source of entries (cases, module-load + unhandled errors) so
+  // the truncation flag reflects the true total (Story 6.1).
+  const testsTruncated = tests.length > MAX_TEST_ENTRIES;
+  const boundedTests = testsTruncated ? tests.slice(0, MAX_TEST_ENTRIES) : tests;
 
   const total = passed + failed + skipped;
   return {
@@ -187,6 +207,8 @@ export function mapModulesToResult(
       reason: selection.reason,
       files: filesRun,
     },
+    tests: boundedTests,
+    ...(testsTruncated ? { testsTruncated: true } : {}),
     metadata: {
       wallClockMs,
       testExecMs,

@@ -123,7 +123,7 @@ development_status:
   6-5-ignore-test-irrelevant-changes: done                # dev-auto 2026-07-15 (1 review patch; 3 deferred)
   6-6-new-file-bounded-by-static-graph: done              # dev-auto 2026-07-15 (1 patch; high-sev risk deferred to 6.8)
   6-7-changed-since-last-run-baseline: done                # dev-auto 2026-07-15 (3 patches; 3 deferred, dyn-import risk → 6.8)
-  6-1-per-passing-test-detail: ready-for-dev       # + persistent project status banner
+  6-1-per-passing-test-detail: done                # dev-auto 2026-07-15 (2 review patches; 2 low deferred)
   6-2-on-disk-run-history-persistence: ready-for-dev
   6-3-coverage-report-in-results-and-ui: ready-for-dev
   6-8-selection-confidence-signal: done                     # dev-auto 2026-07-15 (6 patches; 6 deferred → 6.10 + pre-existing)

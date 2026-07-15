@@ -4,7 +4,7 @@
 **Slice:** `src/worker`, `src/types`, `src/ui`
 **Type:** `feature`
 **Depends on:** `6-0` (observability baseline: run history + UI run-detail shipped there)
-**Status:** ready-for-dev
+**Status:** done
 
 ## Source
 
@@ -87,3 +87,15 @@ click into a project, the root page's live current-status is lost, so there's no
 
 - If the Vitest advanced-API test-case object doesn't expose passing cases the same way it
   exposes failing ones (version drift), escalate rather than adding a second run or guessing.
+
+## Auto Run Result
+
+Status: done (dev-auto 2026-07-15)
+
+**Change:** `mapModulesToResult` now emits a per-test `tests: [{ name, file, status }]` list covering every case that ran (passed/failed/skipped; `pending`→failed; module-load + unhandled errors → failed entries), in the SAME pass as counts/failures — no second Vitest run. Bounded at `MAX_TEST_ENTRIES = 1000` with `testsTruncated`. Added optional `tests`/`testsTruncated` to `TestResult`; the run-detail UI lists every test badged by status (failures keep their message/stack section). Added a live status banner to the project history view, sourced from the SSE-updated `snapshot.projects` so it ticks without leaving the view.
+
+**Files changed:** `src/types/contracts.ts` (optional `tests`/`testsTruncated`), `src/worker/index.ts` (per-test list + cap), `src/types/ipc.ts` (optional `tests` in `resultShape`, `.catch(undefined)` so a malformed list degrades rather than failing the run), `src/ui/index.ts` (tests section + `statusBanner` + CSS). Tests: `test/worker-result.test.ts` (NEW — list/statuses/truncation/unhandled/module-load), `test/worker-run.test.ts` + `test/ui-history.test.ts` + `test/ipc-validation.test.ts` (assertions).
+
+**Review:** Edge Case Hunter (single proportionate pass — small additive story). 2 patches applied: (1) unhandled errors are now included in `tests` and the cap is computed AFTER all entry sources, so the list matches the failed count; (2) the IPC `tests` schema uses `.catch(undefined)` so a version-skewed/malformed entry degrades to "no detail" instead of throwing and rejecting the whole run. 2 low/notes deferred (banner interpolates daemon-computed integers without `esc()` — mirrors the existing `card()` style, not user input; banner-vs-table transient skew + innerHTML rebuild dropping scroll — pre-existing `renderProject` behaviour). → deferred-work.
+
+**Verification:** `pnpm run typecheck` exit 0; `pnpm build` exit 0; `pnpm test` exit 0 (38 files, 176 tests).

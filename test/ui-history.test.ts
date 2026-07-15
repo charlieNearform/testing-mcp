@@ -38,6 +38,10 @@ const rec: RunRecord = {
     failures: [],
     selection: { strategy: "incremental", reason: "coverage-map selection", files: ["test/math.test.js"] },
     confidence: { level: "degraded", reasons: ["modified source not in the coverage map, bounded by the git static graph: src/x.ts"] },
+    tests: [
+      { name: "adds", file: "test/math.test.js", status: "passed" },
+      { name: "subtracts", file: "test/math.test.js", status: "failed" },
+    ],
   },
   failures: [],
 };
@@ -73,6 +77,11 @@ describe("UI run-history endpoints", () => {
       level: "degraded",
       reasons: ["modified source not in the coverage map, bounded by the git static graph: src/x.ts"],
     });
+    // Per-test detail (Story 6.1) rides the run detail through to the UI client's tests section.
+    expect(body.result?.tests).toEqual([
+      { name: "adds", file: "test/math.test.js", status: "passed" },
+      { name: "subtracts", file: "test/math.test.js", status: "failed" },
+    ]);
   });
 
   it("404s an unknown run id", async () => {

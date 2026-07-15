@@ -23,6 +23,10 @@ describe("Orchestrator.runTests (project-local worker)", () => {
     expect(result.metadata?.testExecMs).toBeGreaterThanOrEqual(0);
     expect(result.metadata?.overheadMs).toBeGreaterThanOrEqual(0);
     expect(result.metadata!.wallClockMs).toBeGreaterThanOrEqual(result.metadata!.testExecMs);
+    // Story 6.1: the per-test list covers every case that ran (the passing one too, not just failures).
+    expect(result.tests?.length).toBe(2);
+    expect(result.tests?.some((t) => t.status === "passed")).toBe(true);
+    expect(result.tests?.some((t) => t.status === "failed")).toBe(true);
   }, 60_000);
 
   it("returns WorkerFailure when vitest cannot be resolved, and stays healthy afterwards", async () => {
