@@ -21,6 +21,12 @@ Security**, referencing the GitHub issue (`#123`) where applicable.
 
 ### Added
 
+- `docs/usage.md`: a how-to-run guide covering the daemon lifecycle, project registration,
+  the MCP tool catalog, watch mode, the monitoring UI, CI usage, configuration, and
+  troubleshooting.
+- `test-mcp link` / `test-mcp unlink` CLI commands: symlink the CLI into a writable
+  directory on `PATH` (auto-detected or via `--dir`) so it can be run as `test-mcp` from a
+  cloned checkout; `unlink` only ever removes its own symlink, never a real file.
 - BMAD scaffolding and full planning artifact set under `_bmad-output/planning-artifacts/`:
   requirements contract (`SPEC.md`), architecture spine (`ARCHITECTURE-SPINE.md`),
   epics & stories (`epics.md` — 5 epics / 18 stories), PRFAQ + distillate, and an
@@ -34,6 +40,15 @@ Security**, referencing the GitHub issue (`#123`) where applicable.
   attribution algorithm to be vendored in Epic 3.
 
 ### Changed
+
+- The `/mcp` bearer token is now **stable across daemon restarts** instead of regenerated
+  on every start: resolved as `TEST_MCP_TOKEN` env override → persisted `config.token` →
+  generated once and written back to `~/.test-mcp/config.json`. This lets MCP clients be
+  configured statically. `config.json` is now written mode `0600` since it holds the secret.
+- Rewrote `README.md` to match the shipped CLI and daemon (the old quick-start referenced
+  non-existent scripts and a missing `docs/configuration.md`).
+- Marked the package `"private": true` to prevent accidental `npm publish` while it is
+  clone-only; remove this to publish.
 
 - Redesigned the product from a per-session single-project tool into a persistent
   on-system **singleton daemon** serving multiple registered projects, with per-project

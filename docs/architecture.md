@@ -78,9 +78,13 @@ These must hold across every component and story:
 - **Host/Origin validation** is mandatory (required when using
   `StreamableHTTPServerTransport` directly rather than the express helper) — mitigates
   DNS-rebinding / malicious-webpage attacks against a localhost server.
-- **Per-daemon bearer token**: generated on daemon start, written `0600` to
-  `~/.test-mcp/daemon.lock` alongside pid/port. The CLI reads it and injects
-  `Authorization: Bearer <token>`; MCP requests without it are rejected.
+- **Per-daemon bearer token**: a **stable** secret so MCP clients can be configured
+  statically. Resolved as `TEST_MCP_TOKEN` env override → persisted `config.token` →
+  generated once on first start and written back to `~/.test-mcp/config.json` (`0600`). It
+  no longer rotates per start. The live token is also mirrored into the `0600`
+  `daemon.lock` alongside pid/port; the CLI reads it and injects `Authorization: Bearer
+  <token>`. MCP requests without it are rejected. (Host/Origin validation above is the
+  primary DNS-rebinding defense; the token is defense-in-depth plus multi-user protection.)
 - Sessions: `StreamableHTTPServerTransport({ sessionIdGenerator })` with a
   session→transport map keyed by `Mcp-Session-Id`.
 
@@ -94,7 +98,8 @@ All files are JSON with a `schemaVersion`. Locations per invariant 3.
   "schemaVersion": 1,
   "port": 7420,
   "maxConcurrentWorkers": 4,      // default: derived from CPU count
-  "workerIdleTtlMs": 300000
+  "workerIdleTtlMs": 300000,
+  "token": "…"                    // stable bearer secret; generated once, TEST_MCP_TOKEN overrides
 }
 ```
 
