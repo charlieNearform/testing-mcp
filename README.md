@@ -87,3 +87,7 @@ pnpm build          # compile to dist/
 pnpm test           # vitest run (pretest builds first)
 pnpm test:watch     # vitest in watch mode
 ```
+
+Working *on* test-mcp? See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev/BMAD workflow and the
+optional `code-review-graph` code-intelligence setup. (That tooling is for contributors only —
+it's not needed to *use* test-mcp.)
