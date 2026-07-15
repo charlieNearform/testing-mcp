@@ -39,6 +39,19 @@ interface Session {
 const IGNORED_DIRS = new Set(["node_modules", ".git", ".test-mcp", "dist", "coverage", ".vitest-reports"]);
 const DEBOUNCE_MS = 300;
 
+/**
+ * Whether a changed path should be ignored by the watcher. Besides the ignored
+ * directories, this filters transient files the coverage build writes into the project
+ * root (e.g. `__test-mcp-baseline__.test.ts`): without this, a coverage-enabled watch run
+ * writes+deletes that file, the watcher sees it, and the run re-triggers itself forever.
+ */
+export function isIgnoredWatchPath(filename: string): boolean {
+  const segments = filename.split(path.sep);
+  if (segments.some((seg) => IGNORED_DIRS.has(seg))) return true;
+  const base = segments[segments.length - 1] ?? "";
+  return base.startsWith("__test-mcp-");
+}
+
 export class WatchManager {
   private readonly sessions = new Map<string, Session>();
 
@@ -54,7 +67,7 @@ export class WatchManager {
     if (existing) return this.status(project.projectId);
 
     const watcher = fs.watch(project.path, { recursive: true }, (_event, filename) => {
-      if (filename && this.isIgnored(filename.toString())) return;
+      if (filename && isIgnoredWatchPath(filename.toString())) return;
       this.schedule(project);
     });
     this.sessions.set(project.projectId, {
@@ -93,10 +106,6 @@ export class WatchManager {
   /** Stop every session (daemon shutdown). */
   stopAll(): void {
     for (const id of [...this.sessions.keys()]) this.stop(id);
-  }
-
-  private isIgnored(filename: string): boolean {
-    return filename.split(path.sep).some((seg) => IGNORED_DIRS.has(seg));
   }
 
   private schedule(project: ProjectRef): void {
