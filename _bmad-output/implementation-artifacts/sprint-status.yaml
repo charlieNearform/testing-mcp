@@ -1,5 +1,5 @@
 # generated: 2026-07-13
-# last_updated: 2026-07-14
+# last_updated: 2026-07-15
 # project: test-server-mcp
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-13
-last_updated: 2026-07-14
+last_updated: 2026-07-15
 project: test-server-mcp
 project_key: NOKEY
 tracking_system: file-system
@@ -69,6 +69,10 @@ story_location: "{project-root}/_bmad-output/implementation-artifacts"
 # 2-2 moved ready-for-dev → review on 2026-07-14 (Story 2.2 implementation complete)
 # 2-2 moved review → in-progress on 2026-07-14 (code review: 5 patch findings)
 # 2-2 moved in-progress → done on 2026-07-14 (review patches applied)
+
+# Epic 6 opened 2026-07-15: 6-0 recorded as-built (done); 6-1, 6-2 authored ready-for-dev.
+# Post-v1 work 6-0 shipped directly on main outside the BMAD cycle (commits 572994a..18ad562);
+# captured retrospectively so the plan matches reality. 6-1/6-2 to run through dev → review.
 
 development_status:
   # Epic 1: Core Daemon & Project Registration (Phase 1)
@@ -109,3 +113,10 @@ development_status:
   5-1-http-status-ui: done
   5-2-real-time-updates-resilience: done
   epic-5-retrospective: optional
+
+  # Epic 6: Post-v1 Enhancements — Onboarding, Hardening & Observability (Phase 2)
+  epic-6: in-progress
+  6-0-post-v1-onboarding-hardening: done          # as-built record (shipped on main 2026-07-15)
+  6-1-per-passing-test-detail: ready-for-dev
+  6-2-on-disk-run-history-persistence: ready-for-dev
+  epic-6-retrospective: optional

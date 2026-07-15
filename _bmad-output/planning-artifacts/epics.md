@@ -105,6 +105,10 @@ Give agents the interaction loop they need: plan before committing (dry-run `pla
 A convenience web UI over the daemon for human developers — visual status, manual triggers, history, and genuine real-time push (SSE/WebSocket). Deferred to Phase 2; adds nothing the MCP doesn't already expose.
 **FRs covered:** FR17
 
+### Epic 6: Post-v1 Enhancements — Onboarding, Hardening & Observability (Phase 2)
+Enhancements shipped after the v1 epics closed: smoother agent/human onboarding (CLI config helpers, PATH linking, stable configurable auth), a hardening pass from an adversarial code review, and richer run observability (run history + a drill-down UI). **Story 6.0** is a retrospective as-built record of work that was implemented directly on `main` outside the BMAD cycle; stories 6.1+ resume the normal story → dev → review flow for new observability work.
+**FRs covered:** extends FR17; hardening of FR1–FR16 (no new PRD FRs — post-v1 usability/quality)
+
 ## Epic 1: Core Daemon & Project Registration (Phase 1)
 
 Stand up the always-on singleton daemon and let an AI agent register/list/unregister any vitest project by `projectId`, securely and durably across restarts. (FR1, FR2, FR3, FR16; NFR3, NFR5, NFR6)
@@ -525,3 +529,75 @@ So that the view stays accurate during long runs.
 **Given** the connection drops
 **When** it reconnects
 **Then** the UI shows the latest known state.
+
+## Epic 6: Post-v1 Enhancements — Onboarding, Hardening & Observability (Phase 2)
+
+Enhancements after the v1 epics closed. Story 6.0 retrospectively records work already shipped directly on `main`; stories 6.1+ are new work to run through the normal story → dev → review cycle.
+
+> **Implementation order:** 6.0 (as-built, done) → 6.1 → 6.2. Story 6.2 depends on 6.1 (persists the per-test detail 6.1 adds).
+
+### Story 6.0: Post-v1 Onboarding & Hardening (as-built)
+
+> Retrospective record. Implemented directly on `main` on 2026-07-15 outside the BMAD cycle; captured here so the plan reflects reality. Status: done.
+
+As a maintainer,
+I want the post-v1 usability and hardening work recorded as a story,
+So that the plan reflects what actually shipped and future work builds on an accurate baseline.
+
+**Acceptance Criteria:**
+
+**Given** a developer cloning the repo
+**When** they read the docs and run the CLI
+**Then** a usage guide (`docs/usage.md`) and corrected README exist, and the CLI offers `mcp-config`, `ui`, `link`, and `unlink` alongside `init`/`register`/`start`/`stop`/`status`.
+
+**Given** an MCP client needs to authenticate to the daemon
+**When** it is configured
+**Then** the `/mcp` bearer token is stable across restarts and configurable (persisted `config.token`, `TEST_MCP_TOKEN` override), and `mcp-config` emits two token-safe options (local-scope command, or committed `.mcp.json` with a `headersHelper` reading the daemon's `~/.test-mcp/token`).
+
+**Given** the adversarial code review findings
+**When** they are remediated
+**Then** the coverage watch self-loop, `link --force` real-file deletion, non-atomic `registry.json` write, missing Zod validation (config/registry/IPC), unbounded worker concurrency, plan-cache leak, malformed-map crash, zero-test-run mislabel, self-closing daemon on transient socket error, and IPv6 Host/Origin parsing are all fixed with tests.
+
+**Given** a human watching the daemon
+**When** runs execute
+**Then** the `/ui` page live-updates over SSE and supports drill-down (project → run history → run detail) backed by an in-memory run-history store.
+
+### Story 6.1: Per-Passing-Test Detail in Run Results
+
+As a human (and agent) reviewing a run,
+I want to see every test that executed with its pass/fail/skip status, not just the failures,
+So that a run's detail view shows the full picture of what actually ran.
+
+**Acceptance Criteria:**
+
+**Given** a run executes N tests
+**When** the worker reports the result
+**Then** the result carries a per-test list (name, file, status) for all tests that ran — passing, failing, and skipped — not only failures.
+
+**Given** a completed run in history
+**When** its detail is requested (UI `/ui/api/projects/:id/runs/:runId`)
+**Then** the per-test list is present and the UI run-detail view lists every test grouped/marked by status.
+
+**Given** a large suite
+**When** the per-test list is produced
+**Then** it stays bounded or summarized so a run record does not grow unboundedly (define a sane cap, or omit passing-test bodies while keeping names/status).
+
+### Story 6.2: On-Disk Run-History Persistence
+
+As a human developer,
+I want run history to survive daemon restarts,
+So that I can review past runs after stopping/starting the daemon or rebooting.
+
+**Acceptance Criteria:**
+
+**Given** a run completes
+**When** it is recorded
+**Then** a schema-versioned per-run record is persisted under `<git-root>/.test-mcp/history/` (git-ignored), in addition to the in-memory buffer.
+
+**Given** the daemon (re)starts
+**When** the UI/history endpoints are queried
+**Then** history is rehydrated from disk (most-recent-first, capped), so past runs appear after a restart.
+
+**Given** the history grows past the retention cap
+**When** new runs are recorded
+**Then** the oldest on-disk records are pruned so the directory stays bounded.
