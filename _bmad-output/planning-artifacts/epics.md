@@ -534,7 +534,7 @@ So that the view stays accurate during long runs.
 
 Enhancements after the v1 epics closed. Story 6.0 retrospectively records work already shipped directly on `main`; stories 6.1+ are new work to run through the normal story → dev → review cycle.
 
-> **Implementation order:** 6.0 (as-built, done) → 6.1 → 6.2 → 6.3. Story 6.2 depends on 6.1 (persists the per-test detail 6.1 adds); 6.3 is independent but shares the result/UI surfaces, so land it after 6.1.
+> **Implementation order:** 6.0 (as-built, done) → **6.4 → 6.5** (selection refinements first) → 6.1 → 6.2 → 6.3. 6.4/6.5 tighten the selection core; 6.2 depends on 6.1; 6.3 is independent but shares the result/UI surfaces, so land it after 6.1.
 
 ### Story 6.0: Post-v1 Onboarding & Hardening (as-built)
 
@@ -625,3 +625,39 @@ So that I can review past runs after stopping/starting the daemon or rebooting.
 **Given** the history grows past the retention cap
 **When** new runs are recorded
 **Then** the oldest on-disk records are pruned so the directory stays bounded.
+
+### Story 6.4: Surface the Real Selection Reason in Run Results
+
+As an agent/human reading a run,
+I want the result's selection reason to state why those tests were chosen (or why the full suite ran),
+So that "full suite" no longer masks the actual decision (e.g. a changed file unknown to the map).
+
+**Acceptance Criteria:**
+
+**Given** an incremental run falls back to full because a changed file is unknown to the map
+**When** the result is returned
+**Then** `selection.reason` states the real cause (e.g. "changed file unknown to coverage map: `<file>`"), not the generic "full suite".
+
+**Given** any selection path (map ∪ git graph, git `--changed`, no-changes, committed plan)
+**When** the result is returned
+**Then** `selection.reason`/`selection.strategy` reflect the orchestrator's decision, while `selection.files` still lists what actually ran.
+
+### Story 6.5: Don't Full-Suite on Test-Irrelevant File Changes
+
+As a developer using incremental selection,
+I want changes to files that can't affect a test run (docs, VCS/editor/agent dotfiles) to be ignored,
+So that an unrelated `.gitignore`/`CLAUDE.md`/`*.md` edit doesn't force the whole suite.
+
+**Acceptance Criteria:**
+
+**Given** the only changed files are provably test-irrelevant
+**When** an incremental run is planned
+**Then** they are excluded from selection input and do not force a full suite (treated as "no relevant changes").
+
+**Given** a changed file that could affect tests (source/test, or build/test config: `package.json`, lockfiles, `*.config.*`, `tsconfig*.json`, setup files)
+**When** selection runs
+**Then** the conservative full-suite fallback is unchanged (invariant 5 preserved for anything that could matter).
+
+**Given** a mix of ignored and relevant changes
+**When** selection runs
+**Then** only the relevant changes drive selection.
