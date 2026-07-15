@@ -121,9 +121,8 @@ test-mcp mcp-config
 It prints two ready-to-use options — the token is a **per-machine daemon secret**, so pick
 based on whether the config lives in your repo:
 
-**Option A — local scope (recommended): keep the token out of git, no env var.**
-The token goes into your client's *local, uncommitted* settings; nothing about test-mcp is
-added to the repo. Each developer runs this once:
+**Option A — local scope: token in your client's local (uncommitted) settings.**
+Simplest one-off; nothing about test-mcp goes in the repo. Each developer runs it once:
 
 ```bash
 claude mcp add --transport http --scope local test-mcp \
@@ -131,10 +130,12 @@ claude mcp add --transport http --scope local test-mcp \
   --header "Authorization: Bearer <token>"
 ```
 
-**Option B — committed `.mcp.json`, token from the environment.**
-A project `.mcp.json` is usually committed and shared, so it must **not** contain the token.
-Reference an env var instead — MCP clients expand `${VAR}` at load — and each developer sets
-the value in their own environment:
+**Option B — committed `.mcp.json` with a `headersHelper` (recommended for a shared repo).**
+A project `.mcp.json` is usually committed, so it must **not** contain the token — and an
+`${ENV_VAR}` header is fragile because a GUI/IDE-launched client often doesn't inherit your
+shell's exports. Instead, use a **`headersHelper`**: a small command Claude Code runs on each
+connect that reads the daemon's local token file and emits the auth header. No token and no
+env var in the repo, and it survives GUI launches and daemon restarts:
 
 ```jsonc
 // .mcp.json (safe to commit)
@@ -143,18 +144,21 @@ the value in their own environment:
     "test-mcp": {
       "type": "http",
       "url": "http://127.0.0.1:7420/mcp",
-      "headers": { "Authorization": "Bearer ${TEST_MCP_TOKEN}" }
+      "headersHelper": "printf '{\"Authorization\":\"Bearer %s\"}' \"$(cat \"$HOME/.test-mcp/token\")\""
     }
   }
 }
 ```
-```bash
-export TEST_MCP_TOKEN=<token>   # once per machine
-```
 
-The token is **stable across restarts** (see below), so either config keeps working without
-updates. The CLI itself is a reference client: `test-mcp register` reads the token, connects
-over HTTP with the bearer header, and calls `register_project`.
+The daemon writes that token file (`~/.test-mcp/token`, mode `0600`) on start and keeps it
+current. The token is **stable across restarts** (see below), so either config keeps working.
+The CLI itself is a reference client: `test-mcp register` reads the token, connects over HTTP
+with the bearer header, and calls `register_project`.
+
+> Why not the "Authenticate" (OAuth) button like Figma/JIRA? That requires the server to be a
+> full OAuth 2.1 authorization server (metadata, dynamic client registration, `/authorize` +
+> PKCE, `/token`). For a loopback, single-user daemon that's large and buys no security over
+> the loopback bind + bearer token — the `headersHelper` gives the same seamless connect.
 
 ### Tool catalog
 
@@ -247,6 +251,7 @@ check that also needs no auth.
 |------|----------|-------|
 | Daemon config | `~/.test-mcp/config.json` | `port` (7420), `maxConcurrentWorkers` (CPU count), `workerIdleTtlMs` (300000), `token` (stable bearer secret); mode `0600` |
 | Lockfile | `~/.test-mcp/daemon.lock` | `{ pid, port, token, startedAt }`, mode `0600` |
+| Token file | `~/.test-mcp/token` | plaintext bearer for the `headersHelper` flow, mode `0600` |
 | Project registry | `~/.test-mcp/registry.json` | central record of registered projects |
 | Per-project config | `<git-root>/.test-mcp/config.json` | `projectId`, `stateDir`; git-ignored |
 | Coverage map | `<git-root>/.test-mcp/coverage-map.json` | source→test reverse map |

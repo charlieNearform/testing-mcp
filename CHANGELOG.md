@@ -49,8 +49,11 @@ Security**, referencing the GitHub issue (`#123`) where applicable.
   cloned checkout; `unlink` only ever removes its own symlink, never a real file.
 - `test-mcp mcp-config` CLI command: prints ready-to-use MCP client config to connect an
   agent to the daemon, with two token-safe options — a local-scope `claude mcp add` command
-  (token stays out of the repo) and a committed-safe `.mcp.json` referencing
-  `${TEST_MCP_TOKEN}`. `register` now points to it.
+  (token stays out of the repo) and a committed-safe `.mcp.json` using a `headersHelper` that
+  reads the daemon's local token file (no token or env var in the repo, and unaffected by
+  GUI/IDE env inheritance). `register` now points to it.
+- Daemon writes a plaintext token file (`~/.test-mcp/token`, mode `0600`) on start, kept in
+  sync with the live bearer token, so a `headersHelper` can supply auth without parsing JSON.
 - `test-mcp ui` CLI command: prints the monitoring UI URL (bare, on stdout, so it can be
   piped to a browser). `register` now prints the UI link on success too.
 - BMAD scaffolding and full planning artifact set under `_bmad-output/planning-artifacts/`:

@@ -11,6 +11,7 @@ import {
   readLockfile,
   configPath,
   lockfilePath,
+  tokenFilePath,
   isPidAlive,
   type DaemonConfig,
   type DaemonHandle,
@@ -39,6 +40,9 @@ describe("daemon", () => {
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-"));
     process.env.TEST_MCP_HOME = tempHome;
+    // Clear any ambient TEST_MCP_TOKEN (e.g. exported in the dev's shell) so token
+    // resolution/persistence tests are hermetic regardless of the environment.
+    delete process.env.TEST_MCP_TOKEN;
     fs.mkdirSync(tempHome, { recursive: true });
     writePortZeroConfig();
   });
@@ -152,6 +156,10 @@ describe("daemon", () => {
       expect(lock?.pid).toBe(process.pid);
       expect(lock?.port).toBe(handle.port);
       expect(lock?.token).toBe(handle.token);
+
+      // Plaintext token file is written 0600 and matches the live token (headersHelper flow).
+      expect(fs.readFileSync(tokenFilePath(), "utf8")).toBe(handle.token);
+      expect(fs.statSync(tokenFilePath()).mode & 0o777).toBe(0o600);
     });
 
     it("server actually listens on loopback", async () => {

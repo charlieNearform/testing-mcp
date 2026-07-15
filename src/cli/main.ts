@@ -7,6 +7,9 @@ import {
   isPidAlive,
   loadOrCreateConfig,
   resolveToken,
+  writeTokenFile,
+  tokenFilePath,
+  centralDir,
 } from "../daemon/index.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -402,6 +405,16 @@ program
       }
       const url = `http://127.0.0.1:${port}/mcp`;
 
+      // Ensure the plaintext token file exists so Option B's headersHelper works immediately
+      // (the daemon also keeps it current on start).
+      writeTokenFile(token);
+      const defaultCentral = path.join(os.homedir(), ".test-mcp");
+      const tokenPathForHelper =
+        centralDir() === defaultCentral
+          ? "$HOME/.test-mcp/token" // portable across machines
+          : tokenFilePath(); // custom TEST_MCP_HOME — use the absolute path
+      const helperCmd = `printf '{"Authorization":"Bearer %s"}' "$(cat "${tokenPathForHelper}")"`;
+
       // If run inside a registered project, note its id (passed as projectId to tools).
       let projectNote = "";
       try {
@@ -416,13 +429,10 @@ program
         // not inside a registered project — the daemon serves every registered project anyway
       }
 
-      // Committed-safe config: the token comes from the environment, not the repo.
+      // Committed-safe config: no token or env var in the repo — a headersHelper reads the
+      // daemon's local token file on each connect (survives GUI launches and daemon restarts).
       const mcpJson = JSON.stringify(
-        {
-          mcpServers: {
-            "test-mcp": { type: "http", url, headers: { Authorization: "Bearer ${TEST_MCP_TOKEN}" } },
-          },
-        },
+        { mcpServers: { "test-mcp": { type: "http", url, headersHelper: helperCmd } } },
         null,
         2,
       );
@@ -430,19 +440,18 @@ program
       const out = [
         `# test-mcp MCP config — daemon at ${url}${projectNote}`,
         ``,
-        `# ── Option A ─ local scope: token stays in your local (uncommitted) client settings.`,
-        `#    Recommended — nothing in the repo, no env var; run once per machine:`,
+        `# ── Option A ─ local scope: token stored in your local (uncommitted) client settings.`,
+        `#    Simplest one-off; run once per machine:`,
         `claude mcp add --transport http --scope local test-mcp \\`,
         `  ${url} \\`,
         `  --header "Authorization: Bearer ${token}"`,
         ``,
-        `# ── Option B ─ commit .mcp.json (safe: the token comes from each dev's environment):`,
+        `# ── Option B ─ commit .mcp.json (recommended for a shared repo). No token or env var`,
+        `#    in git: a headersHelper reads the daemon's local token file (${tokenPathForHelper}) each connect.`,
         mcpJson,
-        `#    then, once per machine:`,
-        `export TEST_MCP_TOKEN=${token}`,
         ``,
-        `# Trade-off: A keeps the token out of git with no env var (each dev runs the command`,
-        `# once); B shares the server definition in-repo but each dev must set TEST_MCP_TOKEN.`,
+        `# Trade-off: A is a quick per-machine command; B is committable and needs no env var`,
+        `# (each dev just needs a running local daemon, whose token file the helper reads).`,
       ].join("\n");
 
       return outExit(out);

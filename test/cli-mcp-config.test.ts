@@ -31,7 +31,7 @@ describe("cli mcp-config", () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  it("prints both a local-scope command and a committed-safe .mcp.json snippet", async () => {
+  it("prints a local-scope command and a headersHelper .mcp.json, and writes the token file", async () => {
     // TEST_MCP_TOKEN pins the token; cwd is a non-git temp dir so no project note is added.
     const { code, stdout } = await runCli(
       ["mcp-config"],
@@ -44,8 +44,13 @@ describe("cli mcp-config", () => {
     // Option A: local-scope claude command carrying the real token.
     expect(stdout).toContain("claude mcp add --transport http --scope local test-mcp");
     expect(stdout).toContain("Authorization: Bearer demo-token-123");
-    // Option B: committed-safe config references the env var, NOT the literal token.
-    expect(stdout).toContain('"Authorization": "Bearer ${TEST_MCP_TOKEN}"');
-    expect(stdout).toContain("export TEST_MCP_TOKEN=demo-token-123");
+    // Option B: committed config uses headersHelper (no token, no env var in the repo).
+    expect(stdout).toContain("headersHelper");
+    expect(stdout).toContain("cat");
+    expect(stdout).not.toContain("${TEST_MCP_TOKEN}");
+    // The plaintext token file is written (0600) so the helper works immediately.
+    const tokenFile = path.join(home, "token");
+    expect(fs.readFileSync(tokenFile, "utf8")).toBe("demo-token-123");
+    expect(fs.statSync(tokenFile).mode & 0o777).toBe(0o600);
   });
 });

@@ -59,6 +59,20 @@ export function configPath(): string {
   return path.join(centralDir(), "config.json");
 }
 
+/** Plaintext bearer-token file (0600) so a shell `headersHelper` can read it without
+ *  parsing JSON — powers the env-var-free `.mcp.json` MCP client flow. */
+export function tokenFilePath(): string {
+  return path.join(centralDir(), "token");
+}
+
+/** Write the plaintext token file (0600), no trailing newline. Kept in sync with the live
+ *  daemon token so a `headersHelper` reading it always sends the current bearer. */
+export function writeTokenFile(token: string): void {
+  fs.mkdirSync(centralDir(), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(tokenFilePath(), token, { mode: 0o600 });
+  fs.chmodSync(tokenFilePath(), 0o600);
+}
+
 export function lockfilePath(): string {
   return path.join(centralDir(), "daemon.lock");
 }
@@ -169,6 +183,7 @@ export async function startDaemon(): Promise<DaemonHandle> {
 
   const cfg = loadOrCreateConfig();
   const token = resolveToken(cfg);
+  writeTokenFile(token); // keep the plaintext token file current for headersHelper clients
 
   let registry = new ProjectRegistry(registryPath());
   try {

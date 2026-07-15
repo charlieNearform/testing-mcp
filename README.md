@@ -39,11 +39,11 @@ test-mcp mcp-config
 ```
 
 This prints two options for pointing a client at `http://127.0.0.1:7420/mcp` with the bearer
-token. The token is a **per-machine daemon secret** and is **stable across restarts** (stored
-in `~/.test-mcp/config.json`), so the config keeps working. Because a project `.mcp.json` is
-usually committed, it must not contain the token — so you either add the server at **local
-scope** (token in your uncommitted client settings) or commit a `.mcp.json` that references
-`${TEST_MCP_TOKEN}` from the environment. See [docs/usage.md](docs/usage.md#connecting-an-ai-agent-mcp-client-config).
+token (a **per-machine daemon secret**, **stable across restarts**). Because a project
+`.mcp.json` is usually committed, it must not contain the token — so you either add the
+server at **local scope** (token in your uncommitted client settings) or commit a `.mcp.json`
+that uses a **`headersHelper`** to read the daemon's local token file (no token or env var in
+the repo). See [docs/usage.md](docs/usage.md#connecting-an-ai-agent-mcp-client-config).
 
 **→ Full guide: [docs/usage.md](docs/usage.md)** — CLI commands, the MCP tool catalog,
 watch mode, the monitoring UI, CI usage, configuration, and troubleshooting.
