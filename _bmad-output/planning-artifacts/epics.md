@@ -534,7 +534,16 @@ So that the view stays accurate during long runs.
 
 Enhancements after the v1 epics closed. Story 6.0 retrospectively records work already shipped directly on `main`; stories 6.1+ are new work to run through the normal story → dev → review cycle.
 
-> **Implementation order:** 6.0 (as-built, done) → **6.4 → 6.5 → 6.6 → 6.7** (selection refinements first) → 6.1 → 6.2 → 6.3. 6.4–6.7 tighten the selection core (6.6 & 6.7 change documented selection semantics — reconcile with the architecture spine first); 6.2 depends on 6.1; 6.3 is independent but shares the result/UI surfaces, so land it after 6.1.
+> **Implementation order:** 6.0 (as-built, done) → **6.4 → 6.5 → 6.6 → 6.7 → 6.8** (selection refinements first) → 6.1 → 6.2 → 6.3 → **6.10**. 6.9 is backlog.
+>
+> **Course-correction (2026-07-15, ratified):** the selection model was reshaped to
+> "select tight + report confidence" (softening invariant 5) — see
+> `sprint-change-proposal-2026-07-15.md`. Effects: 6.5 adds a `.test-mcp-ignore`; 6.6's
+> modified-unmapped case becomes "select + flag confidence" (not force-full); 6.7 confirms the
+> **last-run** default baseline with validated-only snapshot advance + deletion handling; **6.8**
+> (confidence signal) and **6.10** (combined incremental coverage) are added. Architecture
+> (invariant 5, selection algorithm, data model, tool contract) and PRD (FR13/FR14 ACs) were
+> updated to match.
 
 ### Story 6.0: Post-v1 Onboarding & Hardening (as-built)
 
@@ -727,3 +736,45 @@ So that selection is richer where the graph exists — without ever depending on
 **Then** the reason (6.4) notes CRG's contribution and it feeds the confidence signal (6.8).
 
 > Spike-first; introduces an optional external-tool dependency (daemon possibly acting as an MCP client) — confirm the seam with the architecture spine. Backlog: sequence after the core refinements + 6.8.
+
+### Story 6.8: Selection Confidence Signal
+
+As an AI developer relying on incremental runs,
+I want each run to tell me how confident it is that the selected tests fully cover my changes,
+So that I know when to run a full pass before calling a feature done (instead of the tool always running full).
+
+**Acceptance Criteria:**
+
+**Given** a bounded, provably-complete incremental selection
+**When** the result is returned
+**Then** it carries `confidence: { level: "high", reasons: [] }`.
+
+**Given** selection is bounded but not provably complete (modified source unknown to the map, an unmeasurable test implicated, a deleted file's impact can't be bounded, or no snapshot/base)
+**When** the result is returned
+**Then** it carries `confidence: { level: "degraded", reasons: [...] }` explaining why, so the caller can run a full pass — never a silent skip.
+
+**Given** the monitoring UI run-detail
+**When** a degraded run is viewed
+**Then** the confidence level and reasons are shown.
+
+### Story 6.10: Combined Incremental Coverage
+
+As a developer enforcing coverage (e.g. 100%) on incremental runs,
+I want coverage merged across runs into a full-project picture,
+So that an incremental run can report/enforce whole-project coverage without re-running everything — honestly.
+
+**Acceptance Criteria:**
+
+**Given** a full coverage run has established a baseline
+**When** an incremental coverage run executes
+**Then** the coverage map's per-test-file coverage data is refreshed for the test files that ran, and combined project coverage = union of every test file's latest measurement.
+
+**Given** a source file changed
+**When** coverage is combined
+**Then** its stale coverage entry is invalidated (line shifts) until re-measured; a changed-but-unmeasured file marks the combined report degraded confidence (6.8).
+
+**Given** a coverage threshold (e.g. 100%) is enforced
+**When** the combined report is produced from an incremental run
+**Then** the threshold verdict is reported together with confidence, so "100% met" is only asserted at high confidence.
+
+> Depends on 6.3 (coverage report), 6.7 (snapshot/change model), 6.8 (confidence). Extends the coverage map to store coverage *data*, not just the reverse mapping.

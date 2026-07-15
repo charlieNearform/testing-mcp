@@ -117,7 +117,8 @@ development_status:
   # Epic 6: Post-v1 Enhancements — Onboarding, Hardening & Observability (Phase 2)
   epic-6: in-progress
   6-0-post-v1-onboarding-hardening: done          # as-built record (shipped on main 2026-07-15)
-  # Recommended order: 6-4 → 6-5 → 6-6 → 6-7 (selection refinements first) → 6-1 → 6-2 → 6-3
+  # Course-correction 2026-07-15 ratified (sprint-change-proposal-2026-07-15.md): confidence model.
+  # Recommended order: 6-4 → 6-5 → 6-6 → 6-7 → 6-8 → 6-1 → 6-2 → 6-3 → 6-10  (6-9 backlog)
   6-4-surface-real-selection-reason: ready-for-dev
   6-5-ignore-test-irrelevant-changes: ready-for-dev
   6-6-new-file-bounded-by-static-graph: ready-for-dev     # narrows arch step 4 — reconcile first
@@ -125,6 +126,7 @@ development_status:
   6-1-per-passing-test-detail: ready-for-dev       # + persistent project status banner
   6-2-on-disk-run-history-persistence: ready-for-dev
   6-3-coverage-report-in-results-and-ui: ready-for-dev
-  # 6-8-selection-confidence-signal: pending bmad-correct-course (softens invariant 5)
-  6-9-optional-crg-impact-analysis: backlog       # spike; use CRG blast-radius when present
+  6-8-selection-confidence-signal: ready-for-dev            # softens invariant 5 (ratified)
+  6-10-combined-incremental-coverage: ready-for-dev         # merge coverage across runs
+  6-9-optional-crg-impact-analysis: backlog                 # spike; use CRG blast-radius when present
   epic-6-retrospective: optional

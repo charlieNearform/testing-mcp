@@ -81,3 +81,14 @@ matches actual iteration: only re-test what you've touched since you last ran te
 - If advancing the snapshot after a *partial* (incremental) run could ever mark an unvalidated
   changed file as "seen", escalate — the safe rule is a run's snapshot must not hide a file
   that wasn't actually exercised.
+
+## Ratified update (course-correction 2026-07-15)
+
+Ratified by `sprint-change-proposal-2026-07-15.md`:
+- **`since: "last-run"` is the DEFAULT** (opt-out to `"head"`) — this is default behaviour, not
+  opt-in.
+- **Snapshot advances only for validated (actually-exercised) files** — confirmed as an AC, not
+  just an escalation note.
+- **Deletions are in scope**: a deleted source imported by a test still runs/flags that test; a
+  deletion whose impact can't be bounded feeds the confidence signal (Story 6.8).
+- Reflected in `docs/architecture.md` (selection algorithm step 1, `last-run-snapshot.json`).

@@ -75,3 +75,12 @@ statically imports it). A full run is unnecessary for the common "add a feature 
   is safe to bound by the static graph rather than full-suite, and record the decision (a
   `bmad-correct-course` or an architecture-doc update may be warranted). If the safety argument
   for AC1 doesn't hold for some case, keep it conservative and escalate.
+
+## Ratified update (course-correction 2026-07-15)
+
+Ratified by `sprint-change-proposal-2026-07-15.md` (invariant 5 reconciled):
+- **New/untracked source unknown to the map → bound by the git static graph** (AC1) — confirmed.
+- **Modified existing source unknown to the map** (AC3) → no longer forced to full: **select
+  best-effort and mark `degraded` confidence** (Story 6.8), so the caller runs a full pass when
+  it matters. Full-suite remains only for genuinely unbounded cases (config/setup-baseline/
+  unmeasurable/no-git). Reflected in `docs/architecture.md` selection algorithm step 4.

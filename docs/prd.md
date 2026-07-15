@@ -333,7 +333,9 @@ Use git diff to select an initial candidate set of affected test files.
 
 2. Given a changed file is not represented in the map
    When selection runs
-   Then the system falls back to running the full suite (no silent skip)
+   Then the system runs the full suite only for genuinely unbounded changes; for
+   bounded-but-uncertain changes it runs the tight set and reports degraded confidence so the
+   caller can run a full pass — never a silent skip
 
 #### Story 3.2: Coverage Tracking
 **ID:** `coverage-001`
@@ -385,7 +387,9 @@ Decide what to re-run by unioning the coverage-map and git-delta selections.
 
 3. Given a changed file is unknown to the map
    When requested
-   Then the system conservatively runs the full suite rather than risk a missed failure
+   Then the system selects the bounded set and flags degraded confidence (full suite only for
+   unbounded cases), so a potential missed failure is surfaced as low confidence rather than
+   silently skipped
 
 ### Epic 4: Output & Status (Phase 1)
 
@@ -552,5 +556,10 @@ during implementation:
 
 > Note on "zero false negatives": guaranteeing 100% recall *and* aggressive skipping is
 > not achievable in the general case (a coverage map cannot see a not-yet-executed
-> branch). The system therefore prioritises recall over precision — when selection is
-> uncertain it runs the full suite — accepting some wasted runs to avoid missed failures.
+> branch). The system therefore prioritises recall — but instead of always running the full
+> suite when selection is uncertain, it selects the tight bounded set and **reports
+> confidence**; the agent runs a full pass at feature-completion when confidence is degraded.
+> Full-suite is still forced for genuinely unbounded changes (build/test config, setup-baseline
+> modules, unmeasurable tests). This trades always-full for a confidence signal — still never a
+> silent skip. Incremental compares against the **last run** by default (git-free, content-hash;
+> aligns with the `vitest --stale` direction noted above); git `--changed`/HEAD remains available.

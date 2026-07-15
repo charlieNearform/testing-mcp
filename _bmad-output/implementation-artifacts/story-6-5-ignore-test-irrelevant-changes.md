@@ -72,3 +72,13 @@ files cannot affect a JS/TS test run, yet they force a full suite forever.
   confirm the boundary with the architecture spine (`docs/architecture.md`) — the safe rule is
   "ignore only files that provably cannot affect execution; when unsure, keep it a trigger."
   Escalate any candidate whose test-irrelevance isn't certain.
+
+## Ratified update (course-correction 2026-07-15)
+
+Confirmed by `sprint-change-proposal-2026-07-15.md`:
+- **Default = ignore non-code files** (docs/markdown, VCS/editor/agent dotfiles) — this is
+  now default behaviour with an **opt-out** flag, not opt-in.
+- **Add a project ignore file** `<git-root>/.test-mcp-ignore` (gitignore-style patterns), read
+  at selection time and unioned with the built-in non-code default. Documented in
+  `docs/architecture.md` §Data Model.
+- The invariant-5 narrowing is ratified (see architecture invariant 5, now confidence-based).

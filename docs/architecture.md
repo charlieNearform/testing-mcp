@@ -18,8 +18,13 @@ These must hold across every component and story:
 3. **Per-project state is repo-local and git-ignored.** It lives in `<git-root>/.test-mcp/`;
    daemon-global state lives centrally and never inside a project.
 4. **Every project-scoped tool call carries a `projectId`.** Unknown `projectId` → error.
-5. **Correctness over cleverness.** When test selection is uncertain (unknown file, stale
-   map), fall back to the full suite. Never silently skip.
+5. **Correctness over cleverness, with an explicit confidence channel.** Prefer the tightest
+   *safe* selection and **report confidence**. When impact is genuinely unbounded (build/test
+   config changed, a setup-baseline module changed, an unmeasurable test is implicated, or git
+   is unavailable) → run the **full suite**. When selection is bounded but not provably complete
+   (e.g. a modified source unknown to the map) → run the tight set and mark the result
+   **degraded confidence** with reasons, so the caller runs a full pass before relying on it.
+   Never silently skip *without signalling*.
 6. **Schemas are versioned.** Every persisted JSON file carries `schemaVersion`.
 
 ## Component Overview
@@ -144,6 +149,19 @@ All files are JSON with a `schemaVersion`. Locations per invariant 3.
 }
 ```
 
+> **Combined coverage (Story 6.10):** the map also persists **per-test-file coverage data**
+> (not just the reverse mapping), so combined project coverage = union of each test file's
+> latest measurement. A file's coverage is invalidated when its source changes (line shifts)
+> and refreshed when re-measured; changed-but-unmeasured files flag degraded confidence.
+
+**Last-run snapshot** (repo, `<git-root>/.test-mcp/last-run-snapshot.json`, git-ignored) —
+`{ schemaVersion, takenAt, files: { <relpath>: <sha256> } }`. The default incremental baseline:
+the next run's changed set is computed against it. Advanced **only for validated (actually-run)**
+files after a run, so a changed-but-unrun file is never hidden from the next delta.
+
+**Ignore file** (repo, `<git-root>/.test-mcp-ignore`, optional) — gitignore-style patterns
+excluded from the changed set (on top of the built-in non-code default filter).
+
 **Run history** — an **in-memory** ring buffer in the daemon (newest first, capped per
 project) holding each completed run: id, timestamps, duration, status, selection (strategy +
 files + reason), counts, and failure details. Served to the monitoring UI
@@ -163,7 +181,7 @@ Input schemas are Zod; `outputSchema` gives structured results. Summary contract
 | `register_project` | `{ path }` | `{ projectId, path, status }` |
 | `list_projects` | `{}` | `{ projects: [{ projectId, path, status }] }` |
 | `unregister_project` | `{ projectId, purge? }` | `{ projectId, removed: true }` |
-| `run_tests` | `{ projectId, mode?, coverage?, files?, suite?, dryRun?, planId? }` | `TestResult` \| `TestPlan` |
+| `run_tests` | `{ projectId, mode?, coverage?, since?, files?, suite?, dryRun?, planId?, <opt-out flags> }` | `TestResult` \| `TestPlan` |
 | `get_test_status` | `{ projectId }` | `{ state, progress?, lastResult?, lastError?, updatedAt?, watch? }` |
 | `start_watch` | `{ projectId, fastMode? }` | `WatchStatus` |
 | `stop_watch` | `{ projectId }` | `{ stopped }` |
@@ -175,8 +193,11 @@ interface TestResult {
   total: number; passed: number; failed: number; skipped: number;
   failures: Array<{ id: string; name: string; file: string; message: string }>; // details via get_failure_details
   selection: { strategy: "full" | "incremental"; reason: string; files: string[] };
+  confidence?: { level: "high" | "degraded"; reasons: string[] }; // degraded ⇒ run a full pass before relying on completeness
   metadata?: { wallClockMs: number; testExecMs: number; overheadMs: number; isolate: boolean };
 }
+// `since?: "last-run" | "head"` selects the incremental baseline (default "last-run").
+// Opt-out flags disable the new defaults (ignore-filter, since-last-run, confidence gating).
 
 interface TestPlan {   // returned when dryRun=true
   planId: string; projectId: string; strategy: "full" | "incremental";
@@ -202,14 +223,23 @@ coverage map updated for measured files → `TestResult` returned.
 executes exactly that plan (re-derives if the plan expired).
 
 **Selection algorithm** (Selection Engine, invariant 5):
-1. Compute git-changed files (diff vs. base).
-2. `A` = Vitest `--changed` static-graph selection.
+0. **Filter** provably test-irrelevant paths from the changed set — non-code files
+   (docs/markdown, VCS/editor/agent dotfiles) and any patterns in the project
+   `.test-mcp-ignore` (gitignore-style). These never drive selection.
+1. **Changed set** = files changed vs the **last-run snapshot** (default; content-hash) or vs
+   git HEAD (`since: "head"`), including **added / modified / deleted**.
+2. `A` = Vitest `--changed` static-graph selection (HEAD baseline).
 3. `B` = coverage-map reverse lookup for changed source files, **after excluding
    setup-baseline modules** (see Coverage Engine). A changed setup-baseline module (e.g.
    `i18n.ts`, an `observability` module) is a **full-suite trigger**, not a per-test edge.
-4. If any changed file is unknown to the map, or is a setup-baseline module, or belongs to
-   a test that could not be measured → run the **full suite**.
-5. Otherwise run `A ∪ B`.
+4. **Unbounded → full suite:** build/test config change (`package.json`, lockfiles,
+   `*.config.*`, `tsconfig*.json`, `vitest.setup.*`), setup-baseline change, unmeasurable
+   test, or no git/static graph. **A new/untracked source unknown to the map is bounded by
+   `A`** (its new test + existing static importers), *not* a full trigger. A **modified**
+   source unknown to the map → select best-effort and mark **degraded confidence**.
+5. Otherwise run `A ∪ B` (plus tests importing any deleted file), and attach a **confidence**
+   verdict (`high` | `degraded` + reasons) to the result. `degraded` tells the caller to run a
+   full pass before relying on completeness.
 
 > Validated by the coverage-map spike (`docs/coverage-spike-findings.md`) against the
 > real target repo: without setup-baseline exclusion, editing a common lib re-runs the
