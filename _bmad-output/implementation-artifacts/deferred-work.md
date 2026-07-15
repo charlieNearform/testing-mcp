@@ -73,3 +73,15 @@
 - source_story: `story-6-1-per-passing-test-detail.md`
   summary: The UI `statusBanner` (and pre-existing `card`) interpolate `r.total`/`r.passed`/`r.failed` without `esc()`; the project view rebuilds `app.innerHTML` on every SSE tick, dropping scroll position/row selection, and the live banner (from `snapshot.projects`) can transiently disagree with the fetched run table.
   evidence: Both LOW/cosmetic. The unescaped fields are daemon-computed integers (not user input), and this mirrors the existing `card()` style — divergence wasn't worth it. The re-render/skew is pre-existing `renderProject` behaviour, not worsened by the banner; a future pass could diff-render or source the banner and table from one payload.
+
+## Deferred from: story-6-2-on-disk-run-history-persistence (2026-07-15)
+
+- source_story: `story-6-2-on-disk-run-history-persistence.md`
+  summary: Daemon startup rehydrates history with SYNCHRONOUS `readdirSync`+`readFileSync` over every history file for every registered project BEFORE the HTTP port binds, so a project with a very large history dir (or a huge file) delays startup / blocks the event loop.
+  evidence: LOW — `pruneHistory` runs on every write and keeps each dir ≤ the cap (~50), so in steady state only ~50 small files are read per project. The only slow case is a pathological pre-existing dir on the very first startup after upgrade. Mitigate by pre-selecting the newest `cap` filenames (cheap `stat`) before parsing, or moving rehydration off the pre-bind path (lazy per-project load on first history query).
+
+## Testing infrastructure (2026-07-15)
+
+- source: Epic 6 dev-auto runs
+  summary: `test/watch.test.ts` ("re-runs affected tests when a source file changes") intermittently times out (~60s poll) when the FULL suite runs in parallel — worker/CPU starvation, not a logic bug. It passes reliably in isolation (~1.6s) and on a clean full run.
+  evidence: Recurs across several Epic 6 runs. Not introduced by any Epic 6 story. Options: give the watch test its own non-parallel pool/`describe.sequential`, raise its internal poll timeout, or run watch tests in a separate Vitest project. Flaky-green risk in CI — worth stabilizing before relying on `pnpm test` as a hard gate.

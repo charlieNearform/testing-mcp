@@ -197,6 +197,18 @@ export async function startDaemon(): Promise<DaemonHandle> {
     );
   }
   const orchestrator = new Orchestrator({ maxConcurrentWorkers: cfg.maxConcurrentWorkers });
+  // Rehydrate each registered project's run history from disk (Story 6.2) so past runs survive
+  // a restart. Best-effort — a rehydration problem must never abort daemon startup.
+  try {
+    for (const p of await registry.list()) {
+      orchestrator.loadHistory(p.projectId, p.path);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `test-mcp daemon: could not rehydrate run history (${message}); continuing\n`,
+    );
+  }
   const watchManager = new WatchManager(orchestrator);
   const server = http.createServer(
     createMcpRequestListener({ token, registry, orchestrator, watchManager }),

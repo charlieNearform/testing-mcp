@@ -12,6 +12,11 @@ import {
   saveSnapshot,
   type SnapshotFile,
 } from "../snapshot/index.js";
+import {
+  writeRunRecord,
+  pruneHistory,
+  loadHistory as loadHistoryFromDisk,
+} from "../history/index.js";
 
 /** The minimal project shape the orchestrator needs (matches RegisteredProject). */
 export interface ProjectRef {
@@ -269,7 +274,7 @@ export class Orchestrator {
           status: "complete",
           result,
           failures: [],
-        });
+        }, project.path);
         this.setRunState(project.projectId, {
           state: "complete",
           lastResult: result,
@@ -392,7 +397,7 @@ export class Orchestrator {
           status: "error",
           error: err.message,
           failures: [],
-        });
+        }, project.path);
         this.setRunState(project.projectId, { state: "error", lastError: err.message, progress: undefined });
         reject(err);
       };
@@ -497,7 +502,7 @@ export class Orchestrator {
               status: "complete",
               result,
               failures: failureDetails,
-            });
+            }, project.path);
             this.setRunState(project.projectId, {
               state: "complete",
               lastResult: result,
@@ -572,17 +577,48 @@ export class Orchestrator {
     return this.history.get(projectId) ?? [];
   }
 
+  /**
+   * Rehydrate a project's in-memory history from disk (Story 6.2) — called for each registered
+   * project at daemon startup so past runs survive a restart. A read failure leaves the buffer
+   * empty rather than crashing (never crash the daemon).
+   */
+  loadHistory(projectId: string, projectPath: string): void {
+    try {
+      this.history.set(projectId, loadHistoryFromDisk(projectPath, this.maxHistory));
+    } catch (err) {
+      process.stderr.write(
+        `[test-mcp] failed to load run history for ${projectId}: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    }
+  }
+
   /** A single retained run by id, or undefined if evicted/unknown. */
   getRun(projectId: string, runId: string): RunRecord | undefined {
     return this.history.get(projectId)?.find((r) => r.runId === runId);
   }
 
-  /** Append a completed run to the project's history ring buffer (newest first, capped). */
-  private recordRun(record: RunRecord): void {
+  /**
+   * Append a completed run to the project's history ring buffer (newest first, capped) and mirror
+   * it to disk (Story 6.2). Disk persistence is best-effort — a write/prune failure is logged and
+   * swallowed so it never fails the run or crashes the daemon (the in-memory buffer still has it).
+   */
+  private recordRun(record: RunRecord, projectPath: string): void {
     const list = this.history.get(record.projectId) ?? [];
     list.unshift(record);
     if (list.length > this.maxHistory) list.length = this.maxHistory;
     this.history.set(record.projectId, list);
+    try {
+      writeRunRecord(projectPath, record);
+      pruneHistory(projectPath, this.maxHistory);
+    } catch (err) {
+      process.stderr.write(
+        `[test-mcp] failed to persist run ${record.runId} for ${record.projectId}: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    }
   }
 
   /** Subscribe to run-state changes (Story 5.1 UI push). Returns an unsubscribe fn. */

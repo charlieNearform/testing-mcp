@@ -4,7 +4,7 @@
 **Slice:** `src/orchestrator` (+ optional `src/history`), `src/daemon`
 **Type:** `feature`
 **Depends on:** `6-1` (persists the per-test detail 6.1 adds to the run record)
-**Status:** ready-for-dev
+**Status:** done
 
 ## Source
 
@@ -71,3 +71,15 @@ architecture doc already envisions this location:
 - If threading the project path into `recordRun` turns out to touch more than the run paths
   (e.g. the empty-run path in `enqueue` lacks a clean `path` reference), confirm the approach
   before broadly refactoring the run pipeline.
+
+## Auto Run Result
+
+Status: done (dev-auto 2026-07-15)
+
+**Change:** Run records are now mirrored to `<git-root>/.test-mcp/history/<runId>.json` (schema-versioned, atomic temp+rename) alongside the in-memory ring buffer, pruned to the same cap, and rehydrated at daemon startup so past runs survive a restart. Corrupt/newer-schema/partial files are skipped (stderr) — never crash the daemon.
+
+**Files changed:** `src/history/index.ts` (NEW — `writeRunRecord`/`pruneHistory`/`loadHistory`, `HISTORY_SCHEMA_VERSION`), `src/orchestrator/index.ts` (`recordRun(record, projectPath)` persists + prunes; new public `loadHistory`; 3 call sites thread `project.path`), `src/daemon/index.ts` (rehydrate each registered project at startup, guarded). Tests: `test/history.test.ts` (NEW — write/load round-trip, newest-first+cap, prune-by-finishedAt keeps newest + sweeps `.tmp`, corrupt/newer/partial skip, orchestrator restart round-trip via stub worker).
+
+**Review:** Edge Case Hunter. 5 patches applied: prune now orders by the record's own `finishedAt` (not mtime) with a stable tiebreak so the just-written run is never pruned on same-ms ties AND prune/load orderings agree; leftover `.tmp` files are swept; `loadHistory` requires a non-empty `finishedAt`; the daemon rehydration loop is wrapped so it can't abort startup; `writeRunRecord` `basename`s the runId defensively. 1 low deferred (synchronous rehydration I/O runs before the port binds — bounded in practice because prune keeps each dir ≤ cap; only a pathological pre-existing dir on first startup is slow). → deferred-work.
+
+**Verification:** `pnpm run typecheck` exit 0; `pnpm build` exit 0; `pnpm test` exit 0 (39 files, 184 tests). Note: `test/watch.test.ts` intermittently times out under full-suite parallel load (pre-existing worker-starvation flake; passes in isolation and on a clean run).
