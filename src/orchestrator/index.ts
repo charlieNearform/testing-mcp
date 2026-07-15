@@ -4,6 +4,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TestResult, FailureDetail } from "../types/contracts.js";
 import type { ToWorker, FromWorker } from "../types/ipc.js";
+import { loadCoverageMap } from "../coverage/index.js";
+import { SelectionEngine, getChangedFiles } from "../selection/index.js";
 
 /** The minimal project shape the orchestrator needs (matches RegisteredProject). */
 export interface ProjectRef {
@@ -48,14 +50,43 @@ export class Orchestrator {
     opts: { files?: string[]; mode?: string; coverage?: boolean } = {},
   ): Promise<TestResult> {
     const prev = this.queues.get(project.projectId) ?? Promise.resolve();
-    const run = prev
-      .catch(() => undefined)
-      .then(() =>
-        this.execute(project, opts.files ?? [], opts.mode === "incremental", opts.coverage === true),
-      );
+    const run = prev.catch(() => undefined).then(() => this.planAndExecute(project, opts));
     // Keep the chain alive even if this run rejects, so the next run still serializes after it.
     this.queues.set(project.projectId, run.catch(() => undefined));
     return run;
+  }
+
+  /** Resolve an incremental request into a concrete worker run via the Selection Engine (Story 3.5). */
+  private planAndExecute(
+    project: ProjectRef,
+    opts: { files?: string[]; mode?: string; coverage?: boolean },
+  ): Promise<TestResult> {
+    let files = opts.files ?? [];
+    let changed = false;
+
+    // Selection only applies to an incremental request with no explicit file list.
+    if (opts.mode === "incremental" && files.length === 0) {
+      const plan = SelectionEngine.plan({
+        changedFiles: getChangedFiles(project.path),
+        map: loadCoverageMap(project.path),
+      });
+      if (plan.strategy === "full") {
+        files = [];
+        changed = false;
+      } else if (plan.strategy === "changed-only") {
+        files = [];
+        changed = true; // worker runs `--changed` with a full-suite fallback (Story 3.1)
+      } else {
+        // Nothing to run and no static-graph union requested -> short-circuit (no empty-filter = full).
+        if (plan.testFiles.length === 0 && !plan.union) {
+          return Promise.resolve(emptyResult(plan.reason));
+        }
+        files = plan.testFiles;
+        changed = plan.union;
+      }
+    }
+
+    return this.execute(project, files, changed, opts.coverage === true);
   }
 
   private execute(
@@ -150,4 +181,19 @@ export class Orchestrator {
   getFailureDetail(projectId: string, failureId: string): FailureDetail | undefined {
     return this.lastFailures.get(projectId)?.get(failureId);
   }
+}
+
+/** A trivially-successful result for "nothing to run" (e.g. incremental with no changes). */
+function emptyResult(reason: string): TestResult {
+  return {
+    success: true,
+    duration: 0,
+    total: 0,
+    passed: 0,
+    failed: 0,
+    skipped: 0,
+    failures: [],
+    selection: { strategy: "incremental", reason, files: [] },
+    metadata: { wallClockMs: 0, testExecMs: 0, overheadMs: 0, isolate: true },
+  };
 }

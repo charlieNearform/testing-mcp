@@ -249,6 +249,36 @@ export async function runVitest(
     failureDetails: mapFailureDetails(r.modules, r.unhandled),
   });
 
+  // Union (Story 3.5): an explicit coverage-map selection PLUS the git static-graph (--changed),
+  // merged so we run everything either signal deems affected.
+  if (opts.changed && opts.files.length > 0) {
+    const primary = await runOnce(startVitest, opts.files, {});
+    let staticRun: RunOnceResult | null = null;
+    try {
+      staticRun = await runOnce(startVitest, [], { changed: true });
+    } catch {
+      // Not a git repo / --changed unusable -> union is just the coverage-map selection.
+      staticRun = null;
+    }
+    const byId = new Map<string, VTestModule>();
+    for (const m of [...primary.modules, ...(staticRun?.modules ?? [])]) {
+      if (!byId.has(m.moduleId)) byId.set(m.moduleId, m);
+    }
+    const mergedModules = [...byId.values()];
+    const mergedUnhandled = [...primary.unhandled, ...(staticRun?.unhandled ?? [])];
+    const wall = primary.wallClockMs + (staticRun?.wallClockMs ?? 0);
+    return {
+      result: mapModulesToResult(
+        mergedModules,
+        mergedUnhandled,
+        wall,
+        { strategy: "incremental", reason: "coverage-map selection unioned with git static-graph" },
+        primary.isolate,
+      ),
+      failureDetails: mapFailureDetails(mergedModules, mergedUnhandled),
+    };
+  }
+
   // Incremental (git-aware) selection — only when the caller did not pin explicit files.
   if (opts.changed && opts.files.length === 0) {
     try {
@@ -270,11 +300,11 @@ export async function runVitest(
     });
   }
 
-  // Full run, or an explicit file list.
+  // Full run, or an explicit file selection.
   const run = await runOnce(startVitest, opts.files, {});
   return build(run, {
-    strategy: "full",
-    reason: opts.files.length ? "explicit file list" : "full suite",
+    strategy: opts.files.length ? "incremental" : "full",
+    reason: opts.files.length ? "explicit file selection" : "full suite",
   });
 }
 

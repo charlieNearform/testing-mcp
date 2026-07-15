@@ -93,7 +93,7 @@ development_status:
   3-2-coverage-reverse-map-build-persist: done
   3-3-setup-baseline-subtraction: done
   3-4-always-run-unmeasurable-tests: done
-  3-5-smart-re-run-decision-union-fallback: backlog
+  3-5-smart-re-run-decision-union-fallback: done
   3-6-watch-incremental-mode: backlog
   epic-3-retrospective: optional
 
