@@ -88,13 +88,13 @@ development_status:
   epic-2-retrospective: optional
 
   # Epic 3: Intelligent Test Selection (Phase 1)
-  epic-3: in-progress
+  epic-3: done
   3-1-git-aware-delta-selection: done
   3-2-coverage-reverse-map-build-persist: done
   3-3-setup-baseline-subtraction: done
   3-4-always-run-unmeasurable-tests: done
   3-5-smart-re-run-decision-union-fallback: done
-  3-6-watch-incremental-mode: backlog
+  3-6-watch-incremental-mode: done
   epic-3-retrospective: optional
 
   # Epic 4: Agent Workflow — Dry Run, Output & Status (Phase 1)

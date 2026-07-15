@@ -7,6 +7,7 @@ import { SCHEMA_VERSION } from "../index.js";
 import { createMcpRequestListener } from "../mcp/server.js";
 import { ProjectRegistry } from "../registry/project-registry.js";
 import { Orchestrator } from "../orchestrator/index.js";
+import { WatchManager } from "../watch/index.js";
 
 export { SCHEMA_VERSION };
 
@@ -143,7 +144,10 @@ export async function startDaemon(): Promise<DaemonHandle> {
     );
   }
   const orchestrator = new Orchestrator();
-  const server = http.createServer(createMcpRequestListener({ token, registry, orchestrator }));
+  const watchManager = new WatchManager(orchestrator);
+  const server = http.createServer(
+    createMcpRequestListener({ token, registry, orchestrator, watchManager }),
+  );
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", (err) => {

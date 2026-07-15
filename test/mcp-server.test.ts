@@ -13,7 +13,7 @@ async function connectClient() {
 }
 
 describe("createMcpServer", () => {
-  it("advertises all six test tools", async () => {
+  it("advertises all Phase-1 tools", async () => {
     const { client, server } = await connectClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
@@ -24,6 +24,8 @@ describe("createMcpServer", () => {
         "list_projects",
         "register_project",
         "run_tests",
+        "start_watch",
+        "stop_watch",
         "unregister_project",
       ].sort(),
     );

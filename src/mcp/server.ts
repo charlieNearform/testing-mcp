@@ -8,12 +8,15 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { toAppError, type AppError } from "../types/errors.js";
 import { ProjectRegistry, RegistryError } from "../registry/project-registry.js";
 import { Orchestrator } from "../orchestrator/index.js";
+import { WatchManager } from "../watch/index.js";
 
 export interface McpServerDeps {
   /** Shared project registry (owned by the daemon). Absent in bare unit tests. */
   registry?: ProjectRegistry;
   /** Test-run orchestrator (owned by the daemon). Absent in bare unit tests. */
   orchestrator?: Orchestrator;
+  /** Watch/incremental mode manager (owned by the daemon). Absent in bare unit tests. */
+  watchManager?: WatchManager;
 }
 
 export interface McpListenerDeps extends McpServerDeps {
@@ -29,18 +32,12 @@ function errorResult(err: AppError) {
 export function createMcpServer(deps: McpServerDeps = {}): McpServer {
   const registry = deps.registry;
   const orchestrator = deps.orchestrator;
+  const watchManager = deps.watchManager;
   const isRegistered = (projectId: string) => registry?.has(projectId) ?? false;
   const server = new McpServer({ name: "test-mcp", version: "0.0.0" });
 
   const unknownProject = (projectId: string) =>
     errorResult(toAppError("UnknownProject", `Project not registered: ${projectId}`));
-
-  const requireRegisteredProject = (projectId: string) => {
-    if (!isRegistered(projectId)) return unknownProject(projectId);
-    return errorResult(
-      toAppError("NotImplemented", "Project-scoped tool execution arrives in later stories"),
-    );
-  };
 
   server.registerTool(
     "register_project",
@@ -129,10 +126,54 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
   server.registerTool(
     "get_test_status",
     {
-      description: "Get the current test run state for a project",
+      description: "Get the current test/watch state for a project",
       inputSchema: { projectId: z.string().describe("ID of a registered project") },
     },
-    async ({ projectId }) => requireRegisteredProject(projectId),
+    async ({ projectId }) => {
+      if (!isRegistered(projectId)) return unknownProject(projectId);
+      // Watch mode (Story 3.6) is the only stateful runner in Phase 1; poll it here.
+      if (watchManager) {
+        return { content: [{ type: "text" as const, text: JSON.stringify(watchManager.status(projectId)) }] };
+      }
+      return errorResult(
+        toAppError("NotImplemented", "Status polling arrives with watch mode / Story 4.2"),
+      );
+    },
+  );
+
+  server.registerTool(
+    "start_watch",
+    {
+      description: "Start watch mode: re-run affected tests as files change (poll get_test_status)",
+      inputSchema: {
+        projectId: z.string().describe("ID of a registered project"),
+        fastMode: z
+          .boolean()
+          .optional()
+          .describe("Skip coverage for speed (default true); set false to refresh the coverage map"),
+      },
+    },
+    async ({ projectId, fastMode }) => {
+      const project = registry?.get(projectId);
+      if (!project) return unknownProject(projectId);
+      if (!watchManager) return errorResult(toAppError("NotImplemented", "watch unavailable"));
+      const status = watchManager.start(project, { fastMode });
+      return { content: [{ type: "text" as const, text: JSON.stringify(status) }] };
+    },
+  );
+
+  server.registerTool(
+    "stop_watch",
+    {
+      description: "Stop watch mode for a project",
+      inputSchema: { projectId: z.string().describe("ID of a registered project") },
+    },
+    async ({ projectId }) => {
+      if (!isRegistered(projectId)) return unknownProject(projectId);
+      if (!watchManager) return errorResult(toAppError("NotImplemented", "watch unavailable"));
+      const stopped = watchManager.stop(projectId);
+      return { content: [{ type: "text" as const, text: JSON.stringify({ stopped }) }] };
+    },
   );
 
   server.registerTool(

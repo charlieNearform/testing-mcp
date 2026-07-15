@@ -144,7 +144,7 @@ describe("secured MCP HTTP transport", () => {
     expect(health.status).toBe(200);
   });
 
-  it("lists all six tools over an authenticated Streamable HTTP session", async () => {
+  it("lists all Phase-1 tools over an authenticated Streamable HTTP session", async () => {
     handle = await startDaemon();
     const transport = new StreamableHTTPClientTransport(
       new URL(`http://127.0.0.1:${handle.port}/mcp`),
@@ -160,6 +160,8 @@ describe("secured MCP HTTP transport", () => {
         "list_projects",
         "register_project",
         "run_tests",
+        "start_watch",
+        "stop_watch",
         "unregister_project",
       ].sort(),
     );
