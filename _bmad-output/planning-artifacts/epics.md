@@ -534,7 +534,7 @@ So that the view stays accurate during long runs.
 
 Enhancements after the v1 epics closed. Story 6.0 retrospectively records work already shipped directly on `main`; stories 6.1+ are new work to run through the normal story → dev → review cycle.
 
-> **Implementation order:** 6.0 (as-built, done) → **6.4 → 6.5 → 6.6** (selection refinements first) → 6.1 → 6.2 → 6.3. 6.4/6.5/6.6 tighten the selection core; 6.2 depends on 6.1; 6.3 is independent but shares the result/UI surfaces, so land it after 6.1.
+> **Implementation order:** 6.0 (as-built, done) → **6.4 → 6.5 → 6.6 → 6.7** (selection refinements first) → 6.1 → 6.2 → 6.3. 6.4–6.7 tighten the selection core (6.6 & 6.7 change documented selection semantics — reconcile with the architecture spine first); 6.2 depends on 6.1; 6.3 is independent but shares the result/UI surfaces, so land it after 6.1.
 
 ### Story 6.0: Post-v1 Onboarding & Hardening (as-built)
 
@@ -679,3 +679,29 @@ So that "add a feature + its test" runs only the affected tests instead of every
 **Then** the conservative full-suite fallback still applies (invariant 5 preserved for genuinely unbounded cases).
 
 > Changes documented selection behaviour (step 4 / invariant 5) — reconcile with the architecture spine before implementing (see the story's escalation triggers).
+
+### Story 6.7: "Changed Since Last Run" Incremental Baseline
+
+As a developer iterating edit → run → edit → run,
+I want incremental selection to key off "what changed since the last test run", not "since git HEAD",
+So that a long uncommitted session doesn't grow the delta back toward the full suite.
+
+**Acceptance Criteria:**
+
+**Given** a per-project snapshot from the previous run
+**When** an incremental run uses the "last-run" baseline
+**Then** the changed-set is files whose content differs from the snapshot (hash-based), and only their affected tests run.
+
+**Given** a run completes
+**When** it finishes
+**Then** the daemon persists an updated content-hash snapshot under `.test-mcp/` (git-ignored, schema-versioned) for the next run's delta.
+
+**Given** no valid snapshot yet
+**When** a "last-run" run is requested
+**Then** it falls back safely (full or git-HEAD delta) to establish the baseline — never under-selects.
+
+**Given** the caller wants a different baseline
+**When** invoking `run_tests`
+**Then** the baseline is selectable (e.g. `since: "last-run" | "head"`) with a documented default; git-HEAD remains available for CI.
+
+> Changes documented selection behaviour and the default baseline — reconcile with the architecture spine before implementing (see the story's escalation triggers, incl. the partial-run snapshot-advance safety rule).
