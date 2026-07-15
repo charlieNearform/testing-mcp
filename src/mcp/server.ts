@@ -222,19 +222,28 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
 
 // --- HTTP security helpers -------------------------------------------------
 
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+/** Lower-case, strip an optional :port, and unwrap IPv6 brackets for loopback comparison. */
+function normalizeHost(host: string): string {
+  const h = host.trim().toLowerCase();
+  if (h.startsWith("[")) {
+    // Bracketed IPv6, optionally "[::1]:7420" -> "::1".
+    const end = h.indexOf("]");
+    return end > 0 ? h.slice(1, end) : h.slice(1);
+  }
+  return h.replace(/:\d+$/, ""); // "127.0.0.1:7420" -> "127.0.0.1"
+}
 
 function hostAllowed(host: string | undefined): boolean {
   if (!host) return false;
-  const bare = host.replace(/:\d+$/, "").toLowerCase(); // strip :port ("127.0.0.1:7420" -> "127.0.0.1"; "[::1]:7420" -> "[::1]")
-  return LOOPBACK_HOSTS.has(bare);
+  return LOOPBACK_HOSTS.has(normalizeHost(host));
 }
 
 function originAllowed(origin: string | undefined): boolean {
   if (!origin) return true; // non-browser clients omit Origin
   try {
-    const host = new URL(origin).hostname.toLowerCase();
-    return LOOPBACK_HOSTS.has(host);
+    return LOOPBACK_HOSTS.has(normalizeHost(new URL(origin).hostname));
   } catch {
     return false;
   }

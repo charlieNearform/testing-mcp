@@ -85,6 +85,19 @@ describe("daemon", () => {
         "Unsupported config schemaVersion 999 (expected 1)"
       );
     });
+
+    it("throws on a structurally invalid config (wrong field type)", () => {
+      fs.writeFileSync(
+        configPath(),
+        JSON.stringify({ schemaVersion: SCHEMA_VERSION, port: "not-a-number", maxConcurrentWorkers: 1, workerIdleTtlMs: 300000 }),
+      );
+      expect(() => loadOrCreateConfig()).toThrow(/Invalid config\.json/);
+    });
+
+    it("throws on non-JSON config content", () => {
+      fs.writeFileSync(configPath(), "{ not json");
+      expect(() => loadOrCreateConfig()).toThrow(/not valid JSON/);
+    });
   });
 
   describe("resolveToken", () => {

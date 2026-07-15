@@ -1,10 +1,19 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
+import { z } from "zod";
 import { SCHEMA_VERSION } from "../index.js";
 import type { ErrorCode } from "../types/errors.js";
 
 export type ProjectStatus = "idle" | "running" | "error";
+
+/** Persisted registry entry shape — the single source of truth for on-disk validation. */
+const RegistryEntrySchema = z.object({
+  path: z.string(),
+  configPath: z.string(),
+  status: z.enum(["idle", "running", "error"]),
+});
+const RegistryProjectsSchema = z.record(z.string(), RegistryEntrySchema);
 
 export interface RegisteredProject {
   projectId: string;
@@ -85,8 +94,14 @@ function migrateRegistryFile(
     );
   }
 
-  const projects = (obj.projects ?? {}) as RegistryFile["projects"];
-  return { schemaVersion: SCHEMA_VERSION, projects, upgraded: version < SCHEMA_VERSION };
+  const parsed_projects = RegistryProjectsSchema.safeParse(obj.projects ?? {});
+  if (!parsed_projects.success) {
+    throw new RegistryError(
+      "InvalidConfig",
+      `registry.json has invalid project entries at ${registryPath}: ${parsed_projects.error.message}`,
+    );
+  }
+  return { schemaVersion: SCHEMA_VERSION, projects: parsed_projects.data, upgraded: version < SCHEMA_VERSION };
 }
 
 export class ProjectRegistry {
@@ -143,8 +158,12 @@ export class ProjectRegistry {
     for (const [projectId, p] of this.projects) {
       file.projects[projectId] = { path: p.path, configPath: p.configPath, status: p.status };
     }
-    fs.writeFileSync(this.registryPath, JSON.stringify(file, null, 2), { mode: 0o600 });
-    fs.chmodSync(this.registryPath, 0o600);
+    // Atomic: write a temp file then rename, so an interrupted write can never truncate
+    // registry.json and lose every registered project.
+    const tmp = `${this.registryPath}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(file, null, 2), { mode: 0o600 });
+    fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, this.registryPath);
   }
 
   /** Validate the path has a vitest/vite config, record it, persist, and return a summary. */

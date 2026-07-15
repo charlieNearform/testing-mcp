@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TestResult, FailureDetail, TestPlan } from "../types/contracts.js";
-import type { ToWorker, FromWorker } from "../types/ipc.js";
+import { parseFromWorker, type ToWorker, type FromWorker } from "../types/ipc.js";
 import { loadCoverageMap } from "../coverage/index.js";
 import { SelectionEngine, getChangedFiles } from "../selection/index.js";
 
@@ -67,12 +67,18 @@ export interface OrchestratorOptions {
   runTimeoutMs?: number;
   /** How long a dry-run plan stays valid before it must be re-planned (Story 4.1). */
   planTtlMs?: number;
+  /** Global ceiling on concurrently-forked workers across all projects (default: unbounded). */
+  maxConcurrentWorkers?: number;
 }
 
 export class Orchestrator {
   private readonly workerPath: string;
   private readonly runTimeoutMs: number;
   private readonly planTtlMs: number;
+  /** Global worker semaphore (architecture: workers bounded by maxConcurrentWorkers). */
+  private readonly maxConcurrentWorkers: number;
+  private activeWorkers = 0;
+  private readonly workerWaiters: Array<() => void> = [];
   /** Per-project promise chain so a project runs one suite at a time (architecture: per-project serialization). */
   private readonly queues = new Map<string, Promise<unknown>>();
   /** Most recent run's failure details per project, keyed projectId -> (failureId -> detail). */
@@ -90,6 +96,23 @@ export class Orchestrator {
       opts.workerPath ?? fileURLToPath(new URL("../worker/index.js", import.meta.url));
     this.runTimeoutMs = opts.runTimeoutMs ?? 120_000;
     this.planTtlMs = opts.planTtlMs ?? 300_000;
+    this.maxConcurrentWorkers = Math.max(1, opts.maxConcurrentWorkers ?? Number.POSITIVE_INFINITY);
+  }
+
+  /** Acquire a global worker slot, waiting if maxConcurrentWorkers are already busy. */
+  private acquireWorker(): Promise<void> {
+    if (this.activeWorkers < this.maxConcurrentWorkers) {
+      this.activeWorkers++;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => this.workerWaiters.push(resolve));
+  }
+
+  /** Release a worker slot, handing it directly to the next waiter if one is queued. */
+  private releaseWorker(): void {
+    const next = this.workerWaiters.shift();
+    if (next) next(); // transfer the slot; activeWorkers stays constant
+    else this.activeWorkers--;
   }
 
   /** Run a project's tests in a fresh project-local worker. Rejects with WorkerError on failure. */
@@ -101,8 +124,17 @@ export class Orchestrator {
     return this.enqueue(project, sel, opts.coverage === true, opts.onProgress);
   }
 
+  /** Drop plans past their TTL so an uncommitted dry-run can't accumulate forever. */
+  private sweepExpiredPlans(): void {
+    const now = Date.now();
+    for (const [id, p] of this.plans) {
+      if (p.expiresAtMs < now) this.plans.delete(id);
+    }
+  }
+
   /** Compute a plan without executing (Story 4.1 dry-run). */
   plan(project: ProjectRef, opts: { files?: string[]; mode?: string }): TestPlan {
+    this.sweepExpiredPlans();
     const started = Date.now();
     const sel = this.resolveSelection(project, opts);
     const latencyMs = Date.now() - started;
@@ -133,6 +165,7 @@ export class Orchestrator {
     planId: string,
     opts: { onProgress?: ProgressFn } = {},
   ): Promise<TestResult> {
+    this.sweepExpiredPlans();
     const stored = this.plans.get(planId);
     if (!stored || stored.projectId !== project.projectId || stored.expiresAtMs < Date.now()) {
       this.plans.delete(planId);
@@ -220,7 +253,23 @@ export class Orchestrator {
     return { files: [], changed: false, strategy: "full", reason: "full suite", empty: false };
   }
 
-  private execute(
+  private async execute(
+    project: ProjectRef,
+    files: string[],
+    changed: boolean,
+    coverage: boolean,
+    onProgress?: ProgressFn,
+  ): Promise<TestResult> {
+    // Bound total concurrent workers across all projects; release the slot once settled.
+    await this.acquireWorker();
+    try {
+      return await this.executeWorker(project, files, changed, coverage, onProgress);
+    } finally {
+      this.releaseWorker();
+    }
+  }
+
+  private executeWorker(
     project: ProjectRef,
     files: string[],
     changed: boolean,
@@ -271,7 +320,20 @@ export class Orchestrator {
         act();
       };
 
-      child.on("message", (msg: FromWorker) => {
+      child.on("message", (raw: unknown) => {
+        let msg: FromWorker;
+        try {
+          msg = parseFromWorker(raw);
+        } catch (e) {
+          finish(() =>
+            failRun(
+              new WorkerError(
+                `invalid IPC message from worker: ${e instanceof Error ? e.message : String(e)}`,
+              ),
+            ),
+          );
+          return;
+        }
         if (msg.type === "ready") {
           const runMsg: ToWorker = {
             type: "run",

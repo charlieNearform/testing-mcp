@@ -3,7 +3,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import type { TestResult, FailureDetail } from "../types/contracts.js";
-import type { ToWorker, FromWorker, CoverageDelta } from "../types/ipc.js";
+import { parseToWorker, type ToWorker, type FromWorker, type CoverageDelta } from "../types/ipc.js";
 import {
   buildCoverageMap,
   extractCoveredSources,
@@ -172,7 +172,9 @@ export function mapModulesToResult(
 
   const total = passed + failed + skipped;
   return {
-    success: total > 0 && failed === 0,
+    // A run that dispatched but matched no test cases is not a failure — nothing failed.
+    // (Empty *selections* are short-circuited earlier by the orchestrator.)
+    success: failed === 0,
     summary: buildSummary(passed, failed, skipped, total, wallClockMs, failures),
     duration: wallClockMs,
     total,
@@ -473,7 +475,18 @@ function send(msg: FromWorker): void {
 
 // Only wire IPC when actually forked (process.send is defined in a child with an IPC channel).
 if (process.send) {
-  process.on("message", (msg: ToWorker) => {
+  process.on("message", (raw: unknown) => {
+    let msg: ToWorker;
+    try {
+      msg = parseToWorker(raw);
+    } catch (e) {
+      // A malformed message crossing the IPC edge is ignored (logged to the daemon's stderr)
+      // rather than acted on with garbage fields.
+      process.stderr.write(
+        `test-mcp worker: ignoring invalid IPC message: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
+      return;
+    }
     if (msg.type === "run") {
       handleRun(msg)
         .then(({ result, failureDetails, coverageDelta }) =>

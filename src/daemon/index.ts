@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as http from "node:http";
+import { z } from "zod";
 import { SCHEMA_VERSION } from "../index.js";
 import { createMcpRequestListener } from "../mcp/server.js";
 import { ProjectRegistry } from "../registry/project-registry.js";
@@ -11,18 +12,21 @@ import { WatchManager } from "../watch/index.js";
 
 export { SCHEMA_VERSION };
 
-export interface DaemonConfig {
-  schemaVersion: number;
-  port: number;
-  maxConcurrentWorkers: number;
-  workerIdleTtlMs: number;
+/** Daemon config schema — the single source of truth; `DaemonConfig` is inferred from it. */
+const DaemonConfigSchema = z.object({
+  schemaVersion: z.number(),
+  port: z.number(),
+  maxConcurrentWorkers: z.number(),
+  workerIdleTtlMs: z.number(),
   /**
    * Per-daemon bearer secret for /mcp auth. Stable across restarts (persisted here so MCP
    * clients can be configured statically). Generated on first start; overridable via
-   * TEST_MCP_TOKEN. Optional in the type for configs written before it existed.
+   * TEST_MCP_TOKEN. Optional for configs written before it existed.
    */
-  token?: string;
-}
+  token: z.string().optional(),
+});
+
+export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
 
 export interface Lockfile {
   pid: number;
@@ -68,8 +72,9 @@ export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch (e: any) {
-    return e && e.code === "EPERM";
+  } catch (e: unknown) {
+    // EPERM means the process exists but we can't signal it — still "alive".
+    return (e as NodeJS.ErrnoException)?.code === "EPERM";
   }
 }
 
@@ -77,7 +82,7 @@ export function readLockfile(): Lockfile | null {
   try {
     const content = fs.readFileSync(lockfilePath(), "utf8");
     return JSON.parse(content) as Lockfile;
-  } catch (e: any) {
+  } catch {
     return null;
   }
 }
@@ -88,7 +93,17 @@ export function loadOrCreateConfig(): DaemonConfig {
 
   if (fs.existsSync(configPath())) {
     const content = fs.readFileSync(configPath(), "utf8");
-    const parsed = JSON.parse(content) as DaemonConfig;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(content);
+    } catch {
+      throw new Error(`config.json is not valid JSON at ${configPath()}`);
+    }
+    const result = DaemonConfigSchema.safeParse(raw);
+    if (!result.success) {
+      throw new Error(`Invalid config.json at ${configPath()}: ${result.error.message}`);
+    }
+    const parsed = result.data;
 
     if (parsed.schemaVersion !== SCHEMA_VERSION) {
       throw new Error(
@@ -166,18 +181,27 @@ export async function startDaemon(): Promise<DaemonHandle> {
         `starting with an empty registry\n`,
     );
   }
-  const orchestrator = new Orchestrator();
+  const orchestrator = new Orchestrator({ maxConcurrentWorkers: cfg.maxConcurrentWorkers });
   const watchManager = new WatchManager(orchestrator);
   const server = http.createServer(
     createMcpRequestListener({ token, registry, orchestrator, watchManager }),
   );
 
   await new Promise<void>((resolve, reject) => {
-    server.once("error", (err) => {
+    const onBindError = (err: Error): void => {
       server.close();
       reject(err);
+    };
+    server.once("error", onBindError);
+    server.listen(cfg.port, "127.0.0.1", () => {
+      // Bind succeeded: drop the reject-on-error handler so a later transient socket error
+      // can't silently close the live daemon. Log subsequent errors instead.
+      server.removeListener("error", onBindError);
+      server.on("error", (err) => {
+        process.stderr.write(`test-mcp daemon: server error: ${err.message}\n`);
+      });
+      resolve();
     });
-    server.listen(cfg.port, "127.0.0.1", () => resolve());
   });
 
   const addr = server.address();
@@ -231,9 +255,9 @@ export async function stopDaemon(): Promise<{
 
   try {
     process.kill(lock.pid, "SIGTERM");
-  } catch (e: any) {
+  } catch (e: unknown) {
     // ESRCH: the process died between the liveness check and the signal.
-    if (e && e.code === "ESRCH") {
+    if ((e as NodeJS.ErrnoException)?.code === "ESRCH") {
       fs.rmSync(lockfilePath(), { force: true });
       return { stopped: false, pid: lock.pid, reason: "stale" };
     }

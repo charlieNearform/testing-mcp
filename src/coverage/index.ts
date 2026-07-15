@@ -75,10 +75,20 @@ export function loadCoverageMap(projectRoot: string): CoverageMapFile | null {
   }
   try {
     const parsed = JSON.parse(raw) as CoverageMapFile;
-    if (parsed?.schemaVersion !== COVERAGE_MAP_SCHEMA_VERSION || typeof parsed.map !== "object") {
+    if (
+      parsed?.schemaVersion !== COVERAGE_MAP_SCHEMA_VERSION ||
+      typeof parsed.map !== "object" ||
+      parsed.map === null
+    ) {
       return null;
     }
-    return parsed;
+    // Defensive defaults so a partial/hand-edited v3 map cannot throw in the Selection
+    // Engine (invariant 5: the selection path must never crash — prefer running more).
+    return {
+      ...parsed,
+      fullSuiteTriggers: Array.isArray(parsed.fullSuiteTriggers) ? parsed.fullSuiteTriggers : [],
+      alwaysRun: Array.isArray(parsed.alwaysRun) ? parsed.alwaysRun : [],
+    };
   } catch {
     return null;
   }
