@@ -42,6 +42,10 @@ const rec: RunRecord = {
       { name: "adds", file: "test/math.test.js", status: "passed" },
       { name: "subtracts", file: "test/math.test.js", status: "failed" },
     ],
+    coverage: {
+      total: { statements: 95, branches: 80, functions: 100, lines: 95 },
+      files: [{ file: "src/math.js", statements: 95, branches: 80, functions: 100, lines: 95 }],
+    },
   },
   failures: [],
 };
@@ -63,6 +67,8 @@ describe("UI run-history endpoints", () => {
     expect(body.projectId).toBe("proj-1");
     expect(body.runs).toHaveLength(1);
     expect(body.runs[0]).toMatchObject({ runId: "run-1", status: "complete", strategy: "incremental", total: 2 });
+    // Story 6.3: overall line coverage % rides the run summary for the at-a-glance row.
+    expect(body.runs[0].coverageLines).toBe(95);
   });
 
   it("returns full run detail (with selection files) by id", async () => {
@@ -82,6 +88,9 @@ describe("UI run-history endpoints", () => {
       { name: "adds", file: "test/math.test.js", status: "passed" },
       { name: "subtracts", file: "test/math.test.js", status: "failed" },
     ]);
+    // Coverage report (Story 6.3) rides the run detail through to the UI coverage section.
+    expect(body.result?.coverage?.total.lines).toBe(95);
+    expect(body.result?.coverage?.files[0].file).toBe("src/math.js");
   });
 
   it("404s an unknown run id", async () => {

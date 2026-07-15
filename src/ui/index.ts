@@ -48,6 +48,8 @@ function runSummary(rec: RunRecord) {
     passed: r?.passed,
     failed: r?.failed,
     skipped: r?.skipped,
+    // Overall line coverage % at a glance on the run row (Story 6.3); undefined on non-coverage runs.
+    coverageLines: r?.coverage?.total.lines,
   };
 }
 
@@ -290,8 +292,9 @@ async function renderProject(pid) {
     + '<td>' + badge(r.status) + '</td>'
     + '<td>' + esc(r.strategy || "") + '</td>'
     + '<td><b class="ok">' + (r.passed != null ? r.passed : "–") + '</b> / <b class="fail">' + (r.failed != null ? r.failed : "–") + '</b> of ' + (r.total != null ? r.total : "–") + '</td>'
+    + '<td>' + (r.coverageLines != null ? (Math.round(r.coverageLines * 10) / 10) + '%' : "–") + '</td>'
     + '<td>' + fmtDur(r.durationMs) + '</td></tr>').join("");
-  app.innerHTML = head + banner + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / fail</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  app.innerHTML = head + banner + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / fail</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
   app.querySelectorAll("tr.row").forEach((el) => {
     el.addEventListener("click", () => go("/project/" + encodeURIComponent(pid) + "/run/" + encodeURIComponent(el.getAttribute("data-run"))));
   });
@@ -336,6 +339,24 @@ async function renderRun(pid, runId) {
     + '<ul class="tests">' + allTests.map((t) =>
         '<li><span class="' + testStatusClass(t.status) + '">' + esc(t.status) + '</span> '
         + esc(t.name) + ' <span class="loc">' + esc(t.file || "") + '</span></li>').join("") + '</ul>';
+  // Coverage report (Story 6.3): overall % as stat tiles + a per-file table. Only present on
+  // coverage runs.
+  const cov = res.coverage;
+  const pctCell = (v) => (v == null ? "–" : (Math.round(v * 10) / 10) + "%");
+  const covBlock = !cov ? "" :
+    '<div class="section-title">coverage</div>'
+    + '<div class="detail-grid">'
+    + kv("statements", pctCell(cov.total.statements)) + kv("branches", pctCell(cov.total.branches))
+    + kv("functions", pctCell(cov.total.functions)) + kv("lines", pctCell(cov.total.lines))
+    + '</div>'
+    + ((cov.files && cov.files.length)
+        ? '<table class="runs"><thead><tr><th>file</th><th>stmts</th><th>branch</th><th>funcs</th><th>lines</th></tr></thead><tbody>'
+          + cov.files.map((f) =>
+              '<tr><td>' + esc(f.file) + '</td><td>' + pctCell(f.statements) + '</td><td>'
+              + pctCell(f.branches) + '</td><td>' + pctCell(f.functions) + '</td><td>'
+              + pctCell(f.lines) + '</td></tr>').join("")
+          + '</tbody></table>'
+        : "");
   const fails = (rec.failures && rec.failures.length)
     ? '<div class="section-title">failures</div>' + rec.failures.map((f) =>
         '<div class="fail-item"><div class="name">' + esc(f.name) + '</div>'
@@ -349,6 +370,7 @@ async function renderRun(pid, runId) {
     + grid
     + '<div class="section-title">selection (' + esc(sel.strategy || "?") + ')</div>' + files
     + confBlock
+    + covBlock
     + testsBlock
     + fails;
 }

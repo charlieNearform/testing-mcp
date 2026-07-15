@@ -80,6 +80,18 @@
   summary: Daemon startup rehydrates history with SYNCHRONOUS `readdirSync`+`readFileSync` over every history file for every registered project BEFORE the HTTP port binds, so a project with a very large history dir (or a huge file) delays startup / blocks the event loop.
   evidence: LOW — `pruneHistory` runs on every write and keeps each dir ≤ the cap (~50), so in steady state only ~50 small files are read per project. The only slow case is a pathological pre-existing dir on the very first startup after upgrade. Mitigate by pre-selecting the newest `cap` filenames (cheap `stat`) before parsing, or moving rehydration off the pre-bind path (lazy per-project load on first history query).
 
+## Deferred from: story-6-3-coverage-report-in-results-and-ui (2026-07-15)
+
+- source_story: `story-6-3-coverage-report-in-results-and-ui.md`
+  summary: **AC4 (coverage threshold-gate signal) DEFERRED.** A run does not report a distinct "coverage gate failed" signal (e.g. `coverage.thresholdsMet: false`) when the project's Vitest thresholds aren't met.
+  evidence: `coverage-summary.json` exposes achieved percentages but not the project's configured thresholds, and `measureCoverageSummary` passes `thresholds: undefined` so the project gate can't fail our measurement pass. A clean signal requires additionally reading the project's Vitest `coverage.thresholds` config (including per-file and glob-scoped thresholds) and comparing — a separate, non-trivial piece confirmed by review as not trivially available from what 6.3 exposes. Implement alongside/after Story 6.10, whose whole-project combination gives the correct base numbers to gate on.
+- source_story: `story-6-3-coverage-report-in-results-and-ui.md`
+  summary: **[for Story 6.10]** A per-run coverage report is shown UNQUALIFIED as "coverage", but it reflects only the tests that ran (`all: false`), so (a) an incremental run's number is a subset, not project coverage, and (b) even a full run's overall % excludes never-imported source files, inflating it vs true project coverage.
+  evidence: MEDIUM accuracy/labelling. Story 6.10 (combined incremental coverage) is the designed fix — union each test file's latest measurement into a whole-project picture, flag stale/unmeasured parts as degraded confidence (6.8). Until then the number is honest about "what ran" but could be misread as project coverage; 6.10 should add whole-project framing (and consider `all: true` for the baseline full run).
+- source_story: `story-6-3-coverage-report-in-results-and-ui.md`
+  summary: The per-file coverage table (`result.coverage.files`) is unbounded — a large repo's coverage run persists (Story 6.2) and re-renders a very large array, unlike the Story-6.1 `tests` list which is capped.
+  evidence: LOW-MEDIUM. Bound it like `tests` (cap + a `filesTruncated` flag, ideally keeping the lowest-coverage files as the most actionable) so history records and UI payloads stay bounded. Also cosmetic: files outside the project root render as `../..` paths (`path.relative` fallback only fires on identical paths).
+
 ## Testing infrastructure (2026-07-15)
 
 - source: Epic 6 dev-auto runs

@@ -46,6 +46,12 @@ describe("coverage reverse-map build & persist", () => {
     const result = await orch.runTests({ projectId: "cov1", path: proj }, { coverage: true });
     expect(result.total).toBe(2);
 
+    // Story 6.3: a coverage run also carries an overall + per-file coverage report.
+    expect(result.coverage).toBeDefined();
+    expect(result.coverage!.total.lines).toBeGreaterThan(0);
+    expect(result.coverage!.total.lines).toBeLessThanOrEqual(100);
+    expect(result.coverage!.files.some((f) => f.file.includes("math.ts"))).toBe(true);
+
     const map = loadCoverageMap(proj);
     expect(map).not.toBeNull();
     expect(map!.schemaVersion).toBe(3);

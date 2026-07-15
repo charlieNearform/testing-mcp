@@ -426,6 +426,88 @@ async function measureCoverage(
   }
 }
 
+/**
+ * Coverage summary (Story 6.3) — overall + per-file percentages for the tests that ran, via one
+ * V8 coverage pass with the `json-summary` reporter. Scoped to the SAME selection the run used
+ * (`{ files, changed }`) so a changed-only incremental run doesn't silently re-measure the whole
+ * suite: explicit files → those filters; `changed` with no files → git `--changed`; neither → the
+ * full suite. Mirrors `measureCoverage`'s graceful contract: any failure (no coverage provider, no
+ * summary emitted) returns `undefined` so a run never fails because a coverage REPORT couldn't be
+ * produced. `thresholds: undefined` so the project's own thresholds don't fail our measurement pass.
+ * The report reflects the tests that ran (with `all: false`); whole-project combination is Story 6.10.
+ */
+async function measureCoverageSummary(
+  startVitest: VitestNode["startVitest"],
+  projectRoot: string,
+  opts: { files: string[]; changed: boolean },
+): Promise<TestResult["coverage"] | undefined> {
+  const reportsDir = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-covsum-"));
+  try {
+    // Match the run's selection so the report covers exactly what executed (never more).
+    const extraOptions = opts.files.length === 0 && opts.changed ? { changed: true } : {};
+    const vitest = await startVitest("test", opts.files, {
+      watch: false,
+      reporters: [{}],
+      coverage: {
+        enabled: true,
+        provider: "v8",
+        all: false,
+        reporter: ["json-summary"],
+        reportsDirectory: reportsDir,
+        thresholds: undefined,
+      },
+      ...extraOptions,
+    });
+    if (!vitest) return undefined;
+    try {
+      const summaryFile = path.join(reportsDir, "coverage-summary.json");
+      if (!fs.existsSync(summaryFile)) return undefined;
+      return mapCoverageSummary(
+        JSON.parse(fs.readFileSync(summaryFile, "utf8")) as CoverageSummaryJson,
+        projectRoot,
+      );
+    } finally {
+      await vitest.close();
+    }
+  } catch {
+    return undefined; // never let a coverage-report failure break the run
+  } finally {
+    fs.rmSync(reportsDir, { recursive: true, force: true });
+  }
+}
+
+/** Shape of Vitest/istanbul `coverage-summary.json`: a `total` plus one entry per absolute file. */
+interface CoverageSummaryJson {
+  total?: Record<string, { pct?: number }>;
+  [absFile: string]: Record<string, { pct?: number }> | undefined;
+}
+
+/** Map `coverage-summary.json` into our contract, relativizing file paths to the project root. */
+export function mapCoverageSummary(
+  json: CoverageSummaryJson,
+  projectRoot: string,
+): TestResult["coverage"] {
+  // Coerce to a finite number — some coverage providers emit a non-numeric sentinel (e.g. "Unknown"
+  // when a denominator is 0), which would otherwise surface as "NaN%" in the UI.
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const pct = (entry: Record<string, { pct?: number }> | undefined): {
+    statements: number;
+    branches: number;
+    functions: number;
+    lines: number;
+  } => ({
+    statements: num(entry?.statements?.pct),
+    branches: num(entry?.branches?.pct),
+    functions: num(entry?.functions?.pct),
+    lines: num(entry?.lines?.pct),
+  });
+  const files = Object.keys(json)
+    .filter((k) => k !== "total")
+    .map((abs) => ({ file: path.relative(projectRoot, abs) || abs, ...pct(json[abs]) }))
+    .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+  return { total: pct(json.total), files };
+}
+
 /** Discover all test files in the project (absolute paths) without running them. */
 async function discoverTestFiles(createVitest: VitestNode["createVitest"]): Promise<string[]> {
   const vitest = await createVitest("test", { watch: false });
@@ -498,7 +580,23 @@ async function handleRun(
   );
   if (!msg.coverage) return base;
   const coverageDelta = await buildAndPersistCoverageMap(cwd, msg.projectId, msg.files);
-  return { ...base, coverageDelta };
+  // Coverage REPORT (Story 6.3) for the tests that ran — additive; undefined if unmeasurable.
+  const coverage = await computeCoverageSummary(cwd, { files: msg.files, changed: msg.changed });
+  return {
+    ...base,
+    coverageDelta,
+    result: coverage ? { ...base.result, coverage } : base.result,
+  };
+}
+
+/** Resolve the project's Vitest and produce a coverage summary scoped to what the run executed. */
+async function computeCoverageSummary(
+  cwd: string,
+  opts: { files: string[]; changed: boolean },
+): Promise<TestResult["coverage"] | undefined> {
+  const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
+  const { startVitest } = projectRequire("vitest/node") as VitestNode;
+  return measureCoverageSummary(startVitest, cwd, opts);
 }
 
 function send(msg: FromWorker): void {

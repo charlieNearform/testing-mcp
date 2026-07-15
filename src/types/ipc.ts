@@ -58,6 +58,16 @@ const resultShape = z
       )
       .optional()
       .catch(undefined),
+    // Coverage summary (Story 6.3) — optional/additive; `.catch(undefined)` so a malformed report
+    // degrades to "no coverage" rather than rejecting the whole run.
+    coverage: z
+      .object({
+        total: z.object({}).passthrough(),
+        files: z.array(z.object({}).passthrough()),
+      })
+      .passthrough()
+      .optional()
+      .catch(undefined),
   })
   .passthrough();
 

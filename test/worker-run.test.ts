@@ -27,6 +27,8 @@ describe("Orchestrator.runTests (project-local worker)", () => {
     expect(result.tests?.length).toBe(2);
     expect(result.tests?.some((t) => t.status === "passed")).toBe(true);
     expect(result.tests?.some((t) => t.status === "failed")).toBe(true);
+    // Story 6.3: a plain run (no coverage requested) carries NO coverage report — no perf hit.
+    expect(result.coverage).toBeUndefined();
   }, 60_000);
 
   it("returns WorkerFailure when vitest cannot be resolved, and stays healthy afterwards", async () => {

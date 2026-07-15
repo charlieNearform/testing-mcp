@@ -12,6 +12,14 @@ export interface Confidence {
   reasons: string[];
 }
 
+/** Percentage coverage across the four V8/istanbul metrics (Story 6.3). */
+export interface CoveragePct {
+  statements: number;
+  branches: number;
+  functions: number;
+  lines: number;
+}
+
 export interface TestResult {
   success: boolean;
   /** One-line, failure-forward summary for cheap agent consumption (Story 4.3). */
@@ -42,6 +50,15 @@ export interface TestResult {
   tests?: Array<{ name: string; file: string; status: "passed" | "failed" | "skipped" }>;
   /** True when `tests` was capped and no longer lists every case (Story 6.1). */
   testsTruncated?: boolean;
+  /**
+   * Coverage summary for a `coverage: true` run (Story 6.3) — overall + per-file percentages
+   * (statements/branches/functions/lines), read from Vitest's `coverage-summary.json`. Absent on
+   * plain runs (coverage is only measured when requested) and when no coverage provider is present.
+   */
+  coverage?: {
+    total: CoveragePct;
+    files: Array<{ file: string } & CoveragePct>;
+  };
   /** Timing breakdown so daemon/worker overhead is observable (NFR7). Optional; added in Story 2.1. */
   metadata?: {
     wallClockMs: number;
