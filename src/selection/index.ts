@@ -144,6 +144,9 @@ export const DEFAULT_IGNORE_PATTERNS: readonly string[] = [
   ".editorconfig",
   ".mcp.json",
   "CLAUDE.md",
+  // test-mcp's own per-project state (incl. the last-run snapshot) must never be treated as a
+  // source change — otherwise the snapshot's own writes would perpetually re-trigger selection.
+  ".test-mcp/**",
   ".cursor/**",
   ".cursorrules",
   ".vscode/**",
@@ -217,6 +220,15 @@ function readIgnorePatterns(projectRoot: string): string[] {
 }
 
 /**
+ * Combined ignore patterns for a project: the built-in defaults plus its `.test-mcp-ignore`
+ * (Story 6.5). Exported so the Story-6.7 snapshot universe is filtered by the EXACT same rules
+ * as the changed-set selection — the two must never diverge.
+ */
+export function loadIgnorePatterns(projectRoot: string): string[] {
+  return [...DEFAULT_IGNORE_PATTERNS, ...readIgnorePatterns(projectRoot)];
+}
+
+/**
  * Repo-relative changed files: working tree vs HEAD (tracked) plus untracked files.
  * Returns null when git is unavailable/not a repo so callers fall back to the full suite.
  * Paths are POSIX-style relative to the project root (which is the git root for registered projects).
@@ -247,7 +259,7 @@ export function getChangedFiles(projectRoot: string): { files: string[]; added: 
       ["diff", "--cached", "--name-only", "--diff-filter=A"],
       gitOpts,
     );
-    const patterns = [...DEFAULT_IGNORE_PATTERNS, ...readIgnorePatterns(projectRoot)];
+    const patterns = loadIgnorePatterns(projectRoot);
     const normalize = (raw: string): string[] =>
       raw
         .split("\n")

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Orchestrator } from "../src/orchestrator/index.js";
+import { loadSnapshot, snapshotPath } from "../src/snapshot/index.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const workerPath = path.join(repoRoot, "dist", "worker", "index.js");
@@ -195,5 +196,91 @@ describe("git-aware delta selection", () => {
 
     expect(result.selection.strategy).toBe("full");
     expect(result.total).toBe(2);
+  }, 60_000);
+});
+
+// Story 6.7: the "changed since last run" incremental baseline (content-hash snapshot).
+describe("changed-since-last-run baseline", () => {
+  const mapForProj = { "math.ts": ["math.test.ts"], "other.ts": ["other.test.ts"] };
+
+  it("first run (no snapshot) falls back to HEAD and writes a snapshot afterward", async () => {
+    proj = makeProject(true);
+    seedCoverageMap(proj, mapForProj);
+    fs.appendFileSync(path.join(proj, "math.ts"), `// touched\n`);
+
+    expect(loadSnapshot(proj)).toBeNull();
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    // HEAD fallback + map -> only math.test.ts ran.
+    expect(result.selection.strategy).toBe("incremental");
+    expect(result.total).toBe(1);
+    expect(result.selection.files.some((f) => f.includes("math.test.ts"))).toBe(true);
+
+    // Snapshot now exists and captured the edited math.ts content.
+    const snap = loadSnapshot(proj);
+    expect(snap).not.toBeNull();
+    expect(snap!.files["math.ts"]).toBeDefined();
+  }, 60_000);
+
+  it("a stale unmapped edit no longer forces a full suite (snapshot baseline, not HEAD)", async () => {
+    proj = makeProject(true);
+    seedCoverageMap(proj, mapForProj);
+
+    const orch = new Orchestrator({ workerPath });
+    // Run 1: touch an unmapped tracked source. A HEAD baseline (and the existing 6.6 test) forces
+    // the FULL suite here; that run succeeds, so the snapshot advances to include the edited file.
+    fs.appendFileSync(path.join(proj, "unrelated.ts"), `// touched\n`);
+    const first = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+    expect(first.selection.strategy).toBe("full");
+    expect(first.total).toBe(2);
+
+    // Run 2: edit a mapped file. unrelated.ts is STILL dirty vs HEAD (would re-force full), but it
+    // matches the snapshot, so the delta is just {math.ts} -> only math.test.ts, no full suite.
+    fs.appendFileSync(path.join(proj, "math.ts"), `// touched\n`);
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    expect(result.selection.strategy).toBe("incremental");
+    expect(result.total).toBe(1);
+    expect(result.selection.files.some((f) => f.includes("math.test.ts"))).toBe(true);
+    expect(result.selection.files.some((f) => f.includes("other.test.ts"))).toBe(false);
+  }, 60_000);
+
+  it("a change reverted before the run is a no-op (hash matches the snapshot)", async () => {
+    proj = makeProject(true);
+    seedCoverageMap(proj, mapForProj);
+    const originalOther = fs.readFileSync(path.join(proj, "other.ts"));
+
+    const orch = new Orchestrator({ workerPath });
+    fs.appendFileSync(path.join(proj, "math.ts"), `// touched\n`);
+    await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    // Edit then revert other.ts to its snapshot content before running.
+    fs.appendFileSync(path.join(proj, "other.ts"), `// touched\n`);
+    fs.writeFileSync(path.join(proj, "other.ts"), originalOther);
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    expect(result.selection.strategy).toBe("incremental");
+    expect(result.total).toBe(0);
+  }, 60_000);
+
+  it("a failed run leaves the snapshot unchanged so the same delta re-runs", async () => {
+    proj = makeProject(true);
+    seedCoverageMap(proj, mapForProj);
+    // Break add() so math.test.ts (expects 3) fails on the delta-selected run.
+    fs.writeFileSync(path.join(proj, "math.ts"), `export const add = (a: number, b: number) => a + b + 1;\n`);
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    expect(result.total).toBe(1);
+    expect(result.success).toBe(false);
+    // No snapshot advanced on failure -> the changed file stays in the next delta.
+    expect(fs.existsSync(snapshotPath(proj))).toBe(false);
+
+    const again = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+    expect(again.total).toBe(1);
+    expect(again.success).toBe(false);
+    expect(fs.existsSync(snapshotPath(proj))).toBe(false);
   }, 60_000);
 });

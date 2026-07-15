@@ -102,12 +102,16 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
           .optional()
           .describe("Build/refresh the source->test coverage map for this run"),
         files: z.array(z.string()).optional().describe("Specific files to run"),
+        since: z
+          .enum(["last-run", "head"])
+          .optional()
+          .describe("Incremental baseline: 'last-run' (default) diffs vs the last run, 'head' vs git HEAD"),
         suite: z.string().optional().describe("Test suite name"),
         dryRun: z.boolean().optional().describe("Compute the plan without executing"),
         planId: z.string().optional().describe("Execute a previously computed plan"),
       },
     },
-    async ({ projectId, files, mode, coverage, dryRun, planId }, extra) => {
+    async ({ projectId, files, mode, coverage, since, dryRun, planId }, extra) => {
       const project = registry?.get(projectId);
       if (!project) return unknownProject(projectId);
       if (!orchestrator) {
@@ -126,12 +130,12 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
           : undefined;
       try {
         if (dryRun) {
-          const plan = orchestrator.plan(project, { files, mode });
+          const plan = orchestrator.plan(project, { files, mode, since });
           return { content: [{ type: "text" as const, text: JSON.stringify(plan) }] };
         }
         const result = planId
           ? await orchestrator.runPlan(project, planId, { onProgress })
-          : await orchestrator.runTests(project, { files, mode, coverage, onProgress });
+          : await orchestrator.runTests(project, { files, mode, coverage, since, onProgress });
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
       } catch (err) {
         if (err instanceof PlanError) return errorResult(toAppError("PlanExpired", err.message));

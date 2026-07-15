@@ -6,6 +6,12 @@ import type { TestResult, FailureDetail, TestPlan } from "../types/contracts.js"
 import { parseFromWorker, type ToWorker, type FromWorker } from "../types/ipc.js";
 import { loadCoverageMap } from "../coverage/index.js";
 import { SelectionEngine, getChangedFiles } from "../selection/index.js";
+import {
+  selectionDelta,
+  snapshotPayload,
+  saveSnapshot,
+  type SnapshotFile,
+} from "../snapshot/index.js";
 
 /** The minimal project shape the orchestrator needs (matches RegisteredProject). */
 export interface ProjectRef {
@@ -63,6 +69,18 @@ interface ResolvedSelection {
   reason: string;
   /** Nothing to run (e.g. incremental with no changes) — do not dispatch a worker. */
   empty: boolean;
+  /**
+   * True when this selection came from the incremental delta path (mode incremental, no explicit
+   * files) — the only kind of run that may advance the last-run snapshot on success (Story 6.7).
+   * Explicit-files and plain full runs never advance it.
+   */
+  deltaDriven: boolean;
+  /**
+   * The candidate-universe snapshot captured at SELECTION time (Story 6.7). Persisted verbatim
+   * if this delta-driven run succeeds — never re-hashed post-run — so an edit landing mid-run is
+   * never baselined as validated (invariant 5). Undefined for non-delta / non-git runs.
+   */
+  pendingSnapshot?: SnapshotFile | null;
 }
 
 interface StoredPlan {
@@ -136,7 +154,14 @@ export class Orchestrator {
   /** Run a project's tests in a fresh project-local worker. Rejects with WorkerError on failure. */
   async runTests(
     project: ProjectRef,
-    opts: { files?: string[]; mode?: string; coverage?: boolean; onProgress?: ProgressFn } = {},
+    opts: {
+      files?: string[];
+      mode?: string;
+      coverage?: boolean;
+      /** Incremental baseline: "last-run" (default, hash-diff vs snapshot) or "head" (git HEAD). */
+      since?: "last-run" | "head";
+      onProgress?: ProgressFn;
+    } = {},
   ): Promise<TestResult> {
     const sel = this.resolveSelection(project, opts);
     return this.enqueue(project, sel, opts.coverage === true, opts.onProgress);
@@ -151,7 +176,10 @@ export class Orchestrator {
   }
 
   /** Compute a plan without executing (Story 4.1 dry-run). */
-  plan(project: ProjectRef, opts: { files?: string[]; mode?: string }): TestPlan {
+  plan(
+    project: ProjectRef,
+    opts: { files?: string[]; mode?: string; since?: "last-run" | "head" },
+  ): TestPlan {
     this.sweepExpiredPlans();
     const started = Date.now();
     const sel = this.resolveSelection(project, opts);
@@ -201,6 +229,9 @@ export class Orchestrator {
         // mislabelled "full" while running a bounded set.
         strategy: stored.changed || stored.files.length ? "incremental" : "full",
         reason: "committed plan",
+        // A committed plan replays a frozen selection; conservatively it does not advance the
+        // last-run snapshot (never under-selects — the snapshot just stays on its prior baseline).
+        deltaDriven: false,
       },
       false,
       opts.onProgress,
@@ -219,6 +250,7 @@ export class Orchestrator {
       if (sel.empty) {
         const result = emptyResult(sel.reason);
         const now = new Date().toISOString();
+        this.advanceSnapshotIfDeltaRun(project, sel, result);
         this.recordRun({
           runId: randomUUID(),
           projectId: project.projectId,
@@ -246,26 +278,41 @@ export class Orchestrator {
   /** Resolve a request into concrete {files, changed} via the Selection Engine (Story 3.5). */
   private resolveSelection(
     project: ProjectRef,
-    opts: { files?: string[]; mode?: string },
+    opts: { files?: string[]; mode?: string; since?: "last-run" | "head" },
   ): ResolvedSelection {
     const explicit = opts.files ?? [];
     if (opts.mode === "incremental" && explicit.length === 0) {
-      const changed = getChangedFiles(project.path);
+      // Baseline (Story 6.7): "last-run" (default) diffs against the last-successful-run content
+      // snapshot; a missing/invalid snapshot returns null so we fall back to the git-HEAD baseline
+      // (never under-select). "head" opts out and always uses the git-HEAD diff. Either way we
+      // capture the current candidate hashes NOW (selection time) as `pendingSnapshot`; it becomes
+      // the new baseline only if the run succeeds — re-hashing post-run would hide a mid-run edit.
+      const since = opts.since ?? "last-run";
+      let changed: { files: string[]; added: string[] } | null;
+      let pendingSnapshot: SnapshotFile | null;
+      if (since === "head") {
+        changed = getChangedFiles(project.path);
+        pendingSnapshot = snapshotPayload(project.path);
+      } else {
+        const delta = selectionDelta(project.path);
+        changed = delta.changed ?? getChangedFiles(project.path);
+        pendingSnapshot = delta.pending;
+      }
       const plan = SelectionEngine.plan({
         changedFiles: changed?.files ?? null,
         addedFiles: changed?.added,
         map: loadCoverageMap(project.path),
       });
       if (plan.strategy === "full") {
-        return { files: [], changed: false, strategy: "full", reason: plan.reason, empty: false };
+        return { files: [], changed: false, strategy: "full", reason: plan.reason, empty: false, deltaDriven: true, pendingSnapshot };
       }
       if (plan.strategy === "changed-only") {
         // worker runs `--changed` with a full-suite fallback (Story 3.1)
-        return { files: [], changed: true, strategy: "incremental", reason: plan.reason, empty: false };
+        return { files: [], changed: true, strategy: "incremental", reason: plan.reason, empty: false, deltaDriven: true, pendingSnapshot };
       }
       // Nothing to run and no static-graph union requested -> short-circuit (empty filter would be a full run).
       if (plan.testFiles.length === 0 && !plan.union) {
-        return { files: [], changed: false, strategy: "incremental", reason: plan.reason, empty: true };
+        return { files: [], changed: false, strategy: "incremental", reason: plan.reason, empty: true, deltaDriven: true, pendingSnapshot };
       }
       return {
         files: plan.testFiles,
@@ -273,6 +320,8 @@ export class Orchestrator {
         strategy: "incremental",
         reason: plan.reason,
         empty: false,
+        deltaDriven: true,
+        pendingSnapshot,
       };
     }
     if (explicit.length > 0) {
@@ -282,9 +331,10 @@ export class Orchestrator {
         strategy: "incremental",
         reason: "explicit file selection",
         empty: false,
+        deltaDriven: false,
       };
     }
-    return { files: [], changed: false, strategy: "full", reason: "full suite", empty: false };
+    return { files: [], changed: false, strategy: "full", reason: "full suite", empty: false, deltaDriven: false };
   }
 
   private async execute(
@@ -418,6 +468,9 @@ export class Orchestrator {
               result.selection.reason = sel.reason;
               result.selection.strategy = sel.strategy;
             }
+            // Advance the last-run snapshot only after a successful delta-driven run (Story 6.7):
+            // a failing run leaves it untouched so its changed files stay in the next delta.
+            this.advanceSnapshotIfDeltaRun(project, sel, result);
             this.recordRun({
               runId,
               projectId: project.projectId,
@@ -454,6 +507,31 @@ export class Orchestrator {
         ),
       );
     });
+  }
+
+  /**
+   * Persist the last-run snapshot after a successful delta-driven incremental run (Story 6.7).
+   * We save the payload captured at SELECTION time (`sel.pendingSnapshot`), not a fresh re-hash:
+   * a changed file whose run failed is never hidden (the snapshot isn't advanced at all), and an
+   * edit landing mid-run isn't silently baselined as validated (its selection-time hash is what
+   * we persist, so a later edit still differs and stays in the next delta). A write failure must
+   * never fail the run (invariant: never crash the daemon) — it is logged to stderr only.
+   */
+  private advanceSnapshotIfDeltaRun(
+    project: ProjectRef,
+    sel: ResolvedSelection,
+    result: TestResult,
+  ): void {
+    if (!sel.deltaDriven || !result.success || !sel.pendingSnapshot) return;
+    try {
+      saveSnapshot(project.path, sel.pendingSnapshot);
+    } catch (err) {
+      process.stderr.write(
+        `[test-mcp] failed to write last-run snapshot for ${project.projectId}: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    }
   }
 
   /** Look up a failure from the project's most recent run. */
