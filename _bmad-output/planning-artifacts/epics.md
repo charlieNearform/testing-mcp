@@ -534,7 +534,7 @@ So that the view stays accurate during long runs.
 
 Enhancements after the v1 epics closed. Story 6.0 retrospectively records work already shipped directly on `main`; stories 6.1+ are new work to run through the normal story → dev → review cycle.
 
-> **Implementation order:** 6.0 (as-built, done) → **6.4 → 6.5** (selection refinements first) → 6.1 → 6.2 → 6.3. 6.4/6.5 tighten the selection core; 6.2 depends on 6.1; 6.3 is independent but shares the result/UI surfaces, so land it after 6.1.
+> **Implementation order:** 6.0 (as-built, done) → **6.4 → 6.5 → 6.6** (selection refinements first) → 6.1 → 6.2 → 6.3. 6.4/6.5/6.6 tighten the selection core; 6.2 depends on 6.1; 6.3 is independent but shares the result/UI surfaces, so land it after 6.1.
 
 ### Story 6.0: Post-v1 Onboarding & Hardening (as-built)
 
@@ -661,3 +661,21 @@ So that an unrelated `.gitignore`/`CLAUDE.md`/`*.md` edit doesn't force the whol
 **Given** a mix of ignored and relevant changes
 **When** selection runs
 **Then** only the relevant changes drive selection.
+
+### Story 6.6: New Source Files Bounded by the Git Static Graph
+
+As a developer adding a new file with its test,
+I want a brand-new source file to be bounded by the git `--changed` static graph, not a full suite,
+So that "add a feature + its test" runs only the affected tests instead of everything.
+
+**Acceptance Criteria:**
+
+**Given** the only changes are a new (untracked) source file and its new test, with a coverage map present
+**When** an incremental run is planned
+**Then** the run is bounded by the git `--changed` static-graph selection (the new test plus any existing test that statically imports the new source), not the full suite.
+
+**Given** a modified existing source unknown to the map, a setup-baseline change, an unmeasurable-test trigger, or git/static-graph unavailable
+**When** selection runs
+**Then** the conservative full-suite fallback still applies (invariant 5 preserved for genuinely unbounded cases).
+
+> Changes documented selection behaviour (step 4 / invariant 5) — reconcile with the architecture spine before implementing (see the story's escalation triggers).
