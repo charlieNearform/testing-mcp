@@ -7,6 +7,7 @@ import {
   stopDaemon,
   getDaemonStatus,
   loadOrCreateConfig,
+  resolveToken,
   readLockfile,
   configPath,
   lockfilePath,
@@ -86,7 +87,46 @@ describe("daemon", () => {
     });
   });
 
+  describe("resolveToken", () => {
+    afterEach(() => {
+      delete process.env.TEST_MCP_TOKEN;
+    });
+
+    it("generates a token and persists it into config.json when absent", () => {
+      const cfg = loadOrCreateConfig();
+      expect(cfg.token).toBeUndefined();
+      const token = resolveToken(cfg);
+      expect(token).toHaveLength(64); // 32 bytes hex
+      const persisted = JSON.parse(fs.readFileSync(configPath(), "utf8")) as { token?: string };
+      expect(persisted.token).toBe(token);
+    });
+
+    it("reuses the persisted token on a subsequent load (stable across restarts)", () => {
+      const first = resolveToken(loadOrCreateConfig());
+      const second = resolveToken(loadOrCreateConfig());
+      expect(second).toBe(first);
+    });
+
+    it("lets TEST_MCP_TOKEN override without persisting it", () => {
+      process.env.TEST_MCP_TOKEN = "override-secret";
+      const cfg = loadOrCreateConfig();
+      expect(resolveToken(cfg)).toBe("override-secret");
+      const persisted = JSON.parse(fs.readFileSync(configPath(), "utf8")) as { token?: string };
+      expect(persisted.token).toBeUndefined(); // env override is not written back
+    });
+  });
+
   describe("startDaemon", () => {
+    it("keeps the same bearer token across restarts", async () => {
+      const first = await start();
+      const token = first.token;
+      await first.close();
+      openHandles.pop();
+      const second = await start();
+      expect(second.token).toBe(token);
+    });
+
+
     it("writes lockfile with correct fields", async () => {
       const handle = await start();
       expect(handle.pid).toBe(process.pid);

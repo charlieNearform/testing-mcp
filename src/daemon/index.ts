@@ -16,6 +16,12 @@ export interface DaemonConfig {
   port: number;
   maxConcurrentWorkers: number;
   workerIdleTtlMs: number;
+  /**
+   * Per-daemon bearer secret for /mcp auth. Stable across restarts (persisted here so MCP
+   * clients can be configured statically). Generated on first start; overridable via
+   * TEST_MCP_TOKEN. Optional in the type for configs written before it existed.
+   */
+  token?: string;
 }
 
 export interface Lockfile {
@@ -104,8 +110,25 @@ export function loadOrCreateConfig(): DaemonConfig {
     workerIdleTtlMs: 300000,
   };
 
-  fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2));
+  fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), { mode: 0o600 });
   return cfg;
+}
+
+/**
+ * Resolve the daemon's bearer token. Precedence: `TEST_MCP_TOKEN` env override →
+ * persisted `config.token` → generate once and persist back to config.json. The token is
+ * stable across restarts (no longer rotates per start) so MCP clients can hard-code it.
+ * The env override is not persisted. Persisted token file is `0600`.
+ */
+export function resolveToken(cfg: DaemonConfig): string {
+  const fromEnv = process.env.TEST_MCP_TOKEN?.trim();
+  if (fromEnv) return fromEnv;
+  if (cfg.token) return cfg.token;
+  const token = crypto.randomBytes(32).toString("hex");
+  cfg.token = token;
+  fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  fs.chmodSync(configPath(), 0o600);
+  return token;
 }
 
 export async function startDaemon(): Promise<DaemonHandle> {
@@ -130,7 +153,7 @@ export async function startDaemon(): Promise<DaemonHandle> {
   }
 
   const cfg = loadOrCreateConfig();
-  const token = crypto.randomBytes(32).toString("hex");
+  const token = resolveToken(cfg);
 
   let registry = new ProjectRegistry(registryPath());
   try {
