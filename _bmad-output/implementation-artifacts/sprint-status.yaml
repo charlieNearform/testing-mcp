@@ -1,5 +1,5 @@
 # generated: 2026-07-13
-# last_updated: 2026-07-15
+# last_updated: 2026-07-16
 # project: test-server-mcp
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-13
-last_updated: 2026-07-15
+last_updated: 2026-07-16
 project: test-server-mcp
 project_key: NOKEY
 tracking_system: file-system
@@ -130,3 +130,16 @@ development_status:
   6-10-combined-incremental-coverage: done                  # dev-auto 2026-07-15 (istanbul-lib-coverage authorized; 4 review patches for number/confidence soundness)
   6-9-optional-crg-impact-analysis: backlog                 # spike DONE 2026-07-16 (spike-6-9-crg-findings-and-proposal.md); build deferred — CLI seam insufficient, viable seams heavier than scoped
   epic-6-retrospective: optional
+
+  # Epic 7: Runner Plugin API (Phase 2, continued) — opened 2026-07-16
+  # Source: brief-test-server-mcp-2026-07-16, docs/prd.md Epic 7 update, architecture-epic-7-runner-plugin-api-2026-07-16
+  # (AD-12–AD-16), implementation-readiness-report-2026-07-16 (READY). Dependency order: 7-1 → 7-2 → {7-3, 7-4} →
+  # 7-5 (no dependency, gates 7-6) → 7-6. All six stories authored ready-for-dev in epics.md; epic-7 in-progress.
+  epic-7: in-progress
+  7-1-runnerplugin-interface-vitest-extraction: ready-for-dev  # story file created 2026-07-16
+  7-2-multi-suite-registry-model: ready-for-dev
+  7-3-per-suite-selection-coverage-scoping: ready-for-dev
+  7-4-per-suite-orchestrator-mcp-surface-scoping: ready-for-dev
+  7-5-spike-jest-embeddable-run-api: ready-for-dev          # no dependency on 7-1..7-4; gates 7-6 only — can run any time, recommend starting early alongside 7-3/7-4
+  7-6-jest-plugin-seam-validation: ready-for-dev            # depends on 7-1, 7-2, 7-5 (spike answer)
+  epic-7-retrospective: optional

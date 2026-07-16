@@ -5,10 +5,10 @@ purpose: requirements-contract
 altitude: feature
 status: final
 created: '2026-07-10'
-updated: '2026-07-10'
+updated: '2026-07-16'
 binds: []
 sources: ['../../../../docs/prd.md']
-companions: ['../../architecture/architecture-test-server-mcp-2026-07-10/ARCHITECTURE-SPINE.md']
+companions: ['../../architecture/architecture-test-server-mcp-2026-07-10/ARCHITECTURE-SPINE.md', '../../architecture/architecture-epic-7-runner-plugin-api-2026-07-16/ARCHITECTURE-SPINE.md']
 ---
 
 # SPEC — test-server-mcp
@@ -44,11 +44,15 @@ wrapped (it's a CLI that owns the run) or rebuilt from scratch.
 | C7 | Runtime project registration | One daemon serves many projects | `register_project`/`list_projects`/`unregister_project`; `test-mcp register` auto-boots the singleton and registers a config-valid project |
 | C8 | Project-local execution | Honour each project's own Vitest | Tests run in a per-project worker subprocess (cwd = project root) resolving `vitest/node` from the project; two projects on different Vitest versions don't clash |
 | C9 | Coverage reverse-map | Map source→test-file for smart selection | Built single-pass from runtime V8 coverage (attribution algorithm vendored from `testpick`, MIT), with setup-baseline subtracted and unmeasurable tests always-run |
+| C10 | Runner plugin interface | Extract Vitest behind a `RunnerPlugin` interface, Vitest as first implementation | `RunnerPlugin` interface (name, detect, capabilities, listTestFiles, run, affectedTests?, readCoverageThresholds?); Vitest extraction is zero-behavior-change (existing test suite passes unmodified) |
+| C11 | Multi-suite registration | Register more than one test surface per project (e.g. unit + e2e), each its own plugin | `RegisteredProject.suites: Record<suiteName, {configPath, plugin}>`; `test-mcp register` auto-detects via each plugin's `detect()`, explicit `--suite` override when it can't resolve |
+| C12 | Per-suite scoping + graded coverage confidence | Selection/coverage/confidence/orchestrator bookkeeping never cross suite boundaries; a suite without coverage is a defined state | `Confidence` gains a third `"unavailable"` level (extends `high`/`degraded`) for a suite whose plugin reports `capabilities.coverage === "none"`; `thresholdsMet` never falsely asserted |
+| C13 | Jest plugin (seam validation) | Prove the `RunnerPlugin` interface holds for a second real runner | Jest plugin implements run/listTestFiles/detect/changedFileDetection at seam-validation scope (not full parity); passes an equivalent hermetic test suite to the Vitest plugin's |
 
 ## Constraints
 
 - **Single daemon per system** over Streamable HTTP (`StreamableHTTPServerTransport`, stateful sessions), enforced by lockfile + known port; optional stdio single-project mode. `@modelcontextprotocol/sdk` v1 (`McpServer`).
-- **Project-local execution**: daemon never imports a project's Vitest; per-project worker subprocess resolves `vitest/node` from the project. Pin Vitest version (target repo 4.1.9).
+- **Project-local execution**: daemon never imports a project's test runner, of any kind (generalized 2026-07-16 from "Vitest" — see Epic 7); per-project worker subprocess resolves the suite's runner from the project via its bound `RunnerPlugin`. Pin Vitest version (target repo 4.1.9) within the Vitest plugin specifically.
 - **State layout**: per-project state (coverage map + history) in git-ignored `<git-root>/.test-mcp/`; daemon-global registry/lockfile central (`~/.test-mcp`), never inside a project. `projectId` = hash of abs path, pinnable.
 - **Coverage engine**: single-pass V8 snapshot-diff mapping; subtract the setup-file baseline (setup-loaded modules are full-suite triggers); any unmeasurable test is always-run. (Spike-validated on a large frontend app.)
 - **Correctness over cleverness**: recall prioritised — whenever selection is uncertain (unknown file, setup-baseline module, unmeasurable test) run the full suite.
@@ -58,7 +62,7 @@ wrapped (it's a CLI that owns the run) or rebuilt from scratch.
 
 ## Non-goals
 
-- Jest / pytest support (future).
+- ~~Jest / pytest support (future).~~ **Jest now in progress (Epic 7, seam-validation scope only — C10-C13); pytest and any other non-JS runner remain future.** A generic shell-command/Docker plugin escape hatch, a universal cross-runner coverage merge format, and function-level selection granularity are also explicitly out of scope for Epic 7.
 - Human web UI (Phase 2); genuine real-time SSE/WebSocket push lives there, not on MCP stdio.
 - Priority scoring + test health monitoring (Phase 2).
 - Fixture/setup-time cost tracking, ordering-dependency detection, parallel resource-contention quotas (deferred, research-grade).

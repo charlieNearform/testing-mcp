@@ -5,6 +5,8 @@ inputDocuments:
   - docs/architecture.md
   - _bmad-output/planning-artifacts/prd/prd-test-server-mcp-2026-07-10/SPEC.md
   - _bmad-output/planning-artifacts/architecture/architecture-test-server-mcp-2026-07-10/ARCHITECTURE-SPINE.md
+  - _bmad-output/planning-artifacts/briefs/brief-test-server-mcp-2026-07-16/brief.md
+  - _bmad-output/planning-artifacts/architecture/architecture-epic-7-runner-plugin-api-2026-07-16/ARCHITECTURE-SPINE.md
 ---
 
 # test-server-mcp - Epic Breakdown
@@ -34,6 +36,10 @@ FR14: Provide watch/incremental mode that re-runs only affected tests on file ch
 FR15: Guarantee per-file clean environment via Vitest built-in isolation (`isolate:true`); surface in run metadata when a project disables isolation.
 FR16: Persist per-project run history and rehydrate the registered-project set on daemon start.
 FR17 (Phase 2): Provide a human web UI over HTTP with real-time push (SSE/WebSocket) for status, manual triggers, and history.
+FR18: Provide a `RunnerPlugin` interface (`name`, `detect`, `capabilities`, `listTestFiles`, `run`, `affectedTests`?, `readCoverageThresholds`?) behind which all runner-specific logic is extracted; Vitest becomes the first implementation with zero behavior change.
+FR19: Support registering one or more named test suites per project, each bound to one `RunnerPlugin` instance; `test-mcp register` auto-detects suites via each plugin's `detect()` with an explicit override for cases auto-detect can't resolve.
+FR20: Scope test selection, the coverage map, combined coverage, confidence, run history, and failure-detail lookup per suite (not just per project); confidence gains a third "unavailable" level for suites whose plugin reports no coverage capability.
+FR21: Provide a Jest `RunnerPlugin` (seam-validation scope) implementing run/listTestFiles/detect and changed-file detection via Jest's own flags, with coverage capability graded, not assumed.
 
 ### NonFunctional Requirements
 
@@ -45,6 +51,8 @@ NFR5: State transparency & durability — per-project state git-ignored in `<git
 NFR6: macOS first (Phase 1); Linux/Windows in Phase 2.
 NFR7: Minimal overhead added to a project's test runs.
 NFR8: Reverse coverage map buildable within one full instrumented (single-pass) run; naive per-file measurement (~6× slower, per spike) is out.
+NFR9: Runner plugin isolation — the daemon process never imports a project's test runner directly, of any kind (generalizes NFR4); only the owning plugin module resolves the runner package.
+NFR10: No coverage capability is a defined, reportable state, not an error — the daemon must never assert a confidence level or threshold verdict a plugin's declared capability can't back.
 
 ### Additional Requirements
 
@@ -54,6 +62,8 @@ NFR8: Reverse coverage map buildable within one full instrumented (single-pass) 
 - Per-project workers via `child_process.fork`; daemon↔worker over IPC.
 - Standardized error envelope `{code, message, details?}`; UUID v4 for IDs except `projectId` (path hash).
 - Coverage engine is single-pass (serial snapshot-diff), validated by `docs/coverage-spike-findings.md` against a large frontend app. The attribution algorithm is ported/vendored from `testpick` (MIT) into the worker; retain its license notice. Differentiator is the daemon/isolation delivery, not coverage selection (table-stakes).
+- Jest's embeddable run API is an open engineering question (`runCLI` from `@jest/core` vs. plain `jest`'s exiting `run()`) — Story 7.5 spikes this before Story 7.6 writes `run()`; escalate per this repo's dependency-authorization rule if `@jest/core` isn't reliably resolvable.
+- `istanbul-lib-coverage` (already pinned, Story 6.10) covers Jest's coverage parsing too — no new runtime dependency needed for Story 7.6's coverage capability.
 
 ### UX Design Requirements
 
@@ -78,8 +88,12 @@ FR14: Epic 3 — watch/incremental mode
 FR15: Epic 2 — Vitest built-in isolation + metadata
 FR16: Epic 1 — per-project history + rehydrate on start
 FR17: Epic 5 (Phase 2) — human web UI with real-time push
+FR18: Epic 7 — RunnerPlugin interface + Vitest extraction (zero behavior change)
+FR19: Epic 7 — multi-suite registry model
+FR20: Epic 7 — per-suite selection/coverage/confidence/orchestrator/MCP scoping
+FR21: Epic 7 — Jest plugin (seam validation)
 
-NFR coverage: NFR3/NFR5/NFR6 → Epic 1; NFR4/NFR7 → Epic 2; NFR2/NFR8 → Epic 3; NFR1 → Epic 4.
+NFR coverage: NFR3/NFR5/NFR6 → Epic 1; NFR4/NFR7 → Epic 2; NFR2/NFR8 → Epic 3; NFR1 → Epic 4; NFR9/NFR10 → Epic 7.
 
 Performance NFR acceptance criteria: NFR1 → Story 4.1 (dry-run plan <5s target) and Story 3.6 (incremental single-file run <15s, aspirational per PRD Success Metrics); NFR7 → Story 2.1 (worker/daemon overhead surfaced in run metadata; monitored, not hard-gated).
 
@@ -108,6 +122,10 @@ A convenience web UI over the daemon for human developers — visual status, man
 ### Epic 6: Post-v1 Enhancements — Onboarding, Hardening & Observability (Phase 2)
 Enhancements shipped after the v1 epics closed: smoother agent/human onboarding (CLI config helpers, PATH linking, stable configurable auth), a hardening pass from an adversarial code review, and richer run observability (run history + a drill-down UI). **Story 6.0** is a retrospective as-built record of work that was implemented directly on `main` outside the BMAD cycle; stories 6.1+ resume the normal story → dev → review flow for new observability work.
 **FRs covered:** extends FR17; hardening of FR1–FR16 (no new PRD FRs — post-v1 usability/quality)
+
+### Epic 7: Runner Plugin API (Phase 2, continued)
+Extract the daemon's hardcoded Vitest integration behind a `RunnerPlugin` interface (fulfilling architecture AD-2's deferred adapter model), add multi-suite-per-project registration, scope selection/coverage/confidence/orchestrator bookkeeping per suite, and add Jest as a second plugin scoped to validating the seam (not full parity). Authoritative invariants: `_bmad-output/planning-artifacts/architecture/architecture-epic-7-runner-plugin-api-2026-07-16/ARCHITECTURE-SPINE.md` (AD-12–AD-16). Source brief: `_bmad-output/planning-artifacts/briefs/brief-test-server-mcp-2026-07-16/brief.md`.
+**FRs covered:** FR18, FR19, FR20, FR21 (NFR9, NFR10)
 
 ## Epic 1: Core Daemon & Project Registration (Phase 1)
 
@@ -778,3 +796,141 @@ So that an incremental run can report/enforce whole-project coverage without re-
 **Then** the threshold verdict is reported together with confidence, so "100% met" is only asserted at high confidence.
 
 > Depends on 6.3 (coverage report), 6.7 (snapshot/change model), 6.8 (confidence). Extends the coverage map to store coverage *data*, not just the reverse mapping.
+
+## Epic 7: Runner Plugin API (Phase 2, continued)
+
+### Story 7.1: RunnerPlugin Interface & Vitest Extraction (Zero Behavior Change)
+
+As a maintainer extending test-mcp to new runners,
+I want the current Vitest-specific worker logic extracted behind a `RunnerPlugin` interface,
+So that Vitest becomes the first of several possible runners instead of a hardcoded assumption.
+
+**Acceptance Criteria:**
+
+**Given** the current `worker/index.ts` (`runVitest`, `measureCoverage`, `discoverTestFiles`, `readCoverageThresholds`, both `projectRequire("vitest/node")` sites)
+**When** the extraction is complete
+**Then** all of it moves into `src/runners/vitest/` behind the `RunnerPlugin` interface (AD-12), and `worker/index.ts` no longer calls `projectRequire("vitest/node")` itself — it dispatches through the plugin.
+
+**Given** the existing test suite (all `test/*.test.ts` files covering worker/coverage/selection behavior)
+**When** it runs against the extracted code
+**Then** it passes unmodified — same options, same reporter callbacks, same `coverage-final.json` handling, no behavior or output change (AD-13's acceptance bar).
+
+**Given** a plugin call (`run`/`listTestFiles`/`affectedTests`/`readCoverageThresholds`)
+**When** it is invoked
+**Then** it receives the suite's `configPath` explicitly (not cwd-based auto-discovery) — even though only one suite/config exists until Story 7.2 lands.
+
+> Architecture: AD-12, AD-13 (`architecture-epic-7-runner-plugin-api-2026-07-16/ARCHITECTURE-SPINE.md`). Ships before multi-suite registration (7.2) — a single implicit suite is threaded through in the interim.
+
+### Story 7.2: Multi-Suite Registry Model
+
+As a developer whose project runs more than one kind of test (e.g. Vitest unit + Playwright/Jest e2e),
+I want to register each as its own named suite bound to its own plugin,
+So that test-mcp can select, run, and report on each independently instead of assuming one runner per project.
+
+**Acceptance Criteria:**
+
+**Given** a project with one or more plugin config markers present
+**When** `test-mcp register` runs
+**Then** it auto-detects suites via each installed plugin's `detect()` (fixed precedence order, first match wins) and populates `RegisteredProject.suites: Record<suiteName, {configPath, plugin}>`.
+
+**Given** auto-detect can't resolve a suite (ambiguous or no match)
+**When** the developer supplies an explicit `--suite name:plugin:configPath`
+**Then** it upserts exactly that named suite without clearing or replacing any other registered suite.
+
+**Given** two auto-detected suites would produce the same name
+**When** registration runs
+**Then** the collision is resolved by suffixing the plugin name (e.g. `unit-vitest`, `unit-jest`) rather than silently overwriting one.
+
+**Given** an already-registered single-suite project (pre-Epic-7)
+**When** it is next registered or the daemon starts
+**Then** its existing `configPath` is auto-migrated into one suite entry (named from the detected plugin) with `projectId` unchanged — no re-registration required, no data loss.
+
+> Architecture: AD-14. Depends on Story 7.1 (needs `RunnerPlugin.detect()`/`name` to exist).
+
+### Story 7.3: Per-Suite Selection & Coverage Scoping
+
+As an agent running tests against a multi-suite project,
+I want test selection, the coverage map, and confidence to be scoped per suite,
+So that one suite's changed-file or coverage data is never attributed to a different suite's tests.
+
+**Acceptance Criteria:**
+
+**Given** a project with more than one registered suite
+**When** a run is planned or coverage is measured for one suite
+**Then** `SelectionEngine.plan`, `CoverageMapFile`, `CoverageDataFile`, and `CombinedCoverage` are all keyed by `(projectId, suiteName)` and never merged across suites.
+
+**Given** a suite whose bound plugin declares `capabilities.coverage === "none"`
+**When** its combined coverage report is produced
+**Then** `Confidence` reports the new `"unavailable"` level (extending the existing `high`/`degraded` union) and `thresholdsMet` stays `undefined` — never a false threshold verdict, using the same gating pattern already proven for the `degraded` case.
+
+**Given** a suite whose plugin reports `"summary"` or `"line-hit"` coverage
+**When** it is measured
+**Then** existing high/degraded confidence behavior (Story 6.8/6.10) is unchanged for that suite.
+
+> Architecture: AD-15 (selection/coverage/confidence portion). Depends on Story 7.2 (suites must exist to scope by).
+
+### Story 7.4: Per-Suite Orchestrator & MCP Surface Scoping
+
+As an agent calling `run_tests`/`get_test_status`/`get_failure_details` on a multi-suite project,
+I want to address a specific suite and get back only that suite's state,
+So that two suites of one project never clobber each other's run status, history, or failure detail.
+
+**Acceptance Criteria:**
+
+**Given** `run_tests`'s existing (currently unwired) `suite` parameter
+**When** it is supplied
+**Then** the orchestrator resolves and runs against that named suite specifically; omitting it falls back to a single default suite (or errors clearly if more than one suite exists and none is specified).
+
+**Given** the orchestrator's `runState`/`lastFailures`/history bookkeeping (today keyed by bare `projectId`)
+**When** a run completes for a given suite
+**Then** that bookkeeping is keyed by `(projectId, suiteName)`, so `get_test_status` and `get_failure_details` return the correct suite's state, not whichever suite ran most recently.
+
+**Given** the dry-run plan cache (`TestPlan`/`ProjectRef`)
+**When** a plan is created and later committed
+**Then** the plan is suite-scoped too — committing a `planId` against the wrong suite is rejected, not silently run.
+
+> Architecture: AD-15 (orchestrator/MCP portion). Depends on Story 7.2 and pairs with Story 7.3.
+
+### Story 7.5: Spike — Jest Embeddable Run API
+
+As the developer building the Jest plugin,
+I want to confirm which Jest API can run tests programmatically without exiting the worker process,
+So that Story 7.6 is built on a confirmed mechanism instead of an assumption.
+
+**Acceptance Criteria:**
+
+**Given** the plain `jest` package's `run()` calls `process.exit()` on completion
+**When** the spike investigates
+**Then** it confirms whether `runCLI` from `@jest/core` is reliably resolvable via `projectRequire` from a project that declares only `jest` (not `@jest/core` directly), including under pnpm's strict resolution.
+
+**Given** the spike's finding
+**When** it completes
+**Then** it reports either a confirmed embedding approach (unblocking Story 7.6) or an escalation (per this repo's dependency-authorization rule) if `@jest/core` isn't reliably resolvable — no product code is written speculatively ahead of this answer.
+
+> Architecture: AD-16's open question. Blocks Story 7.6; can run any time (no dependency on 7.1–7.4).
+
+### Story 7.6: Jest Plugin (Seam Validation)
+
+As a maintainer validating the `RunnerPlugin` interface holds for a second real runner,
+I want a Jest plugin implementing the interface at seam-validation scope,
+So that the abstraction — not just Vitest's occupancy of it — is proven sound.
+
+**Acceptance Criteria:**
+
+**Given** Story 7.5's confirmed embedding approach
+**When** the Jest plugin's `run()` executes
+**Then** it runs the requested test files and maps results into the same `TestResult` shape the Vitest plugin produces, without exiting the worker process.
+
+**Given** a changed-file set
+**When** `affectedTests`/`changedFileDetection` is exercised
+**Then** it uses Jest's real `--onlyChanged`/`-o` or `--changedSince <ref>` flags — not a fabricated flag.
+
+**Given** Jest's `coverageReporters` output (`coverage-final.json`)
+**When** coverage is requested and can be parsed with the already-pinned `istanbul-lib-coverage`
+**Then** `capabilities.coverage` reports `"summary"`; otherwise it honestly reports `"none"` — no new runtime dependency either way.
+
+**Given** a hermetic fixture Jest project (mirroring the Vitest plugin's own test pattern)
+**When** the Jest plugin's test suite runs
+**Then** it passes to the same rigor as the Vitest plugin's tests — proving the interface, not matching Vitest's feature surface (no per-test-file coverage map, no static-graph `affectedTests` parity required).
+
+> Architecture: AD-16. Depends on Story 7.1 (interface), Story 7.2 (registry model), Story 7.5 (spike answer).

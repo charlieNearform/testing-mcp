@@ -7,7 +7,7 @@ paradigm: 'singleton-daemon + per-project worker subprocess'
 scope: 'test-server-mcp'
 status: final
 created: '2026-07-10'
-updated: '2026-07-10'
+updated: '2026-07-16'
 binds: []
 sources: ['../../../../docs/architecture.md']
 companions: ['../../prd/prd-test-server-mcp-2026-07-10/SPEC.md']
@@ -88,7 +88,7 @@ graph TB
 
 ### AD-7 — Project-Local Execution
 - **Binds:** all test execution · **Prevents:** daemon deps contaminating results / cross-project version skew
-- **Rule:** every run happens in a forked per-project worker (cwd = project root) resolving `vitest/node` from the project's `node_modules`; the daemon never imports a project's Vitest.
+- **Rule:** every run happens in a forked per-project worker (cwd = project root) resolving the runner from the project's own `node_modules`; the daemon never imports a project's test runner, of any kind. *(Wording generalized 2026-07-16 by the Epic 7 spine — from "the project's Vitest" to "the project's test runner, of any kind" — fulfilling AD-2's already-stated adapter intent, not weakening it. See `../architecture-epic-7-runner-plugin-api-2026-07-16/ARCHITECTURE-SPINE.md`.)*
 
 ### AD-8 — State Topology
 - **Binds:** all persistence · **Prevents:** black-box central state / project pollution
@@ -156,7 +156,10 @@ package.json
 ## Deferred
 
 - Human web UI + real-time SSE/WebSocket push — Phase 2 (AD-1 keeps it behind MCP).
-- Jest/pytest adapters — future (AD-2 leaves room).
+- ~~Jest/pytest adapters — future (AD-2 leaves room).~~ **In progress as of 2026-07-16**: the
+  `RunnerPlugin` interface + Vitest extraction + Jest (seam-validation scope only) are now
+  Epic 7 — see `../architecture-epic-7-runner-plugin-api-2026-07-16/ARCHITECTURE-SPINE.md`.
+  Full Jest parity and pytest remain deferred, still covered by AD-2.
 - Priority scoring, test-health monitoring — Phase 2.
 - Fixture/setup-time cost tracking, ordering-dependency detection, resource-contention quotas — research-grade, deferred.
 - Cross-platform beyond macOS; distributed caching; detailed error-recovery taxonomy.

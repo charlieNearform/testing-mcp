@@ -58,7 +58,9 @@ not our differentiator**:
    one process coordinates runs across projects and parallel agents.
 2. **Project-local execution / version isolation** — each project runs under its *own*
    installed Vitest version in an isolated worker; a monorepo or a machine with mismatched
-   versions doesn't break.
+   versions doesn't break. (Epic 7 generalizes this from "project-local Vitest" to
+   "project-local test runner plugin" — the same isolation invariant, one runner assumption
+   removed.)
 3. **Transparent, repo-local state** in a git-ignored `.test-mcp/` you can read and diff —
    not a hidden database.
 4. **Setup-baseline subtraction as first-class correctness** — real suites with a global
@@ -140,6 +142,30 @@ A simple web interface built on top of the MCP server for human developers to mo
 
 **Relationship:** The UI is purely convenience - all functionality is available through the MCP. The UI cannot function without the MCP backend. Human developers benefit indirectly when AI agents use the system effectively.
 
+### Runner Plugin API (Epic 7)
+
+Everything above describes execution as "project-local Vitest." Epic 7 extracts that behind
+a `RunnerPlugin` interface — Vitest becomes the first implementation, extracted with **zero
+behavior change**. Jest becomes a second, added specifically to validate that the
+interface — not just Vitest's occupancy of it — holds. See
+`_bmad-output/planning-artifacts/briefs/brief-test-server-mcp-2026-07-16/brief.md` for the
+full brief and `addendum.md` for prior-art grounding (Jest's own `testRunner` swap-point is
+the closest existing analogue).
+
+Alongside the plugin seam, project registration gains **multi-suite support**: a project
+registers one or more named suites (e.g. `unit` → Vitest, `e2e` → Playwright), each bound to
+its own plugin instance. `test-mcp register` auto-detects the binding, with an explicit
+override when detection can't resolve it. Coverage becomes a graded, optional per-plugin
+capability (`none` / `summary` / `line-hit`) rather than an assumption — a plugin that can't
+produce coverage is a defined state, not an undefined one.
+
+**Deliberately out of this epic:** pytest, `go test`, or any other non-JS runner; a generic
+shell-command/Docker plugin escape hatch (a likely on-ramp for non-JS ecosystems, but
+scoped as its own later discovery task given container-lifecycle/cold-start-latency
+costs); a universal cross-runner coverage merge format; function-level test selection (an
+unrelated gap raised in the same discussion — tracked separately, and may stay permanently
+out of scope since few runner plugins could support that granularity anyway).
+
 ---
 
 ## Phasing
@@ -160,14 +186,24 @@ intent are aligned to it.
 - Test isolation verified via Vitest's built-in isolation
 
 **Phase 2:** Priority scoring (git recency + failure history), test health monitoring,
-and the Human Monitoring UI (Epic 5).
+the Human Monitoring UI (Epic 5), and post-v1 onboarding/hardening/observability
+(Epic 6 — selection confidence, combined incremental coverage, run history, done as of
+2026-07-16).
 
-**Phase 3 / deferred:** Jest & pytest support, priority-based sharding, IDE
-integration, trend analytics, suggested fixes, dependency-graph visualization,
-fixture/setup-time cost tracking, ordering-dependency detection, and parallel
-resource-contention quotas. (The last three were raised in brainstorming as
-"must-haves" but are research-grade features; they are explicitly deferred until the
-core selection engine is proven.)
+**Phase 2, continued — Epic 7 (Runner Plugin API):** "Jest & pytest support" was originally
+a single Phase-3-deferred line, gated on 'the core selection engine being proven.' That gate
+is satisfied — Epic 3 (selection engine) and Epic 6's hardening (confidence signal, combined
+coverage) are done. This reconciliation **splits** that line rather than pulling it forward
+wholesale: the *architectural* work (see the Runner Plugin API subsection above) moves
+forward now (Epic 7). Full Jest feature parity, pytest, and any other non-JS runner remain
+deferred to Phase 3, now unblocked by Epic 7's seam rather than gated on an unproven engine.
+
+**Phase 3 / deferred:** Full Jest parity, pytest support, a generic shell-command/Docker plugin
+for non-JS ecosystems, priority-based sharding, IDE integration, trend analytics, suggested
+fixes, dependency-graph visualization, fixture/setup-time cost tracking, ordering-dependency
+detection, and parallel resource-contention quotas. (The last three were raised in
+brainstorming as "must-haves" but are research-grade features; they remain explicitly
+deferred.)
 
 ---
 
@@ -493,14 +529,16 @@ Implement live test result streaming.
 
 1. **Node.js + TypeScript**: Primary implementation language
 2. **MCP SDK**: Use the official `@modelcontextprotocol/sdk` (v1 stable) — `McpServer` + `registerTool` from `.../server/mcp.js`, `StdioServerTransport` from `.../server/stdio.js`. (v2 `@modelcontextprotocol/server` is beta; opt in deliberately if adopted.)
-3. **Vitest API**: Use the `vitest/node` programmatic API (`startVitest` / `createVitest`), never CLI output parsing. Pin the Vitest version — the advanced API signature differs between 3.x and 4.x, and `runTestFiles` requires 4.1+.
+3. **Vitest API**: Use the `vitest/node` programmatic API (`startVitest` / `createVitest`), never CLI output parsing. Pin the Vitest version — the advanced API signature differs between 3.x and 4.x, and `runTestFiles` requires 4.1+. (Epic 7: this constraint becomes the Vitest `RunnerPlugin`'s implementation detail, not a daemon-wide assumption — the daemon itself talks to the `RunnerPlugin` interface, never to `vitest/node` directly.)
 4. **Platform**: macOS first (Phase 1); Linux and Windows added in Phase 2.
 5. **Transport**: Streamable HTTP daemon (`StreamableHTTPServerTransport`, stateful sessions) in Phase 1, with an optional stdio single-project mode; the Phase 2 UI adds its own SSE/WebSocket push channel on top of the daemon's HTTP layer.
 6. **Singleton daemon**: One instance per system, enforced via lockfile + known port in the central dir; `test-mcp register` auto-boots it locally (skippable in CI via `--no-spawn`).
-7. **Execution isolation**: Tests run in per-project worker subprocesses (CWD = project root) using project-local `vitest`; the daemon process never imports a project's Vitest.
-8. **State layout**: Per-project state in `<git-root>/.test-mcp/` (configurable, git-ignored on init) holding `config.json` (`projectId`, `stateDir`), coverage map, and history; daemon-global registry/pid/lockfile in a central dir (e.g. `~/.test-mcp/`), never inside a project.
-9. **Performance**: Add minimal overhead to test runs.
-10. **Third-party attribution**: the coverage-attribution logic is vendored from `testpick`
+7. **Execution isolation**: Tests run in per-project worker subprocesses (CWD = project root) using project-local `vitest`; the daemon process never imports a project's Vitest. (Epic 7: the invariant generalizes to "the daemon process never imports a project's *runner*, of any kind" — the worker resolves whichever `RunnerPlugin` a suite is registered against.)
+8. **Runner plugin capability grading** (Epic 7): a `RunnerPlugin` declares `coverage: "none" | "summary" | "line-hit"`. The daemon must never assert a confidence level or threshold verdict that a plugin's declared capability can't back — "no coverage" is a defined, reportable state, not an error or a silently-degraded one.
+9. **Multi-suite registration** (Epic 7): a registered project holds one or more named suites, each bound to exactly one `RunnerPlugin` instance; selection, run history, and coverage are scoped per suite, not just per project.
+10. **State layout**: Per-project state in `<git-root>/.test-mcp/` (configurable, git-ignored on init) holding `config.json` (`projectId`, `stateDir`), coverage map, and history; daemon-global registry/pid/lockfile in a central dir (e.g. `~/.test-mcp/`), never inside a project.
+11. **Performance**: Add minimal overhead to test runs.
+12. **Third-party attribution**: the coverage-attribution logic is vendored from `testpick`
     (MIT). Retain its copyright + MIT license text (e.g. a `NOTICE`/`THIRD_PARTY_LICENSES`
     file and a header on the vendored module). Track upstream for fixes.
 
@@ -553,6 +591,10 @@ during implementation:
 - Selection footprint (after setup-baseline subtraction) materially below full-suite — spike measured ~6% of suite for unit-file changes and ~18% for integration-file changes on the target repo; exact ratio is project- and change-dependent
 - Reverse coverage map covering the large majority of suites within one full run (target 95%+)
 - Teams replacing their existing test-running setup over time (target 80%+ within 6 months)
+- **Epic 7 (Runner Plugin API):**
+  - Zero behavior/output regression for existing Vitest-only registered projects after the `RunnerPlugin` extraction
+  - The Jest plugin passes a hermetic test suite equivalent to Vitest's, validating the interface itself rather than just its first occupant
+  - A two-suite project (e.g. Vitest unit + Playwright e2e) registers and runs both independently through existing MCP tools
 
 > Note on "zero false negatives": guaranteeing 100% recall *and* aggressive skipping is
 > not achievable in the general case (a coverage map cannot see a not-yet-executed
