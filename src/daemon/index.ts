@@ -247,7 +247,14 @@ export async function startDaemon(): Promise<DaemonHandle> {
   fs.chmodSync(lockfilePath(), 0o600);
 
   const close = async () => {
-    await new Promise<void>((r) => server.close(() => r()));
+    watchManager.stopAll();
+    // server.close() only resolves once every open connection ends. A connected MCP
+    // client's session GET (used for server push) stays open indefinitely, so without
+    // forcing it closed, shutdown would hang until the client disconnects on its own.
+    await new Promise<void>((r) => {
+      server.close(() => r());
+      server.closeAllConnections();
+    });
     const cur = readLockfile();
     if (cur && cur.pid === process.pid) {
       fs.rmSync(lockfilePath(), { force: true });

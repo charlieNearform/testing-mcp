@@ -167,4 +167,25 @@ describe("secured MCP HTTP transport", () => {
     );
     await client.close();
   });
+
+  it("close() resolves promptly even with a connected client session left open", async () => {
+    handle = await startDaemon();
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${handle.port}/mcp`),
+      { requestInit: { headers: { Authorization: `Bearer ${handle.token}` } } },
+    );
+    const client = new Client({ name: "e2e", version: "0.0.0" });
+    await client.connect(transport);
+    // Intentionally do NOT call client.close() — its session's long-lived GET stream
+    // stays open, which previously made server.close() (and thus daemon shutdown) hang
+    // forever waiting for that connection to end on its own.
+    const closed = handle.close();
+    const timedOut = Symbol("timed out");
+    const result = await Promise.race([
+      closed.then(() => "closed" as const),
+      new Promise((r) => setTimeout(() => r(timedOut), 2000)),
+    ]);
+    expect(result).toBe("closed");
+    handle = undefined; // already closed above; afterEach must not close it again
+  });
 });
