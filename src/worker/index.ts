@@ -240,7 +240,14 @@ function buildSummary(
   failures: TestResult["failures"],
 ): string {
   if (total === 0) return `no tests run (${wallClockMs}ms)`;
-  const counts = `${passed}/${total} passed, ${failed} failed, ${skipped} skipped (${wallClockMs}ms)`;
+  // Denominator is EXECUTED tests only (passed+failed) — skipped tests must never be folded into
+  // the ratio (they're stated separately here, right after it) or a run with skips reads as a
+  // worse pass rate than what actually executed.
+  const executed = passed + failed;
+  // Every selected test was skipped: passed/0 would read as an ambiguous, vacuous "0/0 passed"
+  // instead of communicating that nothing actually ran.
+  if (executed === 0) return `all ${skipped} skipped, none executed (${wallClockMs}ms)`;
+  const counts = `${passed}/${executed} passed, ${failed} failed, ${skipped} skipped (${wallClockMs}ms)`;
   if (failed === 0) return counts;
   const names = failures.slice(0, 3).map((f) => f.name);
   const more = failures.length > 3 ? ` +${failures.length - 3} more` : "";

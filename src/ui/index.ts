@@ -31,19 +31,9 @@ interface ProjectView {
     total?: number;
     passed?: number;
     failed?: number;
+    skipped?: number;
     updatedAt?: string;
   };
-}
-
-/** Distinct (file, test name) pairs across a project's retained history — bounded by the same in-memory/disk cap as history itself. */
-function uniqueTestTotal(history: RunRecord[]): number {
-  const seen = new Set<string>();
-  for (const rec of history) {
-    for (const t of rec.result?.tests ?? []) {
-      seen.add(t.file + " " + t.name);
-    }
-  }
-  return seen.size;
 }
 
 /** Compact run summary for the history list (heavy fields dropped). */
@@ -82,7 +72,7 @@ export async function uiSnapshot(deps: UiDeps): Promise<{ serverTime: string; pr
         path: p.path,
         registryStatus: p.status,
         runCount: history.length,
-        totalTests: uniqueTestTotal(history),
+        totalTests: deps.orchestrator?.getTestInventoryCount(p.projectId) ?? 0,
         runs: history.map(runSummary),
         run: {
           state: run.state,
@@ -92,6 +82,7 @@ export async function uiSnapshot(deps: UiDeps): Promise<{ serverTime: string; pr
           total: r?.total,
           passed: r?.passed,
           failed: r?.failed,
+          skipped: r?.skipped,
           updatedAt: run.updatedAt,
         },
       };
@@ -242,6 +233,7 @@ const UI_HTML = `<!doctype html>
   .kv { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
   .kv .k { color:var(--muted); font-size:11px; } .kv .v { font-size:15px; margin-top:2px; }
   .section-title { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; margin:22px 0 8px; }
+  details > summary { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; margin:22px 0 8px; cursor:pointer; }
   ul.files { list-style:none; padding:0; margin:8px 0; }
   ul.files li { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; padding:3px 0; }
   .fail-item { background:var(--card); border:1px solid var(--border); border-left:3px solid var(--fail); border-radius:6px; padding:10px 12px; margin:8px 0; }
@@ -276,10 +268,17 @@ const projectLine = (root) => root ? '<div class="path">Project: ' + esc(root) +
 
 // A single pass/total figure, colored red only when there's an actual failure to flag (0 failures
 // is green, never red) — replaces a separate pass/fail/total trio that showed red even at 0 fails.
+// The denominator is EXECUTED tests (passed+failed) so skips can't dilute the ratio; a skip count
+// is called out separately alongside it instead of being folded into "total".
 function passTotal(r) {
   if (r.total == null) return "";
+  const executed = (r.passed || 0) + (r.failed || 0);
+  // Every selected test was skipped: passed/0 would read as an ambiguous, vacuous "0/0 passed"
+  // in green instead of communicating that nothing actually ran.
+  if (executed === 0) return '<span class="skip">' + (r.skipped || 0) + ' skipped, none executed</span>';
   const cls = (r.failed || 0) > 0 ? "fail" : "ok";
-  return '<span class="' + cls + '"><b>' + (r.passed || 0) + '</b>/<b>' + r.total + '</b> passed</span>';
+  const skippedNote = r.skipped ? ' <span class="skip">(' + r.skipped + ' skipped)</span>' : "";
+  return '<span class="' + cls + '"><b>' + (r.passed || 0) + '</b>/<b>' + executed + '</b> passed</span>' + skippedNote;
 }
 
 function card(p) {
@@ -331,7 +330,7 @@ function renderProject(pid) {
     + '<td>' + (r.total != null ? passTotal(r) : "–") + '</td>'
     + '<td>' + (r.coverageLines != null ? (Math.round(r.coverageLines * 10) / 10) + '%' : "–") + '</td>'
     + '<td>' + fmtDur(r.durationMs) + '</td></tr>').join("");
-  app.innerHTML = head + banner + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / total</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  app.innerHTML = head + banner + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / executed</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
   app.querySelectorAll("tr.row").forEach((el) => {
     el.addEventListener("click", () => go("/project/" + encodeURIComponent(pid) + "/run/" + encodeURIComponent(el.getAttribute("data-run"))));
   });
@@ -350,7 +349,7 @@ async function renderRun(pid, runId) {
   const kv = (k, v) => '<div class="kv"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
   const grid = '<div class="detail-grid">'
     + kv("status", badge(rec.status))
-    + kv("pass / total", res.total != null ? passTotal(res) : "–")
+    + kv("pass / executed", res.total != null ? passTotal(res) : "–")
     + kv("duration", fmtDur(rec.durationMs)) + '</div>';
   const files = (sel.files && sel.files.length)
     ? '<ul class="files">' + sel.files.map((f) => '<li>' + esc(relPath(f, root)) + '</li>').join("") + '</ul>'
@@ -370,11 +369,14 @@ async function renderRun(pid, runId) {
   // their message/stack in the dedicated section below.
   const allTests = res.tests || [];
   const testStatusClass = (s) => (s === "passed" ? "ok" : s === "failed" ? "fail" : "skip");
+  // Collapsed by default (no "open" attribute) — the tests list can be long and failures (below)
+  // already surface what needs attention first.
   const testsBlock = !allTests.length ? "" :
-    '<div class="section-title">tests (' + allTests.length + (res.testsTruncated ? "+, truncated" : "") + ')</div>'
+    '<details><summary>tests (' + allTests.length + (res.testsTruncated ? "+, truncated" : "") + ')</summary>'
     + '<ul class="tests">' + allTests.map((t) =>
         '<li><span class="' + testStatusClass(t.status) + '">' + esc(t.status) + '</span> '
-        + esc(t.name) + ' <span class="loc">' + esc(relPath(t.file, root)) + '</span></li>').join("") + '</ul>';
+        + esc(t.name) + ' <span class="loc">' + esc(relPath(t.file, root)) + '</span></li>').join("") + '</ul>'
+    + '</details>';
   // Coverage report (Story 6.10): a COMBINED whole-project picture (union of each test file's
   // latest measurement) with its own confidence — degraded when a changed source is unmeasured —
   // and per-file fresh/stale tags.
@@ -428,15 +430,18 @@ async function renderRun(pid, runId) {
         + (f.message ? '<pre>' + esc(f.message) + '</pre>' : "")
         + (f.stack ? '<pre>' + esc(f.stack) + '</pre>' : "") + '</div>').join("")
     : (rec.status === "error" ? '<div class="section-title">error</div><pre>' + esc(rec.error || "") + '</pre>' : "");
+  // Failures render right after the status grid — the thing you came to look at — ahead of
+  // confidence/coverage. Selection and Tests are collapsed by default (both can be long, and
+  // are lower-signal than failures/confidence/coverage at a glance).
   app.innerHTML = back
     + '<h2 class="mono">run ' + esc(String(runId).slice(0, 8)) + '…</h2>'
     + '<div class="ts">' + fmtTime(rec.startedAt) + ' · ' + esc(sel.reason || "") + '</div>'
     + grid
-    + '<div class="section-title">selection (' + esc(sel.strategy || "?") + ')</div>' + files
+    + fails
     + confBlock
     + covBlock
-    + testsBlock
-    + fails;
+    + '<details><summary>selection (' + esc(sel.strategy || "?") + ')</summary>' + files + '</details>'
+    + testsBlock;
 }
 
 function render() {

@@ -197,11 +197,13 @@ export async function startDaemon(): Promise<DaemonHandle> {
     );
   }
   const orchestrator = new Orchestrator({ maxConcurrentWorkers: cfg.maxConcurrentWorkers });
-  // Rehydrate each registered project's run history from disk (Story 6.2) so past runs survive
-  // a restart. Best-effort — a rehydration problem must never abort daemon startup.
+  // Rehydrate each registered project's run history and test inventory from disk (Story 6.2;
+  // test-count-accuracy fix) so past runs and the "total tests" figure survive a restart.
+  // Best-effort — a rehydration problem must never abort daemon startup.
   try {
     for (const p of await registry.list()) {
       orchestrator.loadHistory(p.projectId, p.path);
+      orchestrator.loadTestInventory(p.projectId, p.path);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

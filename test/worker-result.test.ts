@@ -56,6 +56,9 @@ describe("mapModulesToResult per-test detail (Story 6.1)", () => {
     expect(result.passed).toBe(1);
     expect(result.skipped).toBe(1);
     expect(result.failed).toBe(2);
+    // Test-count-accuracy fix: the ratio's denominator is executed tests (passed+failed=3), not
+    // total (4) — skipped is stated separately, never folded into the ratio.
+    expect(result.summary).toContain("1/3 passed, 2 failed, 1 skipped");
   });
 
   it("caps the tests list and flags testsTruncated for a very large suite", () => {
@@ -109,5 +112,57 @@ describe("mapModulesToResult per-test detail (Story 6.1)", () => {
     expect(result.tests).toEqual([
       { name: "(module load error)", file: "/proj/broken.test.ts", status: "failed" },
     ]);
+  });
+});
+
+/**
+ * Test-count-accuracy fix — `buildSummary`'s ratio must exclude skipped tests from the
+ * denominator (they're stated separately) so a run with skips still reads as a clean pass rate.
+ */
+describe("buildSummary excludes skipped from the pass ratio", () => {
+  it("reports passed/executed (not passed/total) when there are skips and no failures", () => {
+    const cases = [
+      ...Array.from({ length: 5 }, (_, i) => fakeCase(`p${i}`, `passes ${i}`, "/proj/a.test.ts", "passed")),
+      ...Array.from({ length: 2 }, (_, i) => fakeCase(`s${i}`, `skips ${i}`, "/proj/a.test.ts", "skipped")),
+    ];
+    const result = mapModulesToResult(
+      [fakeModule("/proj/a.test.ts", cases)],
+      [],
+      50,
+      { strategy: "full", reason: "full suite" },
+      true,
+    );
+    expect(result.passed).toBe(5);
+    expect(result.failed).toBe(0);
+    expect(result.skipped).toBe(2);
+    expect(result.total).toBe(7); // total is untouched — still passed+failed+skipped
+    // The ratio itself must read 5/5 (executed only), with the 2 skips stated separately.
+    expect(result.summary).toBe("5/5 passed, 0 failed, 2 skipped (50ms)");
+  });
+
+  it("reports \"no tests run\" unaffected when nothing executed at all", () => {
+    const result = mapModulesToResult([fakeModule("/proj/empty.test.ts", [])], [], 5, {
+      strategy: "full",
+      reason: "full suite",
+    }, true);
+    expect(result.summary).toBe("no tests run (5ms)");
+  });
+
+  it("reports a clear 'all skipped, none executed' message instead of an ambiguous 0/0 ratio", () => {
+    const cases = Array.from({ length: 3 }, (_, i) =>
+      fakeCase(`s${i}`, `skips ${i}`, "/proj/a.test.ts", "skipped"),
+    );
+    const result = mapModulesToResult(
+      [fakeModule("/proj/a.test.ts", cases)],
+      [],
+      50,
+      { strategy: "full", reason: "full suite" },
+      true,
+    );
+    expect(result.passed).toBe(0);
+    expect(result.failed).toBe(0);
+    expect(result.skipped).toBe(3);
+    expect(result.total).toBe(3);
+    expect(result.summary).toBe("all 3 skipped, none executed (50ms)");
   });
 });

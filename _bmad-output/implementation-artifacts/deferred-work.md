@@ -105,8 +105,29 @@ These are residual edges the review surfaced, all safe-direction or narrow.)
   summary: Minor accuracy edges: a 0-statement source's istanbul pct sentinel is coerced to 0 and folded into the total (slight under-report); a run where ALL measurements fail but prior data exists reports the carried combined numbers (arguably fine if sources unchanged, but it "measured nothing" this run).
   evidence: LOW. The confidence signal covers the second case when sources changed; when unchanged, reporting carried coverage is reasonable.
 
+## Deferred from: quick-dev test-count-accuracy session (2026-07-16)
+
+- source_spec: none
+  summary: Remove/raise the hard-coded 120s worker run-timeout (`Orchestrator.runTimeoutMs`, `src/orchestrator/index.ts`) so long-running suites aren't killed mid-run; make it configurable via `DaemonConfig` with no cap by default.
+  evidence: Split out of a broader "fix the monitoring dashboard's test-count reporting" request — the timeout fix touches a different code path (the worker-execution timer in the orchestrator) and ships independently of the test-count/UI work, so it was carved into its own follow-up spec per the multi-goal check.
+- source_spec: none
+  summary: Real-world confirmation the 120s cap is too low — on a slower machine a full run legitimately takes 15-20 minutes, and MCP clients see `mcp-bridge: daemon transport error ... "Session not found"` (HTTP 404) plus `SSE stream disconnected: TypeError: terminated` while the long run is in flight, eventually surfacing as `Connection closed` on the `run_tests` tool call.
+  evidence: User-reported log excerpt from the real project (2026-07-16). Whatever replaces/raises the 120s worker-run cap must also account for the MCP session/SSE connection outliving a run this long — a run-length fix alone may not be sufficient if the bridge's own session/stream has a shorter independent timeout; the follow-up spec should investigate the mcp-bridge/session-store side too, not just `Orchestrator.runTimeoutMs`.
+
 ## Testing infrastructure (2026-07-15)
 
 - source: Epic 6 dev-auto runs
   summary: `test/watch.test.ts` ("re-runs affected tests when a source file changes") intermittently timed out (~60s poll) when the FULL suite runs in parallel — worker/CPU starvation, not a logic bug. It passes reliably in isolation (~2s).
   evidence: MITIGATED 2026-07-15 by raising its poll timeout to 150s / test timeout to 180s so the worker fork+run isn't cut off under full-suite contention (it still completes in ~2s normally; the headroom only matters under load). This TOLERATES the contention rather than removing it — a genuine hang now takes up to 150s to surface. A cleaner root-cause fix remains available: give the worker-forking integration tests their own non-parallel Vitest pool (or lower `maxWorkers` for them) so they don't starve each other. Revisit if the timeout bump proves insufficient in CI.
+
+## Deferred from: code review of spec-test-count-accuracy-run-detail-ui (2026-07-16)
+
+- source_spec: `spec-test-count-accuracy-run-detail-ui.md`
+  summary: `saveTestInventory` (`src/history/index.ts`) has no equivalent to `pruneHistory`'s stray-`.tmp`-file sweep — a crash between `writeFileSync` and `renameSync` leaves an orphaned `test-inventory.json.<pid>.tmp` in `.test-mcp/` that nothing ever revisits or deletes.
+  evidence: LOW — narrow crash window, single stray file per occurrence, no functional harm (the real `test-inventory.json` is untouched). `writeRunRecord` has the same atomic-write shape; only `pruneHistory`'s periodic sweep (over the `history/` subdirectory) gives it a cleanup hook the single-file inventory doesn't have.
+- source_spec: `spec-test-count-accuracy-run-detail-ui.md`
+  summary: The test inventory keys test identity as `(file, name)`, the same identity `uniqueTestTotal` used before it — two genuinely distinct tests that render an identical name within the same file (e.g. an uninterpolated `test.each` title, or two `it("works")` blocks whose describe-path happens to concatenate the same) collapse into one entry.
+  evidence: LOW — pre-existing weakness inherited from the code this story replaced, not newly introduced. Promoted from a soft diagnostic figure to the UI's headline "total tests," so a future pass could consider a more robust per-test id (Vitest test id / describe-path array) if this proves to matter in practice.
+- source_spec: `spec-test-count-accuracy-run-detail-ui.md`
+  summary: `docs/architecture.md`'s "Run history" paragraph (just below the new "Test inventory" entry this story added) still claims run history "resets on daemon restart" and that on-disk persistence "is still planned" — both already false since Story 6.2 shipped disk persistence.
+  evidence: LOW, docs-only. Pre-existing staleness this story's diff sits next to but did not introduce; worth a follow-up doc pass to reconcile that paragraph with Story 6.2's actual (already-shipped) behavior.

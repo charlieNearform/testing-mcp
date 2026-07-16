@@ -77,6 +77,86 @@ export function pruneHistory(projectPath: string, cap: number): void {
   }
 }
 
+/**
+ * Per-project test inventory (test-count-accuracy fix): file -> the test names last seen in it.
+ * JSON-safe (plain arrays, not Sets) so it round-trips through `writeFileSync`/`JSON.parse`
+ * without a custom (de)serializer; the orchestrator holds the in-memory Set-based view and
+ * converts at the load/save boundary.
+ */
+export type TestInventory = Record<string, string[]>;
+
+export const TEST_INVENTORY_SCHEMA_VERSION = 1;
+
+export function testInventoryPath(projectPath: string): string {
+  return path.join(projectPath, ".test-mcp", "test-inventory.json");
+}
+
+/** Persist the inventory atomically (temp file + rename), wrapped with a `schemaVersion`. */
+export function saveTestInventory(projectPath: string, inventory: TestInventory): void {
+  const dir = path.join(projectPath, ".test-mcp");
+  fs.mkdirSync(dir, { recursive: true });
+  const target = testInventoryPath(projectPath);
+  const tmp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(
+    tmp,
+    JSON.stringify({ schemaVersion: TEST_INVENTORY_SCHEMA_VERSION, files: inventory }, null, 2),
+  );
+  fs.renameSync(tmp, target);
+}
+
+/**
+ * Load the persisted inventory. A missing file (fresh project, never reconciled) is the normal
+ * first-run case and returns `{}` silently, same as `loadHistory`'s missing-dir case. A present
+ * but corrupt/unreadable/unrecognized-schema file is skipped with a stderr warning and also
+ * yields `{}` — never throws, so a bad cache file can never crash the daemon or fail a run.
+ */
+export function loadTestInventory(projectPath: string): TestInventory {
+  const target = testInventoryPath(projectPath);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(target, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      process.stderr.write(
+        `[test-mcp] skipping unreadable test-inventory file ${target}: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    }
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as { schemaVersion?: number; files?: unknown } | null;
+    if (
+      parsed?.schemaVersion !== TEST_INVENTORY_SCHEMA_VERSION ||
+      typeof parsed.files !== "object" ||
+      parsed.files === null ||
+      Array.isArray(parsed.files)
+    ) {
+      process.stderr.write(`[test-mcp] skipping unrecognized test-inventory file: ${target}\n`);
+      return {};
+    }
+    const result: TestInventory = {};
+    for (const [file, names] of Object.entries(parsed.files as Record<string, unknown>)) {
+      if (Array.isArray(names) && names.every((n) => typeof n === "string")) {
+        result[file] = names;
+      } else {
+        process.stderr.write(
+          `[test-mcp] skipping malformed test-inventory entry for ${file} in ${target}\n`,
+        );
+      }
+    }
+    return result;
+  } catch (err) {
+    process.stderr.write(
+      `[test-mcp] skipping corrupt test-inventory file ${target}: ${
+        err instanceof Error ? err.message : String(err)
+      }\n`,
+    );
+    return {};
+  }
+}
+
 /** Newest-first by `finishedAt`, tiebroken by id/name so ordering is deterministic across reloads. */
 function byFinishedThenId(
   a: { finishedAt: string; name?: string; runId?: string },

@@ -9,7 +9,12 @@ import {
   writeRunRecord,
   loadHistory,
   pruneHistory,
+  TEST_INVENTORY_SCHEMA_VERSION,
+  testInventoryPath,
+  saveTestInventory,
+  loadTestInventory,
 } from "../src/history/index.ts";
+import type { TestResult } from "../src/types/contracts.ts";
 
 let dir: string;
 
@@ -123,6 +128,46 @@ describe("history module (Story 6.2)", () => {
   });
 });
 
+describe("test inventory persistence (test-count-accuracy fix)", () => {
+  it("writes a schema-versioned inventory atomically and loads it back", () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-inv-"));
+    saveTestInventory(dir, { "a.test.ts": ["adds", "subtracts"] });
+
+    const onDisk = JSON.parse(fs.readFileSync(testInventoryPath(dir), "utf8"));
+    expect(onDisk.schemaVersion).toBe(TEST_INVENTORY_SCHEMA_VERSION);
+    expect(onDisk.files).toEqual({ "a.test.ts": ["adds", "subtracts"] });
+    expect(loadTestInventory(dir)).toEqual({ "a.test.ts": ["adds", "subtracts"] });
+  });
+
+  it("does not leave a temp file behind after a successful write", () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-inv-"));
+    saveTestInventory(dir, { "a.test.ts": ["x"] });
+    expect(fs.readdirSync(path.join(dir, ".test-mcp"))).toEqual(["test-inventory.json"]);
+  });
+
+  it("returns {} when the file is missing (fresh project, never reconciled) without throwing", () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-inv-"));
+    expect(loadTestInventory(dir)).toEqual({});
+  });
+
+  it("skips a corrupt (non-JSON) file and yields {} without throwing", () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-inv-"));
+    fs.mkdirSync(path.join(dir, ".test-mcp"), { recursive: true });
+    fs.writeFileSync(testInventoryPath(dir), "{ not json");
+    expect(loadTestInventory(dir)).toEqual({});
+  });
+
+  it("skips an unrecognized schemaVersion and yields {} without throwing", () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-inv-"));
+    fs.mkdirSync(path.join(dir, ".test-mcp"), { recursive: true });
+    fs.writeFileSync(
+      testInventoryPath(dir),
+      JSON.stringify({ schemaVersion: TEST_INVENTORY_SCHEMA_VERSION + 99, files: { "a.test.ts": ["x"] } }),
+    );
+    expect(loadTestInventory(dir)).toEqual({});
+  });
+});
+
 // A fake worker that returns a staged result, so a full run goes through the orchestrator's
 // recordRun -> disk path without a real Vitest run.
 const STUB_WORKER = `import fs from "node:fs";
@@ -188,5 +233,162 @@ describe("orchestrator run-history persistence round-trip (Story 6.2)", () => {
     const rehydrated = restarted.getRunHistory("hp");
     expect(rehydrated).toHaveLength(1);
     expect(rehydrated[0].result?.passed).toBe(1);
+  }, 20_000);
+});
+
+describe("test inventory reconciliation (test-count-accuracy fix)", () => {
+  let workerDir: string;
+  let workerPath: string;
+
+  beforeAll(() => {
+    workerDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-invw-")));
+    workerPath = path.join(workerDir, "worker.mjs");
+    fs.writeFileSync(workerPath, STUB_WORKER);
+  });
+
+  afterAll(() => {
+    fs.rmSync(workerDir, { recursive: true, force: true });
+  });
+
+  /** Stage the next canned TestResult the STUB_WORKER will report on the next run message. */
+  function stageResult(
+    stateDir: string,
+    r: Partial<TestResult> & Pick<TestResult, "selection">,
+  ): void {
+    const full: TestResult = {
+      success: true,
+      summary: "staged",
+      duration: 1,
+      total: 0,
+      passed: 0,
+      failed: 0,
+      skipped: 0,
+      failures: [],
+      ...r,
+    };
+    fs.writeFileSync(path.join(stateDir, "stub-result.json"), JSON.stringify(full));
+  }
+
+  it("replaces a file's tests on a full run, unions a brand-new file, and drops a deleted test on that file's next run", async () => {
+    dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-invr-")));
+    const stateDir = path.join(dir, ".test-mcp");
+    fs.mkdirSync(stateDir, { recursive: true });
+    const orch = new Orchestrator({ workerPath });
+    const project = { projectId: "inv", path: dir };
+
+    // Full run seeds a.test.ts (2 tests) and b.test.ts (1 test).
+    stageResult(stateDir, {
+      selection: { strategy: "full", reason: "full suite", files: ["a.test.ts", "b.test.ts"] },
+      tests: [
+        { name: "t1", file: "a.test.ts", status: "passed" },
+        { name: "t2", file: "a.test.ts", status: "passed" },
+        { name: "t3", file: "b.test.ts", status: "passed" },
+      ],
+    });
+    await orch.runTests(project, {});
+    expect(orch.getTestInventoryCount("inv")).toBe(3);
+
+    // Incremental rerun of ONLY a.test.ts with t1 deleted -> a.test.ts's cached set drops to
+    // {t2}; b.test.ts is untouched (not in this run's selection.files) so its {t3} survives.
+    stageResult(stateDir, {
+      selection: { strategy: "incremental", reason: "explicit file selection", files: ["a.test.ts"] },
+      tests: [{ name: "t2", file: "a.test.ts", status: "passed" }],
+    });
+    await orch.runTests(project, { files: ["a.test.ts"] });
+    expect(orch.getTestInventoryCount("inv")).toBe(2); // a:{t2} + b:{t3}
+
+    // Incremental run touching a brand-new file c.test.ts -> its tests are added on top of the
+    // untouched a/b entries (union, not replace-all).
+    stageResult(stateDir, {
+      selection: { strategy: "incremental", reason: "explicit file selection", files: ["c.test.ts"] },
+      tests: [
+        { name: "t4", file: "c.test.ts", status: "passed" },
+        { name: "t5", file: "c.test.ts", status: "passed" },
+      ],
+    });
+    await orch.runTests(project, { files: ["c.test.ts"] });
+    expect(orch.getTestInventoryCount("inv")).toBe(4); // a:{t2} + b:{t3} + c:{t4,t5}
+
+    // Daemon restart: a fresh orchestrator has nothing until it rehydrates from disk.
+    const restarted = new Orchestrator({ workerPath });
+    expect(restarted.getTestInventoryCount("inv")).toBe(0);
+    restarted.loadTestInventory("inv", dir);
+    expect(restarted.getTestInventoryCount("inv")).toBe(4);
+  }, 20_000);
+
+  it("skips reconciliation entirely when testsTruncated is true, even for a file in selection.files", async () => {
+    dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-invt-")));
+    const stateDir = path.join(dir, ".test-mcp");
+    fs.mkdirSync(stateDir, { recursive: true });
+    const orch = new Orchestrator({ workerPath });
+    const project = { projectId: "inv-trunc", path: dir };
+
+    stageResult(stateDir, {
+      selection: { strategy: "full", reason: "full suite", files: ["a.test.ts"] },
+      tests: [
+        { name: "t1", file: "a.test.ts", status: "passed" },
+        { name: "t2", file: "a.test.ts", status: "passed" },
+      ],
+    });
+    await orch.runTests(project, {});
+    expect(orch.getTestInventoryCount("inv-trunc")).toBe(2);
+
+    // A truncated result for the SAME file with only 1 test entry must NOT shrink the cache —
+    // an incomplete `tests` list is never used to delete a cached name (over-count is safe).
+    stageResult(stateDir, {
+      selection: { strategy: "full", reason: "full suite", files: ["a.test.ts"] },
+      tests: [{ name: "t1", file: "a.test.ts", status: "passed" }],
+      testsTruncated: true,
+    });
+    await orch.runTests(project, {});
+    expect(orch.getTestInventoryCount("inv-trunc")).toBe(2);
+  }, 20_000);
+
+  it("is a safe no-op when a run's selection.files is empty (mirrors emptyResult())", async () => {
+    dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-invE-")));
+    const stateDir = path.join(dir, ".test-mcp");
+    fs.mkdirSync(stateDir, { recursive: true });
+    const orch = new Orchestrator({ workerPath });
+    const project = { projectId: "inv-empty", path: dir };
+
+    stageResult(stateDir, {
+      selection: { strategy: "incremental", reason: "no changes", files: [] },
+    });
+    await orch.runTests(project, { files: ["a.test.ts"] });
+    expect(orch.getTestInventoryCount("inv-empty")).toBe(0);
+  }, 20_000);
+
+  it("never under-counts a file that fails to load (module load error) -- leaves its cached tests untouched", async () => {
+    dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-invL-")));
+    const stateDir = path.join(dir, ".test-mcp");
+    fs.mkdirSync(stateDir, { recursive: true });
+    const orch = new Orchestrator({ workerPath });
+    const project = { projectId: "inv-loaderr", path: dir };
+
+    // Full run seeds a.test.ts with 2 real tests.
+    stageResult(stateDir, {
+      selection: { strategy: "full", reason: "full suite", files: ["a.test.ts"] },
+      tests: [
+        { name: "t1", file: "a.test.ts", status: "passed" },
+        { name: "t2", file: "a.test.ts", status: "passed" },
+      ],
+    });
+    await orch.runTests(project, {});
+    expect(orch.getTestInventoryCount("inv-loaderr")).toBe(2);
+
+    // A rerun of the SAME file where it now fails to load (e.g. a transient syntax error):
+    // mapModulesToResult collapses its real tests down to a single synthetic
+    // "(module load error)" `tests` entry and a matching `::collect` failure. That is NOT a
+    // complete list for the file -- the cached {t1, t2} must survive, not shrink to 1.
+    stageResult(stateDir, {
+      selection: { strategy: "full", reason: "full suite", files: ["a.test.ts"] },
+      failed: 1,
+      failures: [
+        { id: "a.test.ts::collect", name: "(module load error)", file: "a.test.ts", message: "SyntaxError" },
+      ],
+      tests: [{ name: "(module load error)", file: "a.test.ts", status: "failed" }],
+    });
+    await orch.runTests(project, {});
+    expect(orch.getTestInventoryCount("inv-loaderr")).toBe(2);
   }, 20_000);
 });

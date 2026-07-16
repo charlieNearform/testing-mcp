@@ -159,6 +159,13 @@ All files are JSON with a `schemaVersion`. Locations per invariant 3.
 the next run's changed set is computed against it. Advanced **only for validated (actually-run)**
 files after a run, so a changed-but-unrun file is never hidden from the next delta.
 
+**Test inventory** (repo, `<git-root>/.test-mcp/test-inventory.json`, git-ignored) —
+`{ schemaVersion, files: { <relpath>: string[] } }`, mapping each test file to the test names
+last seen in it. Reconciled per-file from `result.selection.files`/`result.tests` after every
+run (skipped when `testsTruncated`), so it self-heals additions and deletions without depending
+on the capped run-history depth. Powers the monitoring UI's `totalTests` figure — the sum of
+every file's cached test-name-set size, unaffected by history aging out.
+
 **Ignore file** (repo, `<git-root>/.test-mcp-ignore`, optional) — gitignore-style patterns
 excluded from the changed set (on top of the built-in non-code default filter).
 

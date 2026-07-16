@@ -21,6 +21,9 @@ import {
   writeRunRecord,
   pruneHistory,
   loadHistory as loadHistoryFromDisk,
+  loadTestInventory as loadTestInventoryFromDisk,
+  saveTestInventory,
+  type TestInventory,
 } from "../history/index.js";
 
 /** The minimal project shape the orchestrator needs (matches RegisteredProject). */
@@ -136,6 +139,12 @@ export class Orchestrator {
   /** In-memory run history per project (newest first), capped at maxHistory (UI drill-down). */
   private readonly history = new Map<string, RunRecord[]>();
   private readonly maxHistory = 50;
+  /**
+   * Per-project test inventory: file -> the set of test names last seen in it (test-count-accuracy
+   * fix). This is the source of truth for "total tests" — unlike the capped history ring buffer,
+   * it never shrinks as old runs age out, and it self-heals deletions the next time a file re-runs.
+   */
+  private readonly testInventory = new Map<string, Map<string, Set<string>>>();
   /** Status-change subscribers (Story 5.1 UI push). */
   private readonly statusListeners = new Set<() => void>();
 
@@ -617,6 +626,92 @@ export class Orchestrator {
   }
 
   /**
+   * Rehydrate a project's in-memory test inventory from disk — called for each registered
+   * project at daemon startup (mirrors `loadHistory`) so "total tests" survives a restart without
+   * waiting for every file to re-run. A read failure leaves the inventory empty rather than
+   * crashing (never crash the daemon); it self-heals as runs occur.
+   */
+  loadTestInventory(projectId: string, projectPath: string): void {
+    try {
+      const raw = loadTestInventoryFromDisk(projectPath);
+      const map = new Map<string, Set<string>>();
+      for (const [file, names] of Object.entries(raw)) {
+        map.set(file, new Set(names));
+      }
+      this.testInventory.set(projectId, map);
+    } catch (err) {
+      process.stderr.write(
+        `[test-mcp] failed to load test inventory for ${projectId}: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    }
+  }
+
+  /** Sum of cached test-name-set sizes across every file in the project's inventory. */
+  getTestInventoryCount(projectId: string): number {
+    const inv = this.testInventory.get(projectId);
+    if (!inv) return 0;
+    let count = 0;
+    for (const names of inv.values()) count += names.size;
+    return count;
+  }
+
+  /**
+   * Reconcile the project's test inventory from one run's result: for every file the run actually
+   * executed (`result.selection.files`), replace that file's cached test-name set with the names
+   * seen in THIS run's `tests` for that file. Files not in the selection are left untouched — this
+   * is what makes it deletion-aware (a file dropping a test only self-heals the next time IT runs)
+   * without depending on retained history depth. Applies uniformly to full and incremental runs
+   * (no `strategy` branch needed — `selection.files` already reflects what ran either way).
+   *
+   * Skipped entirely when `testsTruncated` is true: an incomplete `tests` list must never be used
+   * to delete a cached name (over-count is the safe direction, matching the Selection Engine's
+   * degraded-confidence bias). Also a safe no-op for `emptyResult()` runs, whose `selection.files`
+   * is always `[]`.
+   */
+  private reconcileTestInventory(projectId: string, projectPath: string, result: TestResult): void {
+    if (result.testsTruncated) return;
+    const files = result.selection.files;
+    if (files.length === 0) return;
+    // A file whose module failed to load collapses its real test names down to a single
+    // synthetic "(module load error)" entry (mapModulesToResult's `::collect` failures) — that is
+    // NOT a complete test list for the file. Treat it like a truncated result and leave the
+    // file's cached entry untouched, so a transient syntax/collect error never silently
+    // under-counts a file's real tests (over-count is the safe direction, never delete on
+    // incomplete data).
+    const loadErrorFiles = new Set(
+      result.failures.filter((f) => f.id.endsWith("::collect")).map((f) => f.file),
+    );
+    const byFile = new Map<string, Set<string>>();
+    for (const t of result.tests ?? []) {
+      const names = byFile.get(t.file) ?? new Set<string>();
+      names.add(t.name);
+      byFile.set(t.file, names);
+    }
+    const inventory = this.testInventory.get(projectId) ?? new Map<string, Set<string>>();
+    for (const file of files) {
+      if (loadErrorFiles.has(file)) continue;
+      inventory.set(file, byFile.get(file) ?? new Set<string>());
+    }
+    this.testInventory.set(projectId, inventory);
+
+    // Best-effort persistence (mirrors recordRun's history write): a failure here must never fail
+    // the run or crash the daemon.
+    try {
+      const onDisk: TestInventory = {};
+      for (const [file, names] of inventory) onDisk[file] = [...names];
+      saveTestInventory(projectPath, onDisk);
+    } catch (err) {
+      process.stderr.write(
+        `[test-mcp] failed to persist test inventory for ${projectId}: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    }
+  }
+
+  /**
    * Append a completed run to the project's history ring buffer (newest first, capped) and mirror
    * it to disk (Story 6.2). Disk persistence is best-effort — a write/prune failure is logged and
    * swallowed so it never fails the run or crashes the daemon (the in-memory buffer still has it).
@@ -632,6 +727,9 @@ export class Orchestrator {
     list.unshift(stored);
     if (list.length > this.maxHistory) list.length = this.maxHistory;
     this.history.set(stored.projectId, list);
+    if (record.result) {
+      this.reconcileTestInventory(record.projectId, projectPath, record.result);
+    }
     try {
       writeRunRecord(projectPath, stored);
       pruneHistory(projectPath, this.maxHistory);
