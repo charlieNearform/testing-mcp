@@ -45,6 +45,11 @@ server at **local scope** (token in your uncommitted client settings) or commit 
 that uses a **`headersHelper`** to read the daemon's local token file (no token or env var in
 the repo). See [docs/usage.md](docs/usage.md#connecting-an-ai-agent-mcp-client-config).
 
+Connecting the MCP client only lets an agent *call* the tools — it doesn't tell the agent
+*when* to use them instead of `pnpm test`/`vitest` directly. For that, copy the snippet in
+[docs/usage.md#agent-instructions](docs/usage.md#agent-instructions) into the project's own
+`CLAUDE.md`/`AGENTS.md`.
+
 **→ Full guide: [docs/usage.md](docs/usage.md)** — CLI commands, the MCP tool catalog,
 watch mode, the monitoring UI, CI usage, configuration, and troubleshooting.
 

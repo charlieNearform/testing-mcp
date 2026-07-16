@@ -171,11 +171,43 @@ daemon crash). Codes: `UnknownProject`, `InvalidConfig`, `WorkerFailure`, `PlanE
 | `register_project` | `{ path }` (absolute project root) | `{ projectId, path, status }` |
 | `list_projects` | `{}` | `{ projects: [...] }` |
 | `unregister_project` | `{ projectId, purge? }` | `{ projectId, removed }` — `purge` also deletes the project's `.test-mcp/` state |
-| `run_tests` | `{ projectId, mode?, coverage?, files?, suite?, dryRun?, planId? }` | `TestResult`, or a `TestPlan` when `dryRun` |
+| `run_tests` | `{ projectId, mode?, coverage?, files?, since?, strict?, suite?, dryRun?, planId? }` | `TestResult`, or a `TestPlan` when `dryRun` |
 | `get_test_status` | `{ projectId }` | `{ state, progress?, lastResult?, lastError?, watch? }` |
 | `start_watch` | `{ projectId, fastMode? }` | watch status |
 | `stop_watch` | `{ projectId }` | `{ stopped }` |
 | `get_failure_details` | `{ projectId, failureId }` | `{ name, file, message, stack, assertion? }` |
+
+### Agent instructions
+
+Tool descriptions are enough for a client to *call* test-mcp correctly, but not enough for
+an agent to know *when* to use it instead of falling back to `pnpm test`/`vitest` directly.
+Paste this into the consuming project's own `CLAUDE.md`/`AGENTS.md` (adjust the `projectId`
+if it isn't already registered):
+
+```markdown
+## Running tests (test-mcp)
+
+This project's tests are run through the `test-mcp` MCP server, not by shelling out to
+`vitest`/`pnpm test` directly.
+
+- To run tests, call `run_tests` with `{ projectId: "<id>", mode: "incremental" }`. Only use
+  `mode: "full"` when you need certainty — before a release, after touching shared/setup
+  modules, or if incremental results seem wrong.
+- On the first run, or whenever incremental selection looks stale, pass `coverage: true` to
+  rebuild the source→test map. Selection is conservative: an unmapped or uncertain file
+  triggers a full-suite fallback rather than silently skipping a test.
+- Before a large or full run, call with `dryRun: true` first to see which files would run
+  and why (the `reasoning` field), then execute that exact selection by passing its
+  `planId` back in. An expired `planId` returns `PlanExpired` — just re-run the dry-run.
+- Don't re-derive test selection yourself (e.g. `git diff` + grep for related tests) — the
+  tool already does git-delta ∪ coverage-map selection with the fallback above.
+- On failures, `run_tests` returns only `{ id, name, file, message }` per failure — call
+  `get_failure_details({ projectId, failureId })` to get the stack trace and assertion diff
+  before proposing a fix.
+- For an edit-test-edit loop, call `start_watch` once and poll `get_test_status` for
+  results — don't call `run_tests` repeatedly in a loop.
+- Always use the `projectId` from `register_project`/`list_projects`; never guess it.
+```
 
 ### Running tests
 
