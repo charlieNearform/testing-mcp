@@ -237,9 +237,13 @@ executes exactly that plan (re-derives if the plan expired).
    test, or no git/static graph. **A new/untracked source unknown to the map is bounded by
    `A`** (its new test + existing static importers), *not* a full trigger. A **modified**
    source unknown to the map → select best-effort and mark **degraded confidence**.
-5. Otherwise run `A ∪ B` (plus tests importing any deleted file), and attach a **confidence**
-   verdict (`high` | `degraded` + reasons) to the result. `degraded` tells the caller to run a
-   full pass before relying on completeness.
+5. Otherwise run `B` alone when every changed source is mapped — that selection is already
+   provably complete, and `A` is HEAD-scoped (Story 6.7), so folding it in would silently widen
+   a `since: "last-run"` request back out to "everything uncommitted since HEAD" for no benefit.
+   Run `A ∪ B` (plus tests importing any deleted file) only when some changed source is
+   genuinely unmapped — there `A` is the sole signal, not a redundant safety net. Attach a
+   **confidence** verdict (`high` | `degraded` + reasons) to the result either way; `degraded`
+   tells the caller to run a full pass before relying on completeness.
 
 > Validated by the coverage-map spike (`docs/coverage-spike-findings.md`) against the
 > real target repo: without setup-baseline exclusion, editing a common lib re-runs the

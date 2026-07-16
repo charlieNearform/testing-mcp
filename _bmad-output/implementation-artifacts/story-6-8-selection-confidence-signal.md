@@ -71,3 +71,12 @@ feature-completion. Full-suite is still forced only for genuinely unbounded chan
 - None major — this rides on the ratified invariant-5 change. If a case is ambiguous between
   "unbounded → full" and "bounded → degraded", default to the safer classification (full/high)
   and note it.
+
+## Post-hoc correction (2026-07-16)
+
+AC1 ("all changed sources mapped and re-measured → provably complete, `high` confidence") was
+reported correctly but never actually reached in practice: the selection engine unconditionally
+unioned in Vitest's HEAD-scoped `--changed` pass regardless of confidence, so a fully-mapped
+change was still widened to everything uncommitted since HEAD. Fixed alongside Story 6.7's
+correction (see `story-6-7-changed-since-last-run-baseline.md`) — see that story's post-hoc
+correction note for the root cause and fix.

@@ -54,12 +54,15 @@ describe("SelectionEngine.plan", () => {
     });
   });
 
-  it("selects mapped tests unioned with static graph when a known source changed (AC2)", () => {
+  it("selects exactly the mapped tests, no static-graph union, when every changed source is known (AC2, 6.8 AC1)", () => {
     const plan = SelectionEngine.plan({
       changedFiles: ["a.ts"],
       map: mapWith({ "a.ts": ["a.test.ts", "smoke.test.ts"] }, { alwaysRun: ["heavy.test.ts"] }),
     });
-    expect(plan).toMatchObject({ strategy: "incremental", union: true });
+    // A fully-mapped change is provably complete on its own (Story 6.8 AC1) — the git
+    // static-graph pass is HEAD-scoped and only needed as a bound for genuine uncertainty
+    // (Story 6.7's static-graph-interplay note), so it must not run here.
+    expect(plan).toMatchObject({ strategy: "incremental", union: false, confidence: { level: "high", reasons: [] } });
     if (plan.strategy === "incremental") {
       expect(plan.testFiles).toEqual(["a.test.ts", "heavy.test.ts", "smoke.test.ts"]);
     }

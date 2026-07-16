@@ -92,3 +92,24 @@ Ratified by `sprint-change-proposal-2026-07-15.md`:
 - **Deletions are in scope**: a deleted source imported by a test still runs/flags that test; a
   deletion whose impact can't be bounded feeds the confidence signal (Story 6.8).
 - Reflected in `docs/architecture.md` (selection algorithm step 1, `last-run-snapshot.json`).
+
+## Post-hoc correction (2026-07-16)
+
+**Found in use** against the `sanity-check` project: an edit → run → edit → run loop kept
+re-running tests for files already validated by a prior run, as long as they stayed
+uncommitted. Root cause — the shipped `SelectionEngine.plan` set `union: true`
+**unconditionally** whenever any source changed and a map existed, ignoring this story's own
+"Static-graph interplay" note above (`A` is git-HEAD-based and does not apply to a last-run
+delta). Since `union: true` makes the worker also run Vitest's real `--changed` (HEAD-scoped),
+every run kept resurfacing everything uncommitted since HEAD regardless of `since`, silently
+defeating the last-run baseline for any project with a coverage map. This also meant Story
+6.8 AC1 ("all changed sources mapped and re-measured → provably complete") was never actually
+reached without the redundant static-graph pass riding along.
+
+**Fix**: `union` is now `true` only when some changed source is unmapped (the static graph is
+then the sole signal for it — Story 6.6 new-file handling is unaffected). A fully-mapped,
+re-measured selection now runs via the coverage map alone, matching this story's original
+static-graph-interplay intent. See `src/selection/index.ts` (`unmappedSourceSeen`),
+`src/worker/index.ts` (zero-modules-run → full-suite fallback extended to the non-union path,
+since it lost the union branch's existing safety net), `test/selection.test.ts`,
+`test/selection-integration.test.ts`, and `docs/architecture.md` (selection algorithm step 5).

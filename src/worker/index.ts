@@ -378,6 +378,16 @@ export async function runVitest(
 
   // Full run, or an explicit file selection.
   const run = await runOnce(startVitest, opts.files, {}, onProgress);
+  if (opts.files.length > 0 && run.modules.length === 0) {
+    // A selection that resolves to zero actual test files (e.g. a stale coverage-map entry
+    // naming a file that no longer exists) must never silently report "0 passed" — escalate to
+    // the full suite (mirrors the union branch's identical safety net above).
+    const full = await runOnce(startVitest, [], {}, onProgress);
+    return build(full, {
+      strategy: "full",
+      reason: "incremental selection matched no test files; ran full suite",
+    });
+  }
   return build(run, {
     strategy: opts.files.length ? "incremental" : "full",
     reason: opts.files.length ? "explicit file selection" : "full suite",

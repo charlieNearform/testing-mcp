@@ -65,6 +65,25 @@ describe("smart re-run decision (union + fallback)", () => {
     expect(result.selection.files.some((f) => f.includes("other.test.ts"))).toBe(false);
   }, 120_000);
 
+  it("does not re-select an already-validated file's tests on a later run in the same uncommitted session", async () => {
+    proj = await makeProjectWithMap();
+    const orch = new Orchestrator({ workerPath });
+
+    // Edit math.ts and run — this run validates math.ts and advances the last-run snapshot past it.
+    fs.appendFileSync(path.join(proj, "math.ts"), `// touched\n`);
+    const first = await orch.runTests({ projectId: "sel1", path: proj }, { mode: "incremental" });
+    expect(first.selection.files.some((f) => f.includes("math.test.ts"))).toBe(true);
+
+    // Edit other.ts too, still without committing math.ts's change. A second incremental run
+    // must select only other.test.ts — math.ts was already validated by the prior run, so
+    // `since: "last-run"` (the default) must not resurface it via the HEAD-scoped static-graph
+    // union just because it's still uncommitted.
+    fs.appendFileSync(path.join(proj, "other.ts"), `// touched\n`);
+    const second = await orch.runTests({ projectId: "sel1", path: proj }, { mode: "incremental" });
+    expect(second.selection.files.some((f) => f.includes("other.test.ts"))).toBe(true);
+    expect(second.selection.files.some((f) => f.includes("math.test.ts"))).toBe(false);
+  }, 120_000);
+
   it("runs the full suite when a changed source is unknown to the map (AC3)", async () => {
     proj = await makeProjectWithMap();
     // A brand-new source file no test imports and the map never saw.

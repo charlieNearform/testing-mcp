@@ -125,9 +125,12 @@ export class SelectionEngine {
       };
     }
 
-    // Source files changed WITH a map -> map selection, unioned with the static graph at run time.
+    // Source files changed WITH a map -> map selection, unioned with the static graph at run time
+    // ONLY when some changed source is unmapped (the map has nothing to say about it, so the
+    // static graph is the sole signal — not a redundant safety net).
     const selected = new Set<string>(changedTests);
     const reasons: string[] = [];
+    let unmappedSourceSeen = false;
     for (const src of changedSources) {
       if (map.fullSuiteTriggers.includes(src)) {
         // A full run IS complete -> high, regardless of any other changed file.
@@ -139,6 +142,7 @@ export class SelectionEngine {
       }
       const entry = map.map[src];
       if (!entry) {
+        unmappedSourceSeen = true;
         // Unknown to the map. `strict` (AC5) restores the old force-full behaviour. Otherwise the
         // `union: true` git static-graph pass (`--changed`) bounds it — a NEW source has no prior
         // runtime dependents (Story 6.6); a MODIFIED/DELETED one is softened from full to bounded
@@ -170,13 +174,20 @@ export class SelectionEngine {
     // so they do not reduce confidence — running them all IS complete coverage for them.
     for (const t of map.alwaysRun) selected.add(t);
 
+    // That static-graph pass is always HEAD-scoped (Story 6.7's static-graph-interplay note), so
+    // running it when every changed source is already mapped would silently widen a
+    // `since: "last-run"` request back out to "everything uncommitted since HEAD" for no benefit —
+    // a fully-mapped, re-measured selection is already provably complete (Story 6.8 AC1).
+    const union = unmappedSourceSeen;
     return {
       strategy: "incremental",
-      reason: reasons.length
-        ? "coverage-map selection unioned with git static-graph (unmapped changes bounded by --changed)"
-        : "coverage-map selection unioned with git static-graph",
+      reason: !union
+        ? "coverage-map selection (all changed sources mapped and re-measured)"
+        : reasons.length
+          ? "coverage-map selection unioned with git static-graph (unmapped changes bounded by --changed)"
+          : "coverage-map selection unioned with git static-graph",
       testFiles: [...selected].sort(),
-      union: true,
+      union,
       confidence: reasons.length ? degraded(reasons) : HIGH,
     };
   }
