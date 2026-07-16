@@ -50,6 +50,13 @@ export interface SelectionInput {
    * source unknown to the map forces the full suite instead of a bounded+degraded incremental run.
    */
   strict?: boolean;
+  /**
+   * Whether the project has any dynamic-import syntax at all (`hasDynamicImportSyntax`). A NEW
+   * unmapped source is only a static-graph blind spot if something reaches it via a dynamic
+   * import; when the project has none anywhere, that specific caveat doesn't apply. Undefined
+   * (caller didn't check) is treated as "might have one" — conservative, matching prior behaviour.
+   */
+  dynamicImportsPresent?: boolean;
 }
 
 const HIGH: Confidence = { level: "high", reasons: [] };
@@ -64,7 +71,8 @@ export function isTestFile(rel: string): boolean {
 
 export class SelectionEngine {
   static plan(input: SelectionInput): SelectionPlan {
-    const { changedFiles, addedFiles, map, strict } = input;
+    const { changedFiles, addedFiles, map, strict, dynamicImportsPresent } = input;
+    const mightMissDynamicImport = dynamicImportsPresent !== false;
 
     // Can't tell what changed (e.g. not a git repo) -> full suite, which IS complete -> high.
     if (changedFiles === null) {
@@ -143,11 +151,17 @@ export class SelectionEngine {
             confidence: HIGH,
           };
         }
-        reasons.push(
-          addedFiles?.includes(src)
-            ? `new source bounded by the git static graph (dynamic imports may be missed): ${src}`
-            : `modified or deleted source not in the coverage map, bounded by the git static graph: ${src}`,
-        );
+        if (addedFiles?.includes(src)) {
+          // A brand-new file has no prior runtime dependents (Story 6.6); the --changed union
+          // only misses it if something reaches it via a dynamic import the static graph can't
+          // see. When the project has no dynamic-import syntax anywhere (checked by the caller),
+          // that risk doesn't exist, so this source is fully covered — nothing to flag.
+          if (mightMissDynamicImport) {
+            reasons.push(`new source bounded by the git static graph (dynamic imports may be missed): ${src}`);
+          }
+        } else {
+          reasons.push(`modified or deleted source not in the coverage map, bounded by the git static graph: ${src}`);
+        }
         continue;
       }
       for (const t of entry.tests) selected.add(t);
@@ -348,6 +362,37 @@ export function getChangedFiles(projectRoot: string): { files: string[]; added: 
     return { files, added };
   } catch {
     return null;
+  }
+}
+
+/**
+ * ESM/CJS dynamic-import forms a static (git/Vite) module graph can't see through: `import(...)`
+ * expressions, and `require(...)` calls whose argument isn't a plain string literal (a literal
+ * require is statically resolvable — not a blind spot). POSIX ERE only (no `\b`/`\s`, which are
+ * PCRE-only and would need `git grep -P` — not guaranteed available on every git build).
+ */
+const DYNAMIC_IMPORT_PATTERN = 'import[ \\t]*\\(|require[ \\t]*\\([ \\t]*[^\'"]';
+
+/**
+ * Whether any tracked or untracked (non-ignored) file in the project contains dynamic-import
+ * syntax. A brand-new unmapped source is only a static-graph blind spot (see `plan`'s
+ * `dynamicImportsPresent`) if something reaches it via a dynamic import; when the project has
+ * none anywhere, that caveat can't apply. Errs conservative: any git failure (not a repo, git
+ * missing) returns true — an unknown answer must never silently drop a real caveat (architecture
+ * invariant 5).
+ */
+export function hasDynamicImportSyntax(projectRoot: string): boolean {
+  try {
+    execFileSync(
+      "git",
+      ["grep", "-I", "--quiet", "--untracked", "--exclude-standard", "-E", DYNAMIC_IMPORT_PATTERN],
+      { cwd: projectRoot, stdio: ["ignore", "ignore", "ignore"] },
+    );
+    return true; // exit 0: at least one match
+  } catch (err) {
+    // git grep exits 1 for "ran fine, no match" — the one non-conservative case. Anything else
+    // (not a repo, git missing, ...) is an unknown answer, so stay conservative and return true.
+    return (err as { status?: number }).status !== 1;
   }
 }
 

@@ -19,6 +19,10 @@ interface ProjectView {
   path: string;
   registryStatus: string;
   runCount: number;
+  /** Count of distinct (file, test name) pairs seen across the project's retained run history. */
+  totalTests: number;
+  /** Recent runs (compact, newest first) embedded so the history sub-view is live via the same SSE push as the root list. */
+  runs: ReturnType<typeof runSummary>[];
   run: {
     state: string;
     progress?: { completed: number; total: number };
@@ -29,6 +33,17 @@ interface ProjectView {
     failed?: number;
     updatedAt?: string;
   };
+}
+
+/** Distinct (file, test name) pairs across a project's retained history — bounded by the same in-memory/disk cap as history itself. */
+function uniqueTestTotal(history: RunRecord[]): number {
+  const seen = new Set<string>();
+  for (const rec of history) {
+    for (const t of rec.result?.tests ?? []) {
+      seen.add(t.file + " " + t.name);
+    }
+  }
+  return seen.size;
 }
 
 /** Compact run summary for the history list (heavy fields dropped). */
@@ -61,11 +76,14 @@ export async function uiSnapshot(deps: UiDeps): Promise<{ serverTime: string; pr
     projects: projects.map((p) => {
       const run = deps.orchestrator?.getRunStatus(p.projectId) ?? { state: "idle" as const };
       const r = run.lastResult;
+      const history = deps.orchestrator?.getRunHistory(p.projectId) ?? [];
       return {
         projectId: p.projectId,
         path: p.path,
         registryStatus: p.status,
-        runCount: deps.orchestrator?.getRunHistory(p.projectId).length ?? 0,
+        runCount: history.length,
+        totalTests: uniqueTestTotal(history),
+        runs: history.map(runSummary),
         run: {
           state: run.state,
           progress: run.progress,
@@ -198,8 +216,8 @@ const UI_HTML = `<!doctype html>
   .badge.degraded{ background:rgba(210,153,34,.15); color:var(--run); }
   .summary { margin-top:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
   .summary.fail { color:var(--fail); }
-  .counts { margin-top:10px; display:flex; gap:14px; font-size:13px; }
-  .counts b.ok{ color:var(--ok); } .counts b.fail{ color:var(--fail); } .counts b.skip{ color:var(--muted); }
+  .counts { margin-top:10px; display:flex; gap:14px; align-items:baseline; font-size:13px; }
+  .counts .ts { margin-top:0; }
   .empty { color:var(--muted); padding:40px; text-align:center; }
   .ts { color:var(--muted); font-size:11px; margin-top:10px; }
   .back { color:var(--muted); font-size:13px; display:inline-block; margin-bottom:16px; }
@@ -243,16 +261,32 @@ const go = (path) => { location.hash = "#" + path; };
 const routeParts = () => (location.hash || "#/").slice(1).split("/").filter(Boolean);
 async function getJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }
 
+// Every file path from the worker is absolute (project root + relative bit). The root is shown
+// once per page — strip it back off here so file lists don't repeat it on every single row.
+function relPath(file, root) {
+  if (!file || !root) return file || "";
+  const withSlash = root.endsWith("/") ? root : root + "/";
+  return file === root ? "." : (file.startsWith(withSlash) ? file.slice(withSlash.length) : file);
+}
+const projectLine = (root) => root ? '<div class="path">Project: ' + esc(root) + '</div>' : "";
+
+// A single pass/total figure, colored red only when there's an actual failure to flag (0 failures
+// is green, never red) — replaces a separate pass/fail/total trio that showed red even at 0 fails.
+function passTotal(r) {
+  if (r.total == null) return "";
+  const cls = (r.failed || 0) > 0 ? "fail" : "ok";
+  return '<span class="' + cls + '"><b>' + (r.passed || 0) + '</b>/<b>' + r.total + '</b> passed</span>';
+}
+
 function card(p) {
   const r = p.run || {};
-  const counts = (r.total != null) ? '<div class="counts"><span>total <b>' + r.total + '</b></span>'
-    + '<span>pass <b class="ok">' + (r.passed || 0) + '</b></span>'
-    + '<span>fail <b class="fail">' + (r.failed || 0) + '</b></span></div>' : "";
+  const counts = (r.total != null) ? '<div class="counts">' + passTotal(r)
+    + '<span class="ts">' + (p.totalTests || 0) + ' total tests</span></div>' : "";
   const summary = r.summary ? '<div class="summary ' + (r.failed ? 'fail' : '') + '">' + esc(r.summary) + '</div>' : "";
   const n = p.runCount || 0;
   const runs = '<div class="ts">' + n + ' run' + (n === 1 ? '' : 's') + ' · click for history</div>';
   return '<a class="card" href="#/project/' + encodeURIComponent(p.projectId) + '">'
-    + '<h2>' + esc(p.projectId) + '</h2><div class="path">' + esc(p.path) + '</div>'
+    + '<h2>' + esc(p.projectId) + '</h2>' + projectLine(p.path)
     + badge(r.state) + counts + summary + runs + '</a>';
 }
 
@@ -262,9 +296,8 @@ function statusBanner(pid) {
   const p = (snapshot.projects || []).find((x) => x.projectId === pid);
   if (!p) return "";
   const r = p.run || {};
-  const counts = (r.total != null) ? '<div class="counts"><span>total <b>' + r.total + '</b></span>'
-    + '<span>pass <b class="ok">' + (r.passed || 0) + '</b></span>'
-    + '<span>fail <b class="fail">' + (r.failed || 0) + '</b></span></div>' : "";
+  const counts = (r.total != null) ? '<div class="counts">' + passTotal(r)
+    + '<span class="ts">' + (p.totalTests || 0) + ' total tests</span></div>' : "";
   const summary = r.summary ? '<div class="summary ' + (r.failed ? 'fail' : '') + '">' + esc(r.summary) + '</div>' : "";
   return '<div class="banner">' + badge(r.state) + counts + summary + '</div>';
 }
@@ -277,13 +310,13 @@ function renderList() {
     : '<div class="empty">No projects registered.</div>';
 }
 
-async function renderProject(pid) {
-  const head = '<a class="back" href="#/">← projects</a><h2 class="mono">' + esc(pid) + '</h2>';
-  app.innerHTML = head + '<div class="empty">Loading…</div>';
-  let data;
-  try { data = await getJSON("/ui/api/projects/" + encodeURIComponent(pid) + "/runs"); }
-  catch (e) { app.innerHTML = head + '<div class="empty">Failed to load runs.</div>'; return; }
-  const runs = data.runs || [];
+// Sourced from the SSE-pushed snapshot (like statusBanner) rather than a one-shot fetch, so the
+// history table lands new rows live instead of only refreshing on the next manual navigation.
+function renderProject(pid) {
+  const p = (snapshot.projects || []).find((x) => x.projectId === pid);
+  const head = '<a class="back" href="#/">← projects</a><h2 class="mono">' + esc(pid) + '</h2>' + projectLine(p && p.path);
+  if (!p) { app.innerHTML = head + '<div class="empty">Loading…</div>'; return; }
+  const runs = p.runs || [];
   const banner = statusBanner(pid);
   if (!runs.length) { app.innerHTML = head + banner + '<div class="empty">No runs yet — trigger one via run_tests.</div>'; return; }
   const rows = runs.map((r) =>
@@ -291,17 +324,19 @@ async function renderProject(pid) {
     + '<td>' + fmtTime(r.startedAt) + '</td>'
     + '<td>' + badge(r.status) + '</td>'
     + '<td>' + esc(r.strategy || "") + '</td>'
-    + '<td><b class="ok">' + (r.passed != null ? r.passed : "–") + '</b> / <b class="fail">' + (r.failed != null ? r.failed : "–") + '</b> of ' + (r.total != null ? r.total : "–") + '</td>'
+    + '<td>' + (r.total != null ? passTotal(r) : "–") + '</td>'
     + '<td>' + (r.coverageLines != null ? (Math.round(r.coverageLines * 10) / 10) + '%' : "–") + '</td>'
     + '<td>' + fmtDur(r.durationMs) + '</td></tr>').join("");
-  app.innerHTML = head + banner + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / fail</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  app.innerHTML = head + banner + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / total</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
   app.querySelectorAll("tr.row").forEach((el) => {
     el.addEventListener("click", () => go("/project/" + encodeURIComponent(pid) + "/run/" + encodeURIComponent(el.getAttribute("data-run"))));
   });
 }
 
 async function renderRun(pid, runId) {
-  const back = '<a class="back" href="#/project/' + encodeURIComponent(pid) + '">← runs</a>';
+  const proj = (snapshot.projects || []).find((x) => x.projectId === pid);
+  const root = proj ? proj.path : "";
+  const back = '<a class="back" href="#/project/' + encodeURIComponent(pid) + '">← runs</a>' + projectLine(root);
   app.innerHTML = back + '<div class="empty">Loading…</div>';
   let rec;
   try { rec = await getJSON("/ui/api/projects/" + encodeURIComponent(pid) + "/runs/" + encodeURIComponent(runId)); }
@@ -309,15 +344,12 @@ async function renderRun(pid, runId) {
   const res = rec.result || {};
   const sel = res.selection || {};
   const kv = (k, v) => '<div class="kv"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
-  const resultCell = res.success == null ? "–" : (res.success ? '<span class="ok">pass</span>' : '<span class="fail">fail</span>');
   const grid = '<div class="detail-grid">'
-    + kv("status", badge(rec.status)) + kv("result", resultCell)
-    + kv("tests", res.total != null ? res.total : "–")
-    + kv("passed", '<span class="ok">' + (res.passed != null ? res.passed : "–") + '</span>')
-    + kv("failed", '<span class="fail">' + (res.failed != null ? res.failed : "–") + '</span>')
+    + kv("status", badge(rec.status))
+    + kv("pass / total", res.total != null ? passTotal(res) : "–")
     + kv("duration", fmtDur(rec.durationMs)) + '</div>';
   const files = (sel.files && sel.files.length)
-    ? '<ul class="files">' + sel.files.map((f) => '<li>' + esc(f) + '</li>').join("") + '</ul>'
+    ? '<ul class="files">' + sel.files.map((f) => '<li>' + esc(relPath(f, root)) + '</li>').join("") + '</ul>'
     : '<div class="ts">' + (sel.strategy === "full" ? "full suite (all test files)" : "no specific files") + '</div>';
   // Selection confidence (Story 6.8): degraded means the run may not fully cover the changes.
   // A degraded run can still PASS, so it gets its own amber badge — never the red failure style.
@@ -338,7 +370,7 @@ async function renderRun(pid, runId) {
     '<div class="section-title">tests (' + allTests.length + (res.testsTruncated ? "+, truncated" : "") + ')</div>'
     + '<ul class="tests">' + allTests.map((t) =>
         '<li><span class="' + testStatusClass(t.status) + '">' + esc(t.status) + '</span> '
-        + esc(t.name) + ' <span class="loc">' + esc(t.file || "") + '</span></li>').join("") + '</ul>';
+        + esc(t.name) + ' <span class="loc">' + esc(relPath(t.file, root)) + '</span></li>').join("") + '</ul>';
   // Coverage report (Story 6.10): a COMBINED whole-project picture (union of each test file's
   // latest measurement) with its own confidence — degraded when a changed source is unmeasured —
   // and per-file fresh/stale tags.
@@ -380,7 +412,7 @@ async function renderRun(pid, runId) {
     + ((cov.files && cov.files.length)
         ? '<table class="runs"><thead><tr><th>file</th><th>stmts</th><th>branch</th><th>funcs</th><th>lines</th></tr></thead><tbody>'
           + cov.files.map((f) =>
-              '<tr><td>' + esc(f.file) + covTag(f) + '</td><td>' + pctCell(f.statements) + '</td><td>'
+              '<tr><td>' + esc(relPath(f.file, root)) + covTag(f) + '</td><td>' + pctCell(f.statements) + '</td><td>'
               + pctCell(f.branches) + '</td><td>' + pctCell(f.functions) + '</td><td>'
               + pctCell(f.lines) + '</td></tr>').join("")
           + '</tbody></table>'
@@ -388,7 +420,7 @@ async function renderRun(pid, runId) {
   const fails = (rec.failures && rec.failures.length)
     ? '<div class="section-title">failures</div>' + rec.failures.map((f) =>
         '<div class="fail-item"><div class="name">' + esc(f.name) + '</div>'
-        + '<div class="loc">' + esc(f.file || "") + '</div>'
+        + '<div class="loc">' + esc(relPath(f.file, root)) + '</div>'
         + (f.message ? '<pre>' + esc(f.message) + '</pre>' : "")
         + (f.stack ? '<pre>' + esc(f.stack) + '</pre>' : "") + '</div>').join("")
     : (rec.status === "error" ? '<div class="section-title">error</div><pre>' + esc(rec.error || "") + '</pre>' : "");
@@ -418,9 +450,10 @@ function connect() {
   es.onmessage = (e) => {
     try { snapshot = JSON.parse(e.data); } catch (_) { return; }
     const p = routeParts();
-    // Live-refresh the list and the project history view; a run detail is immutable.
-    if (p.length === 0) renderList();
-    else if (p[0] === "project" && p.length === 1) render();
+    // Every route re-renders from the freshly-pushed snapshot except a run detail, which is
+    // immutable once recorded (its own record never changes after the run completes).
+    if (p[0] === "project" && p[2] === "run") return;
+    render();
   };
   es.onerror = () => { live.classList.remove("live"); };
 }

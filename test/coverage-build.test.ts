@@ -129,3 +129,45 @@ describe("coverage reverse-map build & persist", () => {
     expect(result.coverage!.thresholdsMet).toBe(true);
   }, 120_000);
 });
+
+// Coverage defaults to "opt out" once a project has proven it works there (an existing coverage
+// map), and stays "opt in" (off) until then — a fresh project isn't forced into an unmeasured
+// attempt on every run just because coverage exists as a capability.
+describe("coverage default (opt-out once a project has a coverage map)", () => {
+  it("omitting `coverage` on a fresh project (no map yet) still runs without coverage", async () => {
+    proj = makeProject();
+    const orch = new Orchestrator({ workerPath });
+
+    const result = await orch.runTests({ projectId: "cov1", path: proj }, {});
+
+    expect(result.coverage).toBeUndefined();
+    expect(loadCoverageMap(proj)).toBeNull();
+  }, 120_000);
+
+  it("omitting `coverage` after the project has a map defaults it to true", async () => {
+    proj = makeProject();
+    const orch = new Orchestrator({ workerPath });
+
+    // Build the map with an explicit opt-in, as today.
+    await orch.runTests({ projectId: "cov1", path: proj }, { coverage: true });
+    expect(loadCoverageMap(proj)).not.toBeNull();
+
+    // A later run that doesn't mention `coverage` at all now gets it by default.
+    const result = await orch.runTests({ projectId: "cov1", path: proj }, { files: ["math.test.ts"] });
+    expect(result.coverage).toBeDefined();
+  }, 120_000);
+
+  it("`coverage: false` still opts out even when the project already has a map", async () => {
+    proj = makeProject();
+    const orch = new Orchestrator({ workerPath });
+
+    await orch.runTests({ projectId: "cov1", path: proj }, { coverage: true });
+    expect(loadCoverageMap(proj)).not.toBeNull();
+
+    const result = await orch.runTests(
+      { projectId: "cov1", path: proj },
+      { coverage: false, files: ["math.test.ts"] },
+    );
+    expect(result.coverage).toBeUndefined();
+  }, 120_000);
+});

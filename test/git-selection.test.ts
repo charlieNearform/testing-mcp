@@ -184,6 +184,54 @@ describe("git-aware delta selection", () => {
     expect(result.selection.files.some((f) => f.includes("other.test.ts"))).toBe(false);
   }, 60_000);
 
+  // A NEW unmapped source's only named risk is a dynamic import the static graph can't see; when
+  // the project has none anywhere, that caveat must not fire and confidence should be HIGH.
+  it("a new untracked source is HIGH confidence when the project has no dynamic imports", async () => {
+    proj = makeProject(true);
+    seedCoverageMap(proj, { "math.ts": ["math.test.ts"], "other.ts": ["other.test.ts"] });
+    fs.mkdirSync(path.join(proj, "src"), { recursive: true });
+    fs.mkdirSync(path.join(proj, "test"), { recursive: true });
+    fs.writeFileSync(path.join(proj, "src", "date.ts"), `export const iso = () => "2026-07-15";\n`);
+    fs.writeFileSync(
+      path.join(proj, "test", "date.test.ts"),
+      `import { test, expect } from "vitest";\nimport { iso } from "../src/date.ts";\ntest("iso", () => expect(iso()).toBe("2026-07-15"));\n`,
+    );
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    expect(result.selection.strategy).toBe("incremental");
+    expect(result.confidence?.level).toBe("high");
+    expect(result.confidence?.reasons).toEqual([]);
+  }, 60_000);
+
+  // Same scenario, but the project genuinely has a dynamic `import()` elsewhere — the caveat is
+  // real here, so it must still fire and degrade the run.
+  it("a new untracked source stays degraded when the project DOES use dynamic import()", async () => {
+    proj = makeProject(true);
+    seedCoverageMap(proj, { "math.ts": ["math.test.ts"], "other.ts": ["other.test.ts"] });
+    fs.writeFileSync(
+      path.join(proj, "loader.ts"),
+      `export async function load(name: string) { return import(name); }\n`,
+    );
+    execFileSync("git", ["add", "-A"], { cwd: proj });
+    execFileSync("git", ["commit", "-q", "-m", "add a dynamic loader"], { cwd: proj, env: GIT_ENV });
+    fs.mkdirSync(path.join(proj, "src"), { recursive: true });
+    fs.mkdirSync(path.join(proj, "test"), { recursive: true });
+    fs.writeFileSync(path.join(proj, "src", "date.ts"), `export const iso = () => "2026-07-15";\n`);
+    fs.writeFileSync(
+      path.join(proj, "test", "date.test.ts"),
+      `import { test, expect } from "vitest";\nimport { iso } from "../src/date.ts";\ntest("iso", () => expect(iso()).toBe("2026-07-15"));\n`,
+    );
+
+    const orch = new Orchestrator({ workerPath });
+    const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
+
+    expect(result.selection.strategy).toBe("incremental");
+    expect(result.confidence?.level).toBe("degraded");
+    expect(result.confidence?.reasons.join(" ")).toContain("dynamic imports may be missed");
+  }, 60_000);
+
   // Story 6.6/6.8: a MODIFIED unmapped source is bounded by --changed, not forced full by the
   // plan. Here `unrelated.ts` is imported by NO test, so the worker's --changed pass finds nothing
   // and falls back to the full suite (no silent skip) — the run reports full for that reason.

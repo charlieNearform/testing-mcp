@@ -5,7 +5,12 @@ import { fileURLToPath } from "node:url";
 import type { TestResult, FailureDetail, TestPlan } from "../types/contracts.js";
 import { parseFromWorker, type ToWorker, type FromWorker } from "../types/ipc.js";
 import { loadCoverageMap } from "../coverage/index.js";
-import { SelectionEngine, getChangedFiles, type Confidence } from "../selection/index.js";
+import {
+  SelectionEngine,
+  getChangedFiles,
+  hasDynamicImportSyntax,
+  type Confidence,
+} from "../selection/index.js";
 import {
   selectionDelta,
   snapshotPayload,
@@ -165,6 +170,12 @@ export class Orchestrator {
     opts: {
       files?: string[];
       mode?: string;
+      /**
+       * Explicit override. When omitted, defaults to whether the project already has a
+       * coverage map: "opt out" (pass `false`) once coverage has been enabled for a project,
+       * "opt in" (off) until it has — a project that has never proven coverage works there
+       * isn't forced into an unmeasured attempt on every run.
+       */
       coverage?: boolean;
       /** Incremental baseline: "last-run" (default, hash-diff vs snapshot) or "head" (git HEAD). */
       since?: "last-run" | "head";
@@ -174,7 +185,8 @@ export class Orchestrator {
     } = {},
   ): Promise<TestResult> {
     const sel = this.resolveSelection(project, opts);
-    return this.enqueue(project, sel, opts.coverage === true, opts.onProgress);
+    const coverage = opts.coverage ?? loadCoverageMap(project.path) !== null;
+    return this.enqueue(project, sel, coverage, opts.onProgress);
   }
 
   /** Drop plans past their TTL so an uncommitted dry-run can't accumulate forever. */
@@ -312,11 +324,16 @@ export class Orchestrator {
         changed = delta.changed ?? getChangedFiles(project.path);
         pendingSnapshot = delta.pending;
       }
+      const map = loadCoverageMap(project.path);
+      // Only worth checking when there's a map to combine it with — a NEW-source caveat is
+      // otherwise unreachable (no map -> "changed-only" short-circuits before that branch).
+      const dynamicImportsPresent = map ? hasDynamicImportSyntax(project.path) : false;
       const plan = SelectionEngine.plan({
         changedFiles: changed?.files ?? null,
         addedFiles: changed?.added,
-        map: loadCoverageMap(project.path),
+        map,
         strict: opts.strict,
+        dynamicImportsPresent,
       });
       if (plan.strategy === "full") {
         return { files: [], changed: false, strategy: "full", reason: plan.reason, empty: false, deltaDriven: true, pendingSnapshot, confidence: plan.confidence };

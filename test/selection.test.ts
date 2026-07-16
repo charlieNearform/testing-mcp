@@ -91,6 +91,30 @@ describe("SelectionEngine.plan", () => {
     }
   });
 
+  it("a NEW unmapped source is HIGH confidence when the project has no dynamic imports", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["src/date.ts", "test/date.test.ts"],
+      addedFiles: ["src/date.ts", "test/date.test.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts"] }),
+      dynamicImportsPresent: false,
+    });
+    expect(plan).toMatchObject({ strategy: "incremental", union: true });
+    // The only named risk for a NEW source is a dynamic-import blind spot; ruled out -> HIGH.
+    expect(plan.confidence).toEqual({ level: "high", reasons: [] });
+  });
+
+  it("a NEW unmapped source stays degraded, naming the file, when dynamic imports ARE present", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["src/date.ts", "test/date.test.ts"],
+      addedFiles: ["src/date.ts", "test/date.test.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts"] }),
+      dynamicImportsPresent: true,
+    });
+    expect(plan.confidence.level).toBe("degraded");
+    expect(plan.confidence.reasons.join(" ")).toContain("dynamic imports may be missed");
+    expect(plan.confidence.reasons.join(" ")).toContain("src/date.ts");
+  });
+
   it("strict forces the full suite for an unmapped source, high confidence (Story 6.8 opt-out)", () => {
     const plan = SelectionEngine.plan({
       changedFiles: ["src/legacy.ts"],

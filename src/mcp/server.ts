@@ -100,7 +100,11 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
         coverage: z
           .boolean()
           .optional()
-          .describe("Build/refresh the source->test coverage map for this run"),
+          .describe(
+            "Build/refresh the source->test coverage map for this run. If omitted, defaults to " +
+              "true once the project already has a coverage map (pass false to opt out for this " +
+              "run), otherwise defaults to false until first enabled.",
+          ),
         files: z.array(z.string()).optional().describe("Specific files to run"),
         since: z
           .enum(["last-run", "head"])
