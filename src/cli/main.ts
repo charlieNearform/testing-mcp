@@ -180,11 +180,21 @@ program
   .command("register")
   .description("Register the current project with the daemon (Story 1.3)")
   .option("--no-spawn", "do not auto-boot the daemon; fail if it is not running")
-  .action(async (opts: { spawn: boolean }) => {
+  .option(
+    "--dir <dir>",
+    "subfolder (relative to cwd) containing the vitest/vite config, if not at the git root",
+  )
+  .action(async (opts: { spawn: boolean; dir?: string }) => {
     try {
       const gitRoot = resolveGitRoot(process.cwd());
       ensureProjectConfig(gitRoot);
       ensureGitignore(gitRoot);
+      const registerPath = opts.dir ? path.resolve(process.cwd(), opts.dir) : gitRoot;
+      if (registerPath !== gitRoot && !registerPath.startsWith(gitRoot + path.sep)) {
+        return errExit(
+          `test-mcp register: --dir ${opts.dir} resolves outside the git repository (${gitRoot})`,
+        );
+      }
       // commander sets opts.spawn = false when --no-spawn is passed.
       const { port, token } = await ensureDaemon(opts.spawn === false);
       const transport = new StreamableHTTPClientTransport(
@@ -195,7 +205,7 @@ program
       await client.connect(transport);
       const res = (await client.callTool({
         name: "register_project",
-        arguments: { path: gitRoot },
+        arguments: { path: registerPath },
       })) as { isError?: boolean; content: Array<{ type: string; text: string }> };
       await client.close();
       const text = res.content?.[0]?.text;

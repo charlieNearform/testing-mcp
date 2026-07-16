@@ -79,4 +79,42 @@ describe("test-mcp register (CLI)", () => {
     const status = await execFileAsync(process.execPath, [bin, "status"], { cwd: project, env });
     expect(status.stdout).toContain("registered projects: 1");
   });
+
+  it("register --dir registers a vitest config that lives in a subfolder", async () => {
+    // No config at the git root — only inside packages/foo — mirrors a monorepo layout.
+    fs.rmSync(path.join(project, "vitest.config.ts"));
+    const sub = path.join(project, "packages", "foo");
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, "vitest.config.ts"), "export default {};\n");
+
+    const subReal = fs.realpathSync(sub);
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [bin, "register", "--dir", "packages/foo"],
+      { cwd: project, env },
+    );
+    expect(stdout).toContain("registered");
+    expect(stdout).toContain(subReal);
+    const reg = JSON.parse(fs.readFileSync(path.join(home, "registry.json"), "utf8"));
+    const entries = Object.values(reg.projects) as Array<{ path: string }>;
+    expect(entries.map((p) => p.path)).toContain(subReal);
+  });
+
+  it("register --dir rejects a path outside the git repository", async () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-cli-outside-"));
+    try {
+      await expect(
+        execFileAsync(
+          process.execPath,
+          [bin, "register", "--dir", outside, "--no-spawn"],
+          { cwd: project, env },
+        ),
+      ).rejects.toMatchObject({
+        code: 1,
+        stderr: expect.stringContaining("resolves outside the git repository"),
+      });
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
 });
