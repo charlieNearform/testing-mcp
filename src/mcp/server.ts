@@ -340,11 +340,17 @@ export function createMcpRequestListener(deps: McpListenerDeps): RequestListener
 
       if (method === "POST") {
         const body = await readJsonBody(req);
-        if (sid && transports.has(sid)) {
+        if (sid) {
+          // 404 (not 400) for an unrecognized session — e.g. after a daemon restart wiped
+          // the in-memory transports map — so spec-compliant clients know to reinitialize
+          // instead of surfacing a fatal error and getting stuck.
+          if (!transports.has(sid)) {
+            return sendJson(res, 404, toAppError("ValidationError", "Session not found"));
+          }
           await transports.get(sid)!.handleRequest(req, res, body);
           return;
         }
-        if (!sid && isInitializeRequest(body)) {
+        if (isInitializeRequest(body)) {
           const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (id) => {
@@ -364,11 +370,14 @@ export function createMcpRequestListener(deps: McpListenerDeps): RequestListener
       }
 
       if (method === "GET" || method === "DELETE") {
-        if (sid && transports.has(sid)) {
-          await transports.get(sid)!.handleRequest(req, res);
-          return;
+        if (!sid) {
+          return sendJson(res, 400, toAppError("ValidationError", "No valid session"));
         }
-        return sendJson(res, 400, toAppError("ValidationError", "No valid session"));
+        if (!transports.has(sid)) {
+          return sendJson(res, 404, toAppError("ValidationError", "Session not found"));
+        }
+        await transports.get(sid)!.handleRequest(req, res);
+        return;
       }
 
       return sendJson(res, 405, toAppError("ValidationError", "Method not allowed"));

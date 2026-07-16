@@ -144,6 +144,34 @@ describe("secured MCP HTTP transport", () => {
     expect(health.status).toBe(200);
   });
 
+  it("returns 404 (not 400) for an unrecognized session id, so clients know to reinitialize", async () => {
+    handle = await startDaemon();
+    const res = await rawRequest(handle.port, {
+      headers: {
+        host: `127.0.0.1:${handle.port}`,
+        "content-type": "application/json",
+        authorization: `Bearer ${handle.token}`,
+        "mcp-session-id": "stale-session-from-before-a-restart",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    expect(res.status).toBe(404);
+    expect(JSON.parse(res.body).code).toBe("ValidationError");
+  });
+
+  it("returns 400 for a GET/DELETE with no session id at all", async () => {
+    handle = await startDaemon();
+    const res = await rawRequest(handle.port, {
+      method: "GET",
+      path: "/mcp",
+      headers: {
+        host: `127.0.0.1:${handle.port}`,
+        authorization: `Bearer ${handle.token}`,
+      },
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("lists all Phase-1 tools over an authenticated Streamable HTTP session", async () => {
     handle = await startDaemon();
     const transport = new StreamableHTTPClientTransport(
