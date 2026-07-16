@@ -30,20 +30,23 @@ test-mcp register
 ```
 
 `register` scaffolds `<git-root>/.test-mcp/`, auto-boots the daemon, and registers the
-project with it — printing the `projectId` that MCP tool calls use.
+project with it — printing the `projectId` that MCP tool calls use. It also writes a
+`test-mcp` entry to `.mcp.json` and `.cursor/mcp.json` (creating or merging into either file,
+without touching other keys/servers) so your AI agent is connected with no extra step:
 
-To connect an AI agent, generate its MCP client config:
-
-```bash
-test-mcp mcp-config
+```jsonc
+{
+  "mcpServers": {
+    "test-mcp": { "command": "test-mcp", "args": ["mcp-bridge"] }
+  }
+}
 ```
 
-This prints two options for pointing a client at `http://127.0.0.1:7420/mcp` with the bearer
-token (a **per-machine daemon secret**, **stable across restarts**). Because a project
-`.mcp.json` is usually committed, it must not contain the token — so you either add the
-server at **local scope** (token in your uncommitted client settings) or commit a `.mcp.json`
-that uses a **`headersHelper`** to read the daemon's local token file (no token or env var in
-the repo). See [docs/usage.md](docs/usage.md#connecting-an-ai-agent-mcp-client-config).
+`mcp-bridge` is a local stdio process that reads the daemon's token itself and proxies to the
+HTTP endpoint — no token, env var, or path in the file, so both are safe to commit. It's a
+plain stdio server from the client's point of view, so the same entry works unmodified for
+Claude Code, Cursor, or any other MCP client. See
+[docs/usage.md](docs/usage.md#connecting-an-ai-agent-mcp-client-config).
 
 Connecting the MCP client only lets an agent *call* the tools — it doesn't tell the agent
 *when* to use them instead of `pnpm test`/`vitest` directly. For that, copy the snippet in
@@ -60,8 +63,8 @@ test-mcp start      # start the singleton daemon (idempotent)
 test-mcp status     # running/stopped, pid, port, registered-project count
 test-mcp stop       # graceful shutdown
 test-mcp init       # scaffold <git-root>/.test-mcp/ without touching the daemon
-test-mcp register   # scaffold + auto-boot daemon + register the current project
-test-mcp mcp-config # print MCP client config to connect an agent (two safe options)
+test-mcp register   # scaffold + auto-boot daemon + register + write MCP client config
+test-mcp mcp-bridge # stdio<->HTTP bridge; used by the .mcp.json / .cursor/mcp.json entry
 test-mcp ui         # print the monitoring UI URL (http://127.0.0.1:<port>/ui)
 test-mcp link       # symlink this CLI into a writable dir on your PATH
 test-mcp unlink     # remove that symlink

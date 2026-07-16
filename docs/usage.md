@@ -87,7 +87,10 @@ This:
 1. Resolves the git root.
 2. Creates `<git-root>/.test-mcp/config.json` (with a stable `projectId`) if absent.
 3. Adds `.test-mcp/` to the project's `.gitignore`.
-4. Auto-boots the daemon if needed, then calls the `register_project` MCP tool.
+4. Writes a `test-mcp` entry to `.mcp.json` and `.cursor/mcp.json` (creating either file if
+   absent, merging into it if present — see [Connecting an AI
+   agent](#connecting-an-ai-agent-mcp-client-config) below).
+5. Auto-boots the daemon if needed, then calls the `register_project` MCP tool.
 
 On success it prints the `projectId` — that's what every project-scoped tool call needs.
 
@@ -110,19 +113,36 @@ misconfigured job fails loudly.
 
 ## Connecting an AI agent (MCP client config)
 
-The daemon speaks MCP over **Streamable HTTP** at `http://127.0.0.1:<port>/mcp`, gated by the
-bearer token. `test-mcp register` records the project *with the daemon*; it does **not** write
-your agent's MCP client config. To generate that, run:
+The daemon speaks MCP over **Streamable HTTP** at `http://127.0.0.1:<port>/mcp`, gated by a
+per-machine bearer token that's **stable across restarts**. `test-mcp register` writes the
+client config for you — no separate command needed. It creates or merges a `test-mcp` entry
+(preserving any other keys/servers already in the file) into both:
 
-```bash
-test-mcp mcp-config
+```jsonc
+// .mcp.json and .cursor/mcp.json (both safe to commit)
+{
+  "mcpServers": {
+    "test-mcp": {
+      "command": "test-mcp",
+      "args": ["mcp-bridge"]
+    }
+  }
+}
 ```
 
-It prints two ready-to-use options — the token is a **per-machine daemon secret**, so pick
-based on whether the config lives in your repo:
+Rather than connecting to the HTTP endpoint directly (which would mean either committing the
+token or relying on a fragile `${ENV_VAR}` header — GUI/IDE-launched clients often don't
+inherit your shell's exports, and some clients, e.g. Cursor, don't resolve env vars in
+remote-server headers at all), this points the client at a local stdio command:
+`test-mcp mcp-bridge` reads the daemon's token itself and proxies stdio to the HTTP endpoint.
+No token, env var, or path ever appears in the file, and — because it's a plain stdio MCP
+server from the client's point of view — the same entry works unmodified for Claude Code,
+Cursor, or any other MCP client; there's no client-specific variant to maintain.
 
-**Option A — local scope: token in your client's local (uncommitted) settings.**
-Simplest one-off; nothing about test-mcp goes in the repo. Each developer runs it once:
+`mcp-bridge` assumes `test-mcp` is on PATH (`test-mcp link`) and auto-boots the daemon if it
+isn't already running (pass `--no-spawn` to fail instead). If you need to connect a client
+without running `register` — or want the token in your local, uncommitted client settings
+instead — add the server manually, e.g.:
 
 ```bash
 claude mcp add --transport http --scope local test-mcp \
@@ -130,35 +150,10 @@ claude mcp add --transport http --scope local test-mcp \
   --header "Authorization: Bearer <token>"
 ```
 
-**Option B — committed `.mcp.json` with a `headersHelper` (recommended for a shared repo).**
-A project `.mcp.json` is usually committed, so it must **not** contain the token — and an
-`${ENV_VAR}` header is fragile because a GUI/IDE-launched client often doesn't inherit your
-shell's exports. Instead, use a **`headersHelper`**: a small command Claude Code runs on each
-connect that reads the daemon's local token file and emits the auth header. No token and no
-env var in the repo, and it survives GUI launches and daemon restarts:
-
-```jsonc
-// .mcp.json (safe to commit)
-{
-  "mcpServers": {
-    "test-mcp": {
-      "type": "http",
-      "url": "http://127.0.0.1:7420/mcp",
-      "headersHelper": "printf '{\"Authorization\":\"Bearer %s\"}' \"$(cat \"$HOME/.test-mcp/token\")\""
-    }
-  }
-}
-```
-
-The daemon writes that token file (`~/.test-mcp/token`, mode `0600`) on start and keeps it
-current. The token is **stable across restarts** (see below), so either config keeps working.
-The CLI itself is a reference client: `test-mcp register` reads the token, connects over HTTP
-with the bearer header, and calls `register_project`.
-
 > Why not the "Authenticate" (OAuth) button like Figma/JIRA? That requires the server to be a
 > full OAuth 2.1 authorization server (metadata, dynamic client registration, `/authorize` +
 > PKCE, `/token`). For a loopback, single-user daemon that's large and buys no security over
-> the loopback bind + bearer token — the `headersHelper` gives the same seamless connect.
+> the loopback bind + bearer token — the bridge gives the same seamless connect.
 
 ### Tool catalog
 

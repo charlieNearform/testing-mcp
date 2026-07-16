@@ -6,10 +6,6 @@ import {
   readLockfile,
   isPidAlive,
   loadOrCreateConfig,
-  resolveToken,
-  writeTokenFile,
-  tokenFilePath,
-  centralDir,
 } from "../daemon/index.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -18,6 +14,8 @@ import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { computeProjectId } from "../registry/project-registry.js";
 import { SCHEMA_VERSION } from "../index.js";
 
@@ -86,6 +84,58 @@ function ensureGitignore(gitRoot: string): void {
   if (hasEntry) return;
   const prefix = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
   fs.appendFileSync(gitignorePath, `${prefix}.test-mcp/\n`);
+}
+
+/** The MCP client config entry every well-known client config file should carry. */
+const MCP_BRIDGE_ENTRY = { command: "test-mcp", args: ["mcp-bridge"] };
+
+/** Well-known MCP client config files, relative to the git root. */
+const MCP_CLIENT_CONFIG_FILES = [".mcp.json", path.join(".cursor", "mcp.json")];
+
+/**
+ * Ensure each well-known MCP client config file has a "test-mcp" entry pointing at
+ * `mcp-bridge` — no port or token in the file, so it's safe to commit and works unmodified
+ * for any MCP client. Merges into an existing file without touching its other keys/servers;
+ * idempotent (a no-op once the entry already matches). Returns the relative paths written.
+ */
+function ensureMcpClientConfigs(gitRoot: string): string[] {
+  const written: string[] = [];
+  for (const rel of MCP_CLIENT_CONFIG_FILES) {
+    const filePath = path.join(gitRoot, rel);
+    let parsed: Record<string, unknown> = {};
+    let raw = "";
+    try {
+      raw = fs.readFileSync(filePath, "utf8");
+    } catch {
+      // file doesn't exist yet — start from an empty object
+    }
+    if (raw.trim().length > 0) {
+      let json: unknown;
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        throw new Error(`${rel} is not valid JSON; fix or remove it before running register`);
+      }
+      if (typeof json !== "object" || json === null || Array.isArray(json)) {
+        throw new Error(`${rel} does not contain a JSON object at its root`);
+      }
+      parsed = json as Record<string, unknown>;
+    }
+    const existingServers =
+      typeof parsed.mcpServers === "object" &&
+      parsed.mcpServers !== null &&
+      !Array.isArray(parsed.mcpServers)
+        ? (parsed.mcpServers as Record<string, unknown>)
+        : {};
+    if (JSON.stringify(existingServers["test-mcp"]) === JSON.stringify(MCP_BRIDGE_ENTRY)) {
+      continue; // already correct — don't rewrite/reformat the file
+    }
+    parsed.mcpServers = { ...existingServers, "test-mcp": MCP_BRIDGE_ENTRY };
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, `${JSON.stringify(parsed, null, 2)}\n`);
+    written.push(rel);
+  }
+  return written;
 }
 
 /** Absolute path to this package's bin, resolved from the compiled module location. */
@@ -189,6 +239,7 @@ program
       const gitRoot = resolveGitRoot(process.cwd());
       ensureProjectConfig(gitRoot);
       ensureGitignore(gitRoot);
+      const mcpConfigsWritten = ensureMcpClientConfigs(gitRoot);
       const registerPath = opts.dir ? path.resolve(process.cwd(), opts.dir) : gitRoot;
       if (registerPath !== gitRoot && !registerPath.startsWith(gitRoot + path.sep)) {
         return errExit(
@@ -221,10 +272,13 @@ program
       if (res.isError) {
         return errExit(`test-mcp register: ${payload.code}: ${payload.message}`);
       }
+      const mcpConfigNote =
+        mcpConfigsWritten.length > 0
+          ? `MCP client config written: ${mcpConfigsWritten.join(", ")} (safe to commit).`
+          : "MCP client config already present (.mcp.json / .cursor/mcp.json).";
       return outExit(
         `test-mcp register: registered ${payload.projectId} (${payload.path})\n` +
-          `Monitoring UI: http://127.0.0.1:${port}/ui\n` +
-          "Next: run `test-mcp mcp-config` to connect your MCP client (agent).",
+          `Monitoring UI: http://127.0.0.1:${port}/ui\n${mcpConfigNote}`,
       );
     } catch (err) {
       return errExit(`test-mcp register: ${(err as Error).message}`);
@@ -396,77 +450,59 @@ program
   });
 
 program
-  .command("mcp-config")
-  .description("Print MCP client config to connect an agent to the daemon (two safe options)")
-  .action(() => {
+  .command("mcp-bridge")
+  .description(
+    "Stdio<->HTTP bridge to the daemon; used by the .mcp.json / .cursor/mcp.json entry `register` writes",
+  )
+  .option("--no-spawn", "do not auto-boot the daemon; fail if it is not running")
+  .action(async (opts: { spawn: boolean }) => {
     try {
-      // Prefer the live daemon's token/port; otherwise derive from persisted config
-      // (resolveToken reuses the stable token, so what we print matches the next start).
-      const lock = readLockfile();
-      let port: number;
-      let token: string;
-      if (lock && isPidAlive(lock.pid)) {
-        port = lock.port;
-        token = lock.token;
-      } else {
-        const cfg = loadOrCreateConfig();
-        port = cfg.port;
-        token = resolveToken(cfg);
-      }
-      const url = `http://127.0.0.1:${port}/mcp`;
+      // commander sets opts.spawn = false when --no-spawn is passed.
+      const { port, token } = await ensureDaemon(opts.spawn === false);
 
-      // Ensure the plaintext token file exists so Option B's headersHelper works immediately
-      // (the daemon also keeps it current on start).
-      writeTokenFile(token);
-      const defaultCentral = path.join(os.homedir(), ".test-mcp");
-      const tokenPathForHelper =
-        centralDir() === defaultCentral
-          ? "$HOME/.test-mcp/token" // portable across machines
-          : tokenFilePath(); // custom TEST_MCP_HOME — use the absolute path
-      const helperCmd = `printf '{"Authorization":"Bearer %s"}' "$(cat "${tokenPathForHelper}")"`;
-
-      // If run inside a registered project, note its id (passed as projectId to tools).
-      let projectNote = "";
-      try {
-        const gitRoot = resolveGitRoot(process.cwd());
-        const repoCfg = JSON.parse(
-          fs.readFileSync(path.join(gitRoot, ".test-mcp", "config.json"), "utf8"),
-        ) as { projectId?: string };
-        if (repoCfg.projectId) {
-          projectNote = `\n# This project's id (pass as projectId to the tools): ${repoCfg.projectId}`;
-        }
-      } catch {
-        // not inside a registered project — the daemon serves every registered project anyway
-      }
-
-      // Committed-safe config: no token or env var in the repo — a headersHelper reads the
-      // daemon's local token file on each connect (survives GUI launches and daemon restarts).
-      const mcpJson = JSON.stringify(
-        { mcpServers: { "test-mcp": { type: "http", url, headersHelper: helperCmd } } },
-        null,
-        2,
+      const serverTransport = new StdioServerTransport();
+      const clientTransport = new StreamableHTTPClientTransport(
+        new URL(`http://127.0.0.1:${port}/mcp`),
+        { requestInit: { headers: { Authorization: `Bearer ${token}` } } },
       );
 
-      const out = [
-        `# test-mcp MCP config — daemon at ${url}${projectNote}`,
-        ``,
-        `# ── Option A ─ local scope: token stored in your local (uncommitted) client settings.`,
-        `#    Simplest one-off; run once per machine:`,
-        `claude mcp add --transport http --scope local test-mcp \\`,
-        `  ${url} \\`,
-        `  --header "Authorization: Bearer ${token}"`,
-        ``,
-        `# ── Option B ─ commit .mcp.json (recommended for a shared repo). No token or env var`,
-        `#    in git: a headersHelper reads the daemon's local token file (${tokenPathForHelper}) each connect.`,
-        mcpJson,
-        ``,
-        `# Trade-off: A is a quick per-machine command; B is committable and needs no env var`,
-        `# (each dev just needs a running local daemon, whose token file the helper reads).`,
-      ].join("\n");
+      let closing = false;
+      const closeBoth = async (): Promise<void> => {
+        if (closing) return;
+        closing = true;
+        await Promise.allSettled([serverTransport.close(), clientTransport.close()]);
+        process.exit(0);
+      };
 
-      return outExit(out);
+      // A raw JSON-RPC pipe: both sides are plain Transports (not Client/Server), so every
+      // message — including the initial handshake — is forwarded verbatim in each direction.
+      serverTransport.onmessage = (message: JSONRPCMessage) => {
+        clientTransport.send(message).catch((err: unknown) => {
+          process.stderr.write(
+            `test-mcp mcp-bridge: send to daemon failed: ${(err as Error).message}\n`,
+          );
+        });
+      };
+      clientTransport.onmessage = (message: JSONRPCMessage) => {
+        serverTransport.send(message).catch((err: unknown) => {
+          process.stderr.write(
+            `test-mcp mcp-bridge: send to client failed: ${(err as Error).message}\n`,
+          );
+        });
+      };
+      serverTransport.onclose = () => void closeBoth();
+      clientTransport.onclose = () => void closeBoth();
+      serverTransport.onerror = (err: Error) =>
+        process.stderr.write(`test-mcp mcp-bridge: stdio transport error: ${err.message}\n`);
+      clientTransport.onerror = (err: Error) =>
+        process.stderr.write(`test-mcp mcp-bridge: daemon transport error: ${err.message}\n`);
+
+      await clientTransport.start();
+      await serverTransport.start();
+      process.once("SIGTERM", () => void closeBoth());
+      process.once("SIGINT", () => void closeBoth());
     } catch (err) {
-      return errExit(`test-mcp mcp-config: ${(err as Error).message}`);
+      return errExit(`test-mcp mcp-bridge: ${(err as Error).message}`);
     }
   });
 

@@ -80,6 +80,53 @@ describe("test-mcp register (CLI)", () => {
     expect(status.stdout).toContain("registered projects: 1");
   });
 
+  it("register writes .mcp.json and .cursor/mcp.json with the mcp-bridge entry", async () => {
+    const { stdout } = await execFileAsync(process.execPath, [bin, "register"], {
+      cwd: project,
+      env,
+    });
+    expect(stdout).toContain("MCP client config written: .mcp.json, .cursor/mcp.json");
+    const bridgeEntry = { command: "test-mcp", args: ["mcp-bridge"] };
+    const mcpJson = JSON.parse(fs.readFileSync(path.join(project, ".mcp.json"), "utf8"));
+    expect(mcpJson.mcpServers["test-mcp"]).toEqual(bridgeEntry);
+    const cursorJson = JSON.parse(
+      fs.readFileSync(path.join(project, ".cursor", "mcp.json"), "utf8"),
+    );
+    expect(cursorJson.mcpServers["test-mcp"]).toEqual(bridgeEntry);
+  });
+
+  it("register merges into an existing .mcp.json without touching other servers/keys", async () => {
+    fs.writeFileSync(
+      path.join(project, ".mcp.json"),
+      JSON.stringify({ someOtherSetting: true, mcpServers: { other: { command: "other" } } }, null, 2),
+    );
+    await execFileAsync(process.execPath, [bin, "register"], { cwd: project, env });
+    const mcpJson = JSON.parse(fs.readFileSync(path.join(project, ".mcp.json"), "utf8"));
+    expect(mcpJson.someOtherSetting).toBe(true);
+    expect(mcpJson.mcpServers.other).toEqual({ command: "other" });
+    expect(mcpJson.mcpServers["test-mcp"]).toEqual({ command: "test-mcp", args: ["mcp-bridge"] });
+  });
+
+  it("register is idempotent — a second run leaves an already-correct .mcp.json untouched", async () => {
+    await execFileAsync(process.execPath, [bin, "register"], { cwd: project, env });
+    const before = fs.readFileSync(path.join(project, ".mcp.json"), "utf8");
+    const { stdout } = await execFileAsync(process.execPath, [bin, "register"], { cwd: project, env });
+    expect(stdout).toContain("MCP client config already present");
+    expect(fs.readFileSync(path.join(project, ".mcp.json"), "utf8")).toBe(before);
+  });
+
+  it("register fails loudly instead of clobbering an unparsable .mcp.json", async () => {
+    fs.writeFileSync(path.join(project, ".mcp.json"), "{ not valid json");
+    await expect(
+      execFileAsync(process.execPath, [bin, "register"], { cwd: project, env }),
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(".mcp.json is not valid JSON"),
+    });
+    // The bad file is left exactly as it was — never overwritten.
+    expect(fs.readFileSync(path.join(project, ".mcp.json"), "utf8")).toBe("{ not valid json");
+  });
+
   it("register --dir registers a vitest config that lives in a subfolder", async () => {
     // No config at the git root — only inside packages/foo — mirrors a monorepo layout.
     fs.rmSync(path.join(project, "vitest.config.ts"));
