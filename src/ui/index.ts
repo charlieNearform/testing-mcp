@@ -226,6 +226,10 @@ const UI_HTML = `<!doctype html>
   .ok { color:var(--ok); } .fail { color:var(--fail); } .skip { color:var(--muted); }
   .banner { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:12px 14px; margin-bottom:16px;
     background:var(--card); border:1px solid var(--border); border-radius:8px; }
+  /* .counts/.summary are stacked block elements elsewhere (their margin-top spaces them from a
+     heading above); as flex siblings of the badge here, that top margin offsets their box within
+     the centered row, so cancel it to keep all three vertically centered with the badge. */
+  .banner .counts, .banner .summary { margin-top:0; }
   ul.tests { list-style:none; padding:0; margin:8px 0; }
   ul.tests li { padding:3px 0; font-size:13px; border-bottom:1px solid var(--border); }
   ul.tests li span.ok, ul.tests li span.fail, ul.tests li span.skip { display:inline-block; width:56px; font-weight:600; font-size:11px; text-transform:uppercase; }
