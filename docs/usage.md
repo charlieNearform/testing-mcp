@@ -284,7 +284,7 @@ check that also needs no auth.
 
 | What | Location | Notes |
 |------|----------|-------|
-| Daemon config | `~/.test-mcp/config.json` | `port` (7420), `maxConcurrentWorkers` (CPU count), `workerIdleTtlMs` (300000), `token` (stable bearer secret); mode `0600` |
+| Daemon config | `~/.test-mcp/config.json` | `port` (7420), `maxConcurrentWorkers` (CPU count), `workerIdleTtlMs` (300000), `token` (stable bearer secret), `runTimeoutMs` (optional; unset = no cap, a suite may run any length); mode `0600` |
 | Lockfile | `~/.test-mcp/daemon.lock` | `{ pid, port, token, startedAt }`, mode `0600` |
 | Token file | `~/.test-mcp/token` | plaintext bearer for the `headersHelper` flow, mode `0600` |
 | Project registry | `~/.test-mcp/registry.json` | central record of registered projects |

@@ -112,7 +112,7 @@ type ProgressFn = (completed: number, total: number) => void;
 export interface OrchestratorOptions {
   /** Absolute path to the built worker (dist/worker/index.js). Tests inject this. */
   workerPath?: string;
-  /** Hard ceiling for a single run before the worker is killed. */
+  /** Hard ceiling for a single run before the worker is killed. Unset = no cap (default). */
   runTimeoutMs?: number;
   /** How long a dry-run plan stays valid before it must be re-planned (Story 4.1). */
   planTtlMs?: number;
@@ -122,7 +122,8 @@ export interface OrchestratorOptions {
 
 export class Orchestrator {
   private readonly workerPath: string;
-  private readonly runTimeoutMs: number;
+  /** Undefined means no cap: a real suite can legitimately run 15-20+ minutes. */
+  private readonly runTimeoutMs: number | undefined;
   private readonly planTtlMs: number;
   /** Global worker semaphore (architecture: workers bounded by maxConcurrentWorkers). */
   private readonly maxConcurrentWorkers: number;
@@ -152,7 +153,8 @@ export class Orchestrator {
     // In production this module runs from dist/, so ../worker/index.js resolves to dist/worker/index.js.
     this.workerPath =
       opts.workerPath ?? fileURLToPath(new URL("../worker/index.js", import.meta.url));
-    this.runTimeoutMs = opts.runTimeoutMs ?? 120_000;
+    // No default cap: an operator opts in via DaemonConfig.runTimeoutMs (src/daemon/index.ts).
+    this.runTimeoutMs = opts.runTimeoutMs;
     this.planTtlMs = opts.planTtlMs ?? 300_000;
     this.maxConcurrentWorkers = Math.max(1, opts.maxConcurrentWorkers ?? Number.POSITIVE_INFINITY);
   }
@@ -446,14 +448,25 @@ export class Orchestrator {
       });
 
       let settled = false;
-      const timer = setTimeout(() => {
-        finish(() => failRun(new WorkerError(`worker timed out after ${this.runTimeoutMs}ms`)));
-      }, this.runTimeoutMs);
+      // Never pass a huge/Infinity delay to setTimeout directly (Node's delay is a 32-bit signed
+      // int -- max 2147483647ms, ~24.8 days -- and an overflowing value fires almost immediately)
+      // -- only schedule a timer at all when a finite positive cap within that range is
+      // configured. Unset (the default) means the run is uncapped.
+      const MAX_SETTIMEOUT_MS = 2_147_483_647;
+      const timer =
+        this.runTimeoutMs != null &&
+        Number.isFinite(this.runTimeoutMs) &&
+        this.runTimeoutMs > 0 &&
+        this.runTimeoutMs <= MAX_SETTIMEOUT_MS
+          ? setTimeout(() => {
+              finish(() => failRun(new WorkerError(`worker timed out after ${this.runTimeoutMs}ms`)));
+            }, this.runTimeoutMs)
+          : undefined;
 
       const finish = (act: () => void): void => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         child.removeAllListeners();
         if (!child.killed) child.kill();
         act();

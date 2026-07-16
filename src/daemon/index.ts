@@ -24,6 +24,12 @@ const DaemonConfigSchema = z.object({
    * TEST_MCP_TOKEN. Optional for configs written before it existed.
    */
   token: z.string().optional(),
+  /**
+   * Optional hard ceiling (ms) for a single worker run. Unset by default (Orchestrator has no
+   * cap) since a real suite can legitimately take 15-20+ minutes; an operator opts into a safety
+   * net by setting this in config.json.
+   */
+  runTimeoutMs: z.number().int().positive().optional(),
 });
 
 export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
@@ -196,7 +202,10 @@ export async function startDaemon(): Promise<DaemonHandle> {
         `starting with an empty registry\n`,
     );
   }
-  const orchestrator = new Orchestrator({ maxConcurrentWorkers: cfg.maxConcurrentWorkers });
+  const orchestrator = new Orchestrator({
+    maxConcurrentWorkers: cfg.maxConcurrentWorkers,
+    runTimeoutMs: cfg.runTimeoutMs,
+  });
   // Rehydrate each registered project's run history and test inventory from disk (Story 6.2;
   // test-count-accuracy fix) so past runs and the "total tests" figure survive a restart.
   // Best-effort — a rehydration problem must never abort daemon startup.

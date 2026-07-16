@@ -18,6 +18,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { computeProjectId } from "../registry/project-registry.js";
 import { SCHEMA_VERSION } from "../index.js";
+import { createSendFailureHandler } from "./mcp-bridge-resilience.js";
 
 /** CLI-side error for daemon reachability failures (maps to ErrorCode DaemonUnavailable). */
 function daemonUnavailable(message: string): Error {
@@ -461,10 +462,26 @@ program
       const { port, token } = await ensureDaemon(opts.spawn === false);
 
       const serverTransport = new StdioServerTransport();
-      const clientTransport = new StreamableHTTPClientTransport(
-        new URL(`http://127.0.0.1:${port}/mcp`),
-        { requestInit: { headers: { Authorization: `Bearer ${token}` } } },
-      );
+      const daemonUrl = new URL(`http://127.0.0.1:${port}/mcp`);
+      const authHeaders = { Authorization: `Bearer ${token}` };
+      // The SDK's own default (maxRetries: 2) gives up SSE-reconnecting after a couple of
+      // transient blips and only ever fires onerror, never onclose -- silently leaving the
+      // stream dead for the rest of what can be a 15-20+ minute run. Raise the budget well
+      // past that so ordinary network hiccups self-heal via the SDK's own capped backoff.
+      const reconnectionOptions = {
+        initialReconnectionDelay: 1000,
+        maxReconnectionDelay: 30_000,
+        reconnectionDelayGrowFactor: 1.5,
+        maxRetries: 200,
+      };
+
+      const makeClientTransport = (): StreamableHTTPClientTransport =>
+        new StreamableHTTPClientTransport(daemonUrl, {
+          requestInit: { headers: authHeaders },
+          reconnectionOptions,
+        });
+
+      let clientTransport = makeClientTransport();
 
       let closing = false;
       const closeBoth = async (): Promise<void> => {
@@ -474,28 +491,74 @@ program
         process.exit(0);
       };
 
+      // Cached verbatim so a dead daemon-side session can be transparently recreated: replaying
+      // `initialize` then `notifications/initialized` against a fresh transport reproduces the
+      // handshake the daemon needs before it will accept anything else.
+      let cachedInitialize: JSONRPCMessage | undefined;
+      let cachedInitialized: JSONRPCMessage | undefined;
+
+      const bindClientHandlers = (transport: StreamableHTTPClientTransport): void => {
+        transport.onmessage = (message: JSONRPCMessage) => {
+          serverTransport.send(message).catch((err: unknown) => {
+            process.stderr.write(
+              `test-mcp mcp-bridge: send to client failed: ${(err as Error).message}\n`,
+            );
+          });
+        };
+        transport.onclose = () => void closeBoth();
+        transport.onerror = (err: Error) =>
+          process.stderr.write(`test-mcp mcp-bridge: daemon transport error: ${err.message}\n`);
+      };
+
+      // Build and start a fresh transport (same URL/auth), re-bind handlers, and replay the
+      // cached handshake -- converts a daemon-side session that is gone (crash/restart/eviction)
+      // into a fresh one without needing to know why the old one died.
+      const recreateSession = async (): Promise<void> => {
+        const stale = clientTransport;
+        const fresh = makeClientTransport();
+        bindClientHandlers(fresh);
+        await fresh.start();
+        if (cachedInitialize) await fresh.send(cachedInitialize);
+        if (cachedInitialized) await fresh.send(cachedInitialized);
+        clientTransport = fresh;
+        // The stale transport's own SSE-reconnect loop keeps retrying (and logging) in the
+        // background otherwise, for as long as its `maxRetries` budget lasts, having already been
+        // superseded. Neutralize its handlers FIRST -- `onclose` is still bound to `closeBoth()`,
+        // and `.close()` below fires it synchronously, which would tear down the whole bridge
+        // (including the healthy `fresh` transport) right after a successful recovery.
+        stale.onclose = undefined;
+        stale.onerror = undefined;
+        stale.onmessage = undefined;
+        await stale.close().catch(() => {
+          // Best-effort: the fresh transport is already live regardless of whether this succeeds.
+        });
+      };
+
+      const handleSendFailure = createSendFailureHandler({
+        // Both cached: a 404 in the narrow window after `initialize` but before `initialized` has
+        // been forwarded must NOT replay a partial handshake -- the SSE listening stream only
+        // starts as a side effect of sending `initialized` (SDK), so a partial replay would leave
+        // the recreated session's server-push channel permanently unopened.
+        hasCachedHandshake: () => cachedInitialize !== undefined && cachedInitialized !== undefined,
+        recreateSession,
+        retrySend: (message) => clientTransport.send(message),
+        log: (msg) => process.stderr.write(`${msg}\n`),
+      });
+
       // A raw JSON-RPC pipe: both sides are plain Transports (not Client/Server), so every
       // message — including the initial handshake — is forwarded verbatim in each direction.
       serverTransport.onmessage = (message: JSONRPCMessage) => {
-        clientTransport.send(message).catch((err: unknown) => {
-          process.stderr.write(
-            `test-mcp mcp-bridge: send to daemon failed: ${(err as Error).message}\n`,
-          );
-        });
+        if ("method" in message) {
+          if (message.method === "initialize") cachedInitialize = message;
+          else if (message.method === "notifications/initialized") cachedInitialized = message;
+        }
+
+        clientTransport.send(message).catch((err: unknown) => handleSendFailure(message, err));
       };
-      clientTransport.onmessage = (message: JSONRPCMessage) => {
-        serverTransport.send(message).catch((err: unknown) => {
-          process.stderr.write(
-            `test-mcp mcp-bridge: send to client failed: ${(err as Error).message}\n`,
-          );
-        });
-      };
+      bindClientHandlers(clientTransport);
       serverTransport.onclose = () => void closeBoth();
-      clientTransport.onclose = () => void closeBoth();
       serverTransport.onerror = (err: Error) =>
         process.stderr.write(`test-mcp mcp-bridge: stdio transport error: ${err.message}\n`);
-      clientTransport.onerror = (err: Error) =>
-        process.stderr.write(`test-mcp mcp-bridge: daemon transport error: ${err.message}\n`);
 
       await clientTransport.start();
       await serverTransport.start();
