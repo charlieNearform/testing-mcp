@@ -2,8 +2,15 @@
 title: 'Story 6.9 — CRG impact analysis: spike findings & scoping proposal'
 type: 'spike'
 created: '2026-07-15'
-status: 'awaiting-sign-off'
+status: 'spike-complete — build deferred by decision 2026-07-16'
 ---
+
+> **DECISION (2026-07-16): build deferred.** The spike is complete and its findings stand; the CLI
+> seam was verified insufficient and the viable seams (pooled MCP client, or SQLite) are heavier
+> than the lightweight integration originally scoped. 6.9 is parked here — pick it up as planned
+> work when CRG-backed selection is prioritized, starting from the "seam + plumbing vs full B vs C"
+> options above. No product code was written.
+
 
 # Story 6.9 — CRG-backed impact analysis: spike findings & proposal
 

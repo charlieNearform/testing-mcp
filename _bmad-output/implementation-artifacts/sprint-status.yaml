@@ -128,5 +128,5 @@ development_status:
   6-3-coverage-report-in-results-and-ui: done      # dev-auto 2026-07-15 (AC1-3 + AC4 threshold-gate completed after 6.10; 2 review patches)
   6-8-selection-confidence-signal: done                     # dev-auto 2026-07-15 (6 patches; 6 deferred → 6.10 + pre-existing)
   6-10-combined-incremental-coverage: done                  # dev-auto 2026-07-15 (istanbul-lib-coverage authorized; 4 review patches for number/confidence soundness)
-  6-9-optional-crg-impact-analysis: backlog                 # spike; use CRG blast-radius when present
+  6-9-optional-crg-impact-analysis: backlog                 # spike DONE 2026-07-16 (spike-6-9-crg-findings-and-proposal.md); build deferred — CLI seam insufficient, viable seams heavier than scoped
   epic-6-retrospective: optional

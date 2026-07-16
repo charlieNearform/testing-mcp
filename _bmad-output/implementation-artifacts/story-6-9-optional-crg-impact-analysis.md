@@ -4,7 +4,7 @@
 **Slice:** `src/selection` (+ an optional provider seam)
 **Type:** `feature` (spike-first)
 **Depends on:** `6-6`, `6-7` (selection refinements), and `6-8` (confidence signal) — layers on top
-**Status:** backlog
+**Status:** backlog — spike complete (see `spike-6-9-crg-findings-and-proposal.md`), build deferred 2026-07-16
 
 ## Source
 
