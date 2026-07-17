@@ -56,3 +56,41 @@ export function createSendFailureHandler(
     deps.log(`test-mcp mcp-bridge: send to daemon failed: ${errorMessage}`);
   };
 }
+
+/** Reacts to a `clientTransport.onerror` callback -- the daemon-facing transport's own error sink. */
+export interface TransportErrorDeps {
+  /** True once the `initialize` request has been cached (nothing to replay before then). */
+  hasCachedHandshake: () => boolean;
+  /** Build a fresh transport and replay the cached handshake against it. */
+  recreateSession: () => Promise<void>;
+  /** Stderr sink (no trailing newline expected). */
+  log: (message: string) => void;
+}
+
+/**
+ * The daemon's SSE (GET) stream carries no event ids -- no `eventStore` is configured
+ * server-side -- so the SDK client's own resumption-based reconnection (keyed off an event id)
+ * never engages for a disconnect. Both of these onerror messages are therefore terminal, not a
+ * transient blip the SDK will self-heal: the standalone push channel is dead until something
+ * rebuilds the session.
+ */
+const TERMINAL_SSE_ERROR_SUBSTRINGS = ["SSE stream disconnected", "Maximum reconnection attempts"];
+
+/**
+ * Builds the transport-error handler for one bridge session. Proactively rebuilds the session on
+ * a terminal SSE failure instead of waiting for some unrelated tool call to 404 and trigger
+ * recovery as a side effect -- every other transport error keeps today's log-only behaviour.
+ */
+export function createTransportErrorHandler(deps: TransportErrorDeps): (err: Error) => void {
+  return (err) => {
+    deps.log(`test-mcp mcp-bridge: daemon transport error: ${err.message}`);
+    const isTerminalSseFailure = TERMINAL_SSE_ERROR_SUBSTRINGS.some((substring) =>
+      err.message.includes(substring),
+    );
+    if (!isTerminalSseFailure || !deps.hasCachedHandshake()) return;
+    deps.recreateSession().catch((recreateErr: unknown) => {
+      const message = recreateErr instanceof Error ? recreateErr.message : String(recreateErr);
+      deps.log(`test-mcp mcp-bridge: session recreate after transport error failed: ${message}`);
+    });
+  };
+}

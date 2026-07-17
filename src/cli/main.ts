@@ -18,7 +18,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { computeProjectId } from "../registry/project-registry.js";
 import { SCHEMA_VERSION } from "../index.js";
-import { createSendFailureHandler } from "./mcp-bridge-resilience.js";
+import { createSendFailureHandler, createTransportErrorHandler } from "./mcp-bridge-resilience.js";
 
 /** CLI-side error for daemon reachability failures (maps to ErrorCode DaemonUnavailable). */
 function daemonUnavailable(message: string): Error {
@@ -497,6 +497,24 @@ program
       let cachedInitialize: JSONRPCMessage | undefined;
       let cachedInitialized: JSONRPCMessage | undefined;
 
+      // Shared across both the POST 404 path (below) and the SSE transport-error path so
+      // concurrent triggers never race to build more than one fresh transport.
+      let recreating: Promise<void> | undefined;
+      const recreateSessionOnce = (): Promise<void> => {
+        if (!recreating) {
+          recreating = recreateSession().finally(() => {
+            recreating = undefined;
+          });
+        }
+        return recreating;
+      };
+
+      const handleTransportError = createTransportErrorHandler({
+        hasCachedHandshake: () => cachedInitialize !== undefined && cachedInitialized !== undefined,
+        recreateSession: recreateSessionOnce,
+        log: (msg) => process.stderr.write(`${msg}\n`),
+      });
+
       const bindClientHandlers = (transport: StreamableHTTPClientTransport): void => {
         transport.onmessage = (message: JSONRPCMessage) => {
           serverTransport.send(message).catch((err: unknown) => {
@@ -506,8 +524,7 @@ program
           });
         };
         transport.onclose = () => void closeBoth();
-        transport.onerror = (err: Error) =>
-          process.stderr.write(`test-mcp mcp-bridge: daemon transport error: ${err.message}\n`);
+        transport.onerror = handleTransportError;
       };
 
       // Build and start a fresh transport (same URL/auth), re-bind handlers, and replay the
@@ -540,7 +557,9 @@ program
         // starts as a side effect of sending `initialized` (SDK), so a partial replay would leave
         // the recreated session's server-push channel permanently unopened.
         hasCachedHandshake: () => cachedInitialize !== undefined && cachedInitialized !== undefined,
-        recreateSession,
+        // Routed through the shared de-duped wrapper so a POST-triggered 404 and an SSE
+        // transport-error recovery never race to build two fresh transports concurrently.
+        recreateSession: recreateSessionOnce,
         retrySend: (message) => clientTransport.send(message),
         log: (msg) => process.stderr.write(`${msg}\n`),
       });

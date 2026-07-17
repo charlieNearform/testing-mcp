@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { createSendFailureHandler } from "../src/cli/mcp-bridge-resilience.ts";
+import {
+  createSendFailureHandler,
+  createTransportErrorHandler,
+} from "../src/cli/mcp-bridge-resilience.ts";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 
 const originalMessage = {
@@ -127,5 +130,97 @@ describe("createSendFailureHandler (mcp-bridge 404 recovery)", () => {
     expect(recreateSession).toHaveBeenCalledTimes(1); // still just one, after both settled
     expect(retrySend).toHaveBeenCalledTimes(2); // each failed message still gets its own retry
     expect(log).not.toHaveBeenCalled();
+  });
+});
+
+describe("createTransportErrorHandler (mcp-bridge SSE recovery)", () => {
+  it("proactively recreates the session on a terminal SSE disconnect, when a handshake is cached", async () => {
+    const recreateSession = vi.fn().mockResolvedValue(undefined);
+    const log = vi.fn();
+
+    const handle = createTransportErrorHandler({
+      hasCachedHandshake: () => true,
+      recreateSession,
+      log,
+    });
+
+    handle(new Error("SSE stream disconnected: TypeError: terminated"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(recreateSession).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledTimes(1); // just the initial "daemon transport error" log
+    expect(log.mock.calls[0][0]).toContain("daemon transport error");
+  });
+
+  it("recreates on the SDK's 'Maximum reconnection attempts' give-up message too", async () => {
+    const recreateSession = vi.fn().mockResolvedValue(undefined);
+    const log = vi.fn();
+
+    const handle = createTransportErrorHandler({
+      hasCachedHandshake: () => true,
+      recreateSession,
+      log,
+    });
+
+    handle(new Error("Maximum reconnection attempts (200) exceeded."));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(recreateSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs and gives up cleanly (no throw) when the proactive recreate itself fails", async () => {
+    const recreateSession = vi.fn().mockRejectedValue(new Error("fetch failed"));
+    const log = vi.fn();
+
+    const handle = createTransportErrorHandler({
+      hasCachedHandshake: () => true,
+      recreateSession,
+      log,
+    });
+
+    handle(new Error("SSE stream disconnected: TypeError: terminated"));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(recreateSession).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledTimes(2);
+    expect(log.mock.calls[1][0]).toContain("session recreate after transport error failed");
+  });
+
+  it("falls back to log-only when nothing has been cached yet (no handshake to replay)", async () => {
+    const recreateSession = vi.fn().mockResolvedValue(undefined);
+    const log = vi.fn();
+
+    const handle = createTransportErrorHandler({
+      hasCachedHandshake: () => false,
+      recreateSession,
+      log,
+    });
+
+    handle(new Error("SSE stream disconnected: TypeError: terminated"));
+    await Promise.resolve();
+
+    expect(recreateSession).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps log-only behavior for a non-terminal transport error, even with a cached handshake", async () => {
+    const recreateSession = vi.fn().mockResolvedValue(undefined);
+    const log = vi.fn();
+
+    const handle = createTransportErrorHandler({
+      hasCachedHandshake: () => true,
+      recreateSession,
+      log,
+    });
+
+    handle(new Error("stdio transport closed unexpectedly"));
+    await Promise.resolve();
+
+    expect(recreateSession).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledTimes(1);
   });
 });

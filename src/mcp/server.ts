@@ -23,6 +23,11 @@ export interface McpServerDeps {
 export interface McpListenerDeps extends McpServerDeps {
   /** Per-daemon bearer token (from the lockfile). Required for /mcp auth. */
   token: string;
+  /**
+   * Interval for the per-session keep-alive ping (default 30_000). Exposed for tests; production
+   * callers should rely on the default, which is well inside undici's ~5 minute idle body timeout.
+   */
+  pingIntervalMs?: number;
 }
 
 function errorResult(err: AppError) {
@@ -299,6 +304,7 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
  */
 export function createMcpRequestListener(deps: McpListenerDeps): RequestListener {
   const transports = new Map<string, StreamableHTTPServerTransport>();
+  const pingIntervalMs = deps.pingIntervalMs ?? 30_000;
 
   return async (req: IncomingMessage, res: ServerResponse) => {
     try {
@@ -358,7 +364,21 @@ export function createMcpRequestListener(deps: McpListenerDeps): RequestListener
             },
           });
           const server = createMcpServer(deps);
+          // The standalone SSE (GET) stream carries no event ids -- no eventStore is configured
+          // below -- so a client's fetch-level idle-body timeout (undici defaults to ~5 minutes
+          // of silence) kills it as "TypeError: terminated", and the client SDK's own resumption
+          // reconnect never engages because it keys off an event id that never arrives. A
+          // periodic MCP `ping` keeps real bytes flowing well inside that window; transport.send()
+          // silently no-ops if no GET stream is currently connected, so this is safe pre-handshake
+          // and between reconnects too.
+          const pingInterval = setInterval(() => {
+            server.server.ping().catch((err: unknown) => {
+              const message = err instanceof Error ? err.message : String(err);
+              process.stderr.write(`test-mcp daemon: keep-alive ping failed: ${message}\n`);
+            });
+          }, pingIntervalMs);
           transport.onclose = () => {
+            clearInterval(pingInterval);
             if (transport.sessionId) transports.delete(transport.sessionId);
             void server.close();
           };

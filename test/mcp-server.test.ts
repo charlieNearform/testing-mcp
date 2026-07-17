@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
+import * as http from "node:http";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer } from "../src/mcp/server.ts";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { createMcpServer, createMcpRequestListener } from "../src/mcp/server.ts";
 
 async function connectClient() {
   const server = createMcpServer();
@@ -79,5 +82,58 @@ describe("createMcpServer", () => {
     expect(payload.projects).toEqual([]);
     await client.close();
     await server.close();
+  });
+});
+
+describe("createMcpRequestListener keep-alive ping", () => {
+  it("periodically pings an open session's SSE stream, so it never sits idle", async () => {
+    const httpServer = http.createServer(
+      createMcpRequestListener({ token: "test-token", pingIntervalMs: 20 }),
+    );
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const address = httpServer.address();
+    const port = address && typeof address === "object" && address ? address.port : 0;
+
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${port}/mcp`),
+      { requestInit: { headers: { Authorization: "Bearer test-token" } } },
+    );
+    const received: JSONRPCMessage[] = [];
+    transport.onmessage = (message) => received.push(message);
+    await transport.start();
+
+    try {
+      // Manual handshake (raw transport, not Client) so `ping` requests -- which the SDK's
+      // Client/Server base Protocol answers automatically and never surfaces -- are observable.
+      await transport.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "keepalive-test", version: "0.0.0" },
+        },
+      } as unknown as JSONRPCMessage);
+      // Sending `notifications/initialized` is what opens the standalone GET/SSE stream (SDK).
+      await transport.send({
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      } as unknown as JSONRPCMessage);
+
+      // Comfortably more than a few 20ms ping ticks.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const pings = received.filter(
+        (m) => "method" in m && (m as { method: string }).method === "ping",
+      );
+      expect(pings.length).toBeGreaterThan(0);
+    } finally {
+      await transport.close();
+      await new Promise<void>((resolve) => {
+        httpServer.close(() => resolve());
+        httpServer.closeAllConnections();
+      });
+    }
   });
 });
