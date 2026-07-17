@@ -7,6 +7,7 @@ inputDocuments:
   - _bmad-output/planning-artifacts/architecture/architecture-test-server-mcp-2026-07-10/ARCHITECTURE-SPINE.md
   - _bmad-output/planning-artifacts/briefs/brief-test-server-mcp-2026-07-16/brief.md
   - _bmad-output/planning-artifacts/architecture/architecture-epic-7-runner-plugin-api-2026-07-16/ARCHITECTURE-SPINE.md
+  - _bmad-output/planning-artifacts/architecture/architecture-epic-8-async-execution-observability-2026-07-17/ARCHITECTURE-SPINE.md
 ---
 
 # test-server-mcp - Epic Breakdown
@@ -40,6 +41,10 @@ FR18: Provide a `RunnerPlugin` interface (`name`, `detect`, `capabilities`, `lis
 FR19: Support registering one or more named test suites per project, each bound to one `RunnerPlugin` instance; `test-mcp register` auto-detects suites via each plugin's `detect()` with an explicit override for cases auto-detect can't resolve.
 FR20: Scope test selection, the coverage map, combined coverage, confidence, run history, and failure-detail lookup per suite (not just per project); confidence gains a third "unavailable" level for suites whose plugin reports no coverage capability.
 FR21: Provide a Jest `RunnerPlugin` (seam-validation scope) implementing run/listTestFiles/detect and changed-file detection via Jest's own flags, with coverage capability graded, not assumed.
+FR22: `run_tests` returns the full result synchronously if it finishes within a configurable grace period (`waitMs`: per-call → project config → daemon config → 10s built-in default; explicit `null` at any layer = wait forever); otherwise it returns `{runId, projectId, state:"running"}` and the caller polls `get_test_status`, extending the same pattern already documented for `start_watch`.
+FR23: While a run is in flight, `get_test_status` and the human UI expose a live, bounded per-test list (pending/running/passed/failed/skipped) via Vitest's optional `onTestCaseReady`/`onTestCaseResult` reporter hooks (Vitest 3+; gracefully degrades to today's file-level-only granularity when a project's Vitest predates these hooks).
+FR24: The daemon captures a run's worker stdout+stderr into a bounded (1000-line) per-project ring buffer, exposed via the UI with a "follow" mode, while stderr is still forwarded to the daemon's own stderr unchanged.
+FR25: A stall watchdog, on by default, kills a worker if there has been no test-level progress signal for `testTimeout + grace` (grace configurable, default 5s), reusing the existing whole-run-timeout kill path; a coverage-measurement-phase heartbeat prevents false positives during that otherwise-silent phase.
 
 ### NonFunctional Requirements
 
@@ -53,6 +58,7 @@ NFR7: Minimal overhead added to a project's test runs.
 NFR8: Reverse coverage map buildable within one full instrumented (single-pass) run; naive per-file measurement (~6× slower, per spike) is out.
 NFR9: Runner plugin isolation — the daemon process never imports a project's test runner directly, of any kind (generalizes NFR4); only the owning plugin module resolves the runner package.
 NFR10: No coverage capability is a defined, reportable state, not an error — the daemon must never assert a confidence level or threshold verdict a plugin's declared capability can't back.
+NFR11: Reliability — a genuinely wedged worker is detected and killed automatically (stall watchdog, on by default) rather than hanging indefinitely; a long run never holds an MCP tool call open past its configured grace period, so the client's own request-timeout behavior is never the limiting factor for a run that completes within that window.
 
 ### Additional Requirements
 
@@ -64,6 +70,8 @@ NFR10: No coverage capability is a defined, reportable state, not an error — t
 - Coverage engine is single-pass (serial snapshot-diff), validated by `docs/coverage-spike-findings.md` against a large frontend app. The attribution algorithm is ported/vendored from `testpick` (MIT) into the worker; retain its license notice. Differentiator is the daemon/isolation delivery, not coverage selection (table-stakes).
 - Jest's embeddable run API is an open engineering question (`runCLI` from `@jest/core` vs. plain `jest`'s exiting `run()`) — Story 7.5 spikes this before Story 7.6 writes `run()`; escalate per this repo's dependency-authorization rule if `@jest/core` isn't reliably resolvable.
 - `istanbul-lib-coverage` (already pinned, Story 6.10) covers Jest's coverage parsing too — no new runtime dependency needed for Story 7.6's coverage capability.
+- Vitest's `onTestCaseReady`/`onTestCaseResult` reporter hooks (Story 8.2) are Vitest 3+ only and optional — a project's older Vitest simply never calls them; no version bump, no new dependency, verified directly against the installed Vitest 4.1.9 type definitions.
+- `fork()`'s `stdio` option (Story 8.5) moves from `["ignore","ignore","inherit","ipc"]` to `["ignore","pipe","pipe","ipc"]` — standard Node `child_process` API, no new dependency.
 
 ### UX Design Requirements
 
@@ -92,8 +100,12 @@ FR18: Epic 7 — RunnerPlugin interface + Vitest extraction (zero behavior chang
 FR19: Epic 7 — multi-suite registry model
 FR20: Epic 7 — per-suite selection/coverage/confidence/orchestrator/MCP scoping
 FR21: Epic 7 — Jest plugin (seam validation)
+FR22: Epic 8 — async `run_tests` with configurable grace period
+FR23: Epic 8 — live per-test progress
+FR24: Epic 8 — console log tail with follow
+FR25: Epic 8 — stall watchdog (on by default)
 
-NFR coverage: NFR3/NFR5/NFR6 → Epic 1; NFR4/NFR7 → Epic 2; NFR2/NFR8 → Epic 3; NFR1 → Epic 4; NFR9/NFR10 → Epic 7.
+NFR coverage: NFR3/NFR5/NFR6 → Epic 1; NFR4/NFR7 → Epic 2; NFR2/NFR8 → Epic 3; NFR1 → Epic 4; NFR9/NFR10 → Epic 7; NFR11 → Epic 8.
 
 Performance NFR acceptance criteria: NFR1 → Story 4.1 (dry-run plan <5s target) and Story 3.6 (incremental single-file run <15s, aspirational per PRD Success Metrics); NFR7 → Story 2.1 (worker/daemon overhead surfaced in run metadata; monitored, not hard-gated).
 
@@ -126,6 +138,10 @@ Enhancements shipped after the v1 epics closed: smoother agent/human onboarding 
 ### Epic 7: Runner Plugin API (Phase 2, continued)
 Extract the daemon's hardcoded Vitest integration behind a `RunnerPlugin` interface (fulfilling architecture AD-2's deferred adapter model), add multi-suite-per-project registration, scope selection/coverage/confidence/orchestrator bookkeeping per suite, and add Jest as a second plugin scoped to validating the seam (not full parity). Authoritative invariants: `_bmad-output/planning-artifacts/architecture/architecture-epic-7-runner-plugin-api-2026-07-16/ARCHITECTURE-SPINE.md` (AD-12–AD-16). Source brief: `_bmad-output/planning-artifacts/briefs/brief-test-server-mcp-2026-07-16/brief.md`.
 **FRs covered:** FR18, FR19, FR20, FR21 (NFR9, NFR10)
+
+### Epic 8: Async Execution & Observability (Phase 2, continued)
+A long-running `run_tests` call no longer holds one MCP tool call open for its whole duration: it returns the full result if the run finishes within a configurable grace period, otherwise a job handle to poll via `get_test_status` — extending the same kick-off-then-poll pattern already used by `start_watch`. In parallel, an in-flight run becomes observable (live per-test pending/pass/fail list, a bounded console log tail with follow) instead of opaque, and a stall watchdog — on by default — catches a genuinely wedged worker instead of waiting forever. Authoritative invariants: `_bmad-output/planning-artifacts/architecture/architecture-epic-8-async-execution-observability-2026-07-17/ARCHITECTURE-SPINE.md` (AD-17–AD-21).
+**FRs covered:** FR22, FR23, FR24, FR25 (NFR11)
 
 ## Epic 1: Core Daemon & Project Registration (Phase 1)
 
@@ -934,3 +950,247 @@ So that the abstraction — not just Vitest's occupancy of it — is proven soun
 **Then** it passes to the same rigor as the Vitest plugin's tests — proving the interface, not matching Vitest's feature surface (no per-test-file coverage map, no static-graph `affectedTests` parity required).
 
 > Architecture: AD-16. Depends on Story 7.1 (interface), Story 7.2 (registry model), Story 7.5 (spike answer).
+
+## Epic 8: Async Execution & Observability (Phase 2, continued)
+
+> ⚠️ **Do not begin implementation of any Epic 8 story.** The user has asked to review the full epic/story breakdown first and give explicit go-ahead before any code is written. This applies to every story below.
+
+### Story 8.1: IPC Protocol — New FromWorker Message Types
+
+As a maintainer adding worker→daemon observability signals,
+I want four new `FromWorker` message types defined and Zod-validated,
+So that the worker and orchestrator changes in later stories have a shared, type-safe contract to build against.
+
+**Acceptance Criteria:**
+
+**Given** `src/types/ipc.ts`'s existing `FromWorker` discriminated union (`ready`/`progress`/`result`/`error`) and its Zod `FromWorkerSchema`
+**When** this story is complete
+**Then** it gains four additive variants, each carrying `runId: string` (matching the existing `progress`/`result`/`error` convention):
+- `{ type: "config"; runId: string; testTimeoutMs: number }`
+- `{ type: "case-start"; runId: string; file: string; name: string }`
+- `{ type: "case-result"; runId: string; file: string; name: string; status: "passed" | "failed" | "skipped" }` (reuses the exact same three-literal status enum already used by `TestResult.tests[].status` — no `"pending"` literal; Vitest's `pending` state is never forwarded, matching how `mapModulesToResult` already folds it into `"failed"`)
+- `{ type: "phase-progress"; runId: string; phase: "coverage"; completed: number; total: number }`
+
+**Given** each new variant
+**When** a corresponding Zod schema object is added to the existing `z.discriminatedUnion("type", [...])` in `FromWorkerSchema`
+**Then** `parseFromWorker` accepts a well-formed message of each new type and returns the correctly-typed object, and rejects (throws) a malformed one (missing field, wrong type) exactly like the existing variants do.
+
+**Given** the existing `ToWorker` union
+**When** this story is complete
+**Then** it is unchanged — this story only adds to `FromWorker`.
+
+> Architecture: AD-18, AD-19, AD-20 (message shapes). No dependencies — this is the foundational story every other Epic 8 story builds on. Do NOT touch `src/orchestrator/index.ts` or `src/worker/index.ts` in this story — only `src/types/ipc.ts` and its test file.
+>
+> Testing: extend `test/ipc-validation.test.ts` with round-trip (valid → parses to the exact shape) and rejection (malformed variant throws) cases for all four new message types.
+
+### Story 8.2: Worker — Resolved-Config Discovery & Per-Test Reporter Hooks
+
+As the worker executing a project's tests,
+I want to report the project's resolved `testTimeout` before the real run starts, and forward per-test start/result events when Vitest supports them,
+So that the orchestrator (later stories) can arm an accurate stall watchdog and build a live per-test view.
+
+**Acceptance Criteria:**
+
+**Given** the existing `readCoverageThresholds()` in `src/worker/index.ts` (a `createVitest("test", {watch:false})` discovery instance, not `startVitest`, reading `vitest.config?.coverage?.thresholds` then closing it, never running tests)
+**When** this story generalizes it into a `readResolvedRunConfig()` function returning `{ testTimeoutMs?: number; coverageThresholds?: unknown }` from the **same single** discovery instance
+**Then** `readCoverageThresholds` is deleted, and `buildAndPersistCoverageMap`'s one call site takes `thresholds` as a new parameter instead of calling `readCoverageThresholds` internally.
+
+**Given** `handleRun()` (`src/worker/index.ts`)
+**When** it begins handling a `run` message
+**Then** it calls `readResolvedRunConfig()` **first**, and if `testTimeoutMs` came back as a number, sends `{type:"config", runId: msg.runId, testTimeoutMs}` before proceeding to `runVitest(...)` as today. If `testTimeoutMs` is `undefined` (discovery failed or the field was unreadable), no `config` message is sent at all — the orchestrator's fallback default applies (Story 8.5).
+
+**Given** `runVitest()`/`runOnce()`'s current signatures (`cwd, opts, onProgress`)
+**When** this story threads `runId` down into both
+**Then** the reporter object built inside `runOnce()` can stamp `runId` on every message it sends, and no other behavior of `runVitest`/`runOnce` changes.
+
+**Given** the reporter object in `runOnce()` (currently wiring `onTestRunStart`/`onTestModuleEnd`/`onTestRunEnd`)
+**When** this story adds two more properties, `onTestCaseReady(testCase)` and `onTestCaseResult(testCase)`
+**Then** each is wrapped in its own `try {} catch {}` (a malformed/unexpected `TestCase` shape from Vitest must never crash the worker or abort the run) and sends, respectively, `{type:"case-start", runId, file: testCase.module.moduleId, name: testCase.fullName}` and `{type:"case-result", runId, file: testCase.module.moduleId, name: testCase.fullName, status: testCase.result().state}`.
+
+**Given** a project whose installed Vitest predates `onTestCaseReady`/`onTestCaseResult` (Vitest 3+ only)
+**When** a run executes against it
+**Then** Vitest itself simply never calls those two reporter properties — no explicit feature-detection is written in this codebase, and the run proceeds exactly as it does today (module-level `progress` only).
+
+**Given** `buildAndPersistCoverageMap`'s `measure` closure (the per-file coverage measurement callback, currently silent — sends nothing)
+**When** this story adds one `send()` call after each file's coverage is measured
+**Then** it sends `{type:"phase-progress", runId, phase:"coverage", completed: <files measured so far>, total: <target file count>}` — this is **required** for this story to be considered done, not an optional enhancement (Story 8.4's stall watchdog depends on it to avoid false-positive kills during coverage measurement).
+
+> Architecture: AD-18 (reporter hooks), AD-20 (config discovery, coverage-phase heartbeat). Depends on Story 8.1 (the message types must exist first). Only touch `src/worker/index.ts` and its test file(s) in this story — do not touch `src/orchestrator/index.ts`.
+>
+> Testing: extend/add a worker-level test using the real Vitest 4.1.9 + `test-fixtures/sample-project` (per `test/mcp-run-tests.test.ts` conventions) that forks the real `dist/worker/index.js`, collects IPC messages, and asserts: (a) a `config` message with the fixture's resolved `testTimeout` arrives before the first `progress`/`result`; (b) at least one `case-start`/`case-result` pair per test name in the fixture's `pass.test.ts`/`fail.test.ts`, with `status` matching the known outcome; (c) running with `coverage: true` against a fixture with ≥2 test files produces at least one `phase-progress` message before the final `result`.
+
+### Story 8.3: Daemon & CLI — Grace-Period and Stall-Grace Configuration
+
+As an operator running the daemon,
+I want the async grace period and stall-watchdog grace both configurable at the daemon and per-project level,
+So that a project with unusually long individual tests (or an operator who wants full synchronous behavior) isn't fighting a one-size-fits-all default.
+
+**Acceptance Criteria:**
+
+**Given** `DaemonConfigSchema` in `src/daemon/index.ts` (currently `schemaVersion`, `port`, `maxConcurrentWorkers`, `workerIdleTtlMs`, `token?`, `runTimeoutMs?`)
+**When** this story adds two fields
+**Then** it gains `defaultRunWaitMs: z.number().int().nonnegative().nullable().optional().default(10_000)` and `staleTestGraceMs: z.number().int().positive().default(5000)`.
+
+**Given** `loadOrCreateConfig()`'s fresh-config literal (the object written when no `config.json` exists yet)
+**When** this story is complete
+**Then** that literal explicitly includes `defaultRunWaitMs: 10_000` and `staleTestGraceMs: 5000` (Zod's `.default()` only applies during `safeParse` of an existing file, not to a hand-constructed literal — both must be set explicitly here or a fresh install would have `undefined` instead of the intended default).
+
+**Given** an existing `config.json` written before these two fields existed
+**When** `loadOrCreateConfig()` parses it
+**Then** it parses successfully (both fields are `.optional()` with Zod defaults) and the resolved config has `defaultRunWaitMs: 10_000`/`staleTestGraceMs: 5000` filled in — no migration needed, no error.
+
+**Given** `startDaemon()`'s `new Orchestrator({...})` call
+**When** this story is complete
+**Then** it passes `staleTestGraceMs: cfg.staleTestGraceMs` through (the `defaultRunWaitMs` value is consumed later, in Story 8.6, by the MCP layer directly from `DaemonConfig` — it does not need to reach the `Orchestrator` constructor).
+
+**Given** `ensureProjectConfig()` in `src/cli/main.ts` (writes `<gitRoot>/.test-mcp/config.json` as `{schemaVersion, projectId, stateDir}`)
+**When** this story is complete
+**Then** the written/read shape additionally supports an optional `defaultRunWaitMs?: number | null` field — `ensureProjectConfig` itself does not need to prompt for or set a value (it stays absent unless a user hand-edits the file or a future story adds a CLI flag), it only needs to not strip/reject the field if present, and the type this function returns/reads reflects the new optional field.
+
+> Architecture: AD-17 (config layering), AD-20 (`staleTestGraceMs`). No dependency on Story 8.1/8.2 — this is pure config-schema plumbing and can be built in parallel with them. Only touch `src/daemon/index.ts` and `src/cli/main.ts` (plus their existing test files) in this story.
+>
+> Testing: extend `test/daemon.test.ts` (or add a focused test) asserting: a fresh `config.json` includes both new fields with their documented defaults; an old-shape `config.json` (missing both fields) still parses via `safeParse` with the defaults filled in; `startDaemon()` threads `staleTestGraceMs` into the constructed `Orchestrator`.
+
+### Story 8.4: Orchestrator — Async `run_tests` Core (`startRun` and `runId` Threading)
+
+As the orchestrator executing a test run,
+I want to hand back a `runId` the instant a run is accepted, independent of when the run actually finishes,
+So that a caller can be given a job handle before the run completes.
+
+**Acceptance Criteria:**
+
+**Given** `executeWorker()` in `src/orchestrator/index.ts` (currently generates `runId = randomUUID()` internally, inside the function, and never exposes it until the returned promise settles)
+**When** this story adds a new public method `startRun(project, opts): { runId: string; result: Promise<TestResult> }`
+**Then** `runId` is generated synchronously at the top of `startRun`, before any async work begins, and returned immediately alongside the (not-yet-settled) `result` promise; `executeWorker` receives `runId` as a parameter instead of generating its own.
+
+**Given** the existing `runTests()`/`runPlan()` public methods (today: `async runTests(...) { ...; return this.enqueue(...); }`)
+**When** this story refactors them
+**Then** each becomes a thin wrapper — `async runTests(...) { const { result } = this.startRun(...); return result; }` (same for `runPlan`) — so every existing direct caller (including all current tests that `await orchestrator.runTests(...)`) observes byte-for-byte identical behavior: same resolved `TestResult`, same rejection type/message on failure.
+
+**Given** `enqueue()`'s existing empty-selection short-circuit (the branch that returns a trivial success `TestResult` for a no-op run via its own separate `randomUUID()` call, today entirely disconnected from `executeWorker`'s `runId`)
+**When** this story is complete
+**Then** that branch takes its `runId` from the same `startRun` call (no second, independent `randomUUID()`), and its `setRunState(...)` call includes that same `runId` — so `RunStatus.runId` and the persisted `RunRecord.runId` agree for a no-op run exactly as they do for a real one.
+
+**Given** `RunStatus` (currently `{state, progress?, lastResult?, lastError?, updatedAt?}`)
+**When** this story adds `runId?: string`
+**Then** every `setRunState(...)` call that transitions a project to `state: "running"` also sets `runId` to the run's id, and it is cleared (or left stale-but-harmless — decide and state which in the story's Dev Agent Record) once the run settles, matching how the rest of `RunStatus` already behaves around a settled run.
+
+**Given** any of the four new IPC message types from Story 8.1 arriving via `child.on("message", ...)`
+**When** its `runId` does not match the `runId` this `executeWorker` call was started with
+**Then** it is discarded (no state mutation, no crash) — the exact same discipline already applied to `progress`/`result`/`error` today (`msg.runId === runId` guards, and the existing `unexpected IPC ${msg.type} for run ${runId}` failure path for a mismatched `result`/`error`).
+
+> Architecture: AD-17 (core mechanism, `runId` exposure). Depends on Story 8.1 (message types must exist for the `runId`-matching guard, even though this story's own new messages aren't handled yet — that's Story 8.5). Independent of Story 8.2/8.3. Only touch `src/orchestrator/index.ts` and its existing test files in this story — do not add live-state/watchdog logic yet (Story 8.5) and do not touch `src/mcp/server.ts` yet (Story 8.6).
+>
+> Testing: extend `test/orchestrator-*.test.ts` (or add a new focused file) asserting: `startRun` returns a `runId` synchronously before `result` settles; `runTests`/`runPlan` still resolve/reject exactly as before (existing tests for these must keep passing unmodified — this is the acceptance bar, mirroring AD-13's "zero behavior change" precedent from Epic 7); the empty-selection short-circuit's `RunStatus.runId` matches its persisted `RunRecord.runId`.
+
+### Story 8.5: Orchestrator — Live State, Bounded Log Capture & Stall Watchdog
+
+As an operator or agent with a run in flight,
+I want a live, bounded view of which tests are running/done and the worker's console output, and I want a genuinely wedged worker killed automatically,
+So that a long run is observable instead of opaque, and a hang is caught instead of waited out forever.
+
+**Acceptance Criteria:**
+
+**Given** `executeWorker()`'s `fork()` call (currently `stdio: ["ignore","ignore","inherit","ipc"]`)
+**When** this story changes it to `stdio: ["ignore","pipe","pipe","ipc"]`
+**Then** `child.stdout`/`child.stderr` are readable streams; a `data` handler on `child.stderr` both writes the chunk through to `process.stderr` unchanged (preserving today's passthrough exactly) AND appends it to a new per-project log ring; a `data` handler on `child.stdout` appends to the same ring but is **not** forwarded anywhere else.
+
+**Given** a new per-project `LiveRunState` (`runId`, `testTimeoutMs?`, `lastProgressAt`, a `tests: Map` keyed `(file, name)`, `testOrder: string[]`, `testsTruncated: boolean`, `log: LiveLogLine[]`, `stdoutResidual`/`stderrResidual` strings), stored in a new `private readonly liveRuns = new Map<string, LiveRunState>()` keyed by `projectId`
+**When** a run starts
+**Then** an entry is created immediately (before the worker even reaches "ready"), and constants `MAX_LIVE_TEST_ENTRIES = 2000`, `MAX_LOG_LINES = 1000`, `MAX_LOG_LINE_CHARS = 4000`, `MAX_RESIDUAL_CHARS = 8000` bound its growth: the test list is a **ring** (oldest evicted past 2000, `testsTruncated` set true once eviction starts, never frozen on the first 2000), the log is a ring capped at 1000 lines (each capped at 4000 chars), and a partial (no-newline) chunk is held as residual and force-flushed as a truncated line if it exceeds 8000 chars before a newline arrives.
+
+**Given** the log-appending logic
+**When** it splits an incoming chunk on `\n`
+**Then** the trailing (possibly partial) segment is kept as residual for the next chunk, complete lines are pushed into the ring, and any non-empty residual is flushed as a final line when the run settles (success, error, or watchdog kill) — no trailing partial line is silently dropped.
+
+**Given** `child.on("message", ...)` in `executeWorker`
+**When** a `config`/`case-start`/`case-result`/`phase-progress` message arrives (all four filtered by `runId` per Story 8.4's rule)
+**Then**: `config` records `testTimeoutMs` on the `LiveRunState` and (re)arms the watchdog (see below); `case-start` upserts a `pending`→`running` entry (or a fresh `running` entry if `case-start` for that key was never seen); `case-result` upserts the entry to its terminal status (`passed`/`failed`/`skipped`) even if it's past the `MAX_LIVE_TEST_ENTRIES` cap for an already-tracked key; `phase-progress` does not touch the test list but does count as a progress signal (see watchdog below) and is itself recorded on `LiveRunState` (e.g. a `phase` field) so it can be surfaced identically to test-level progress later (Story 8.6/8.7 read it — this story only needs to store it, not display it).
+
+**Given** the existing `runTimeoutMs` opt-in timer and its `finish()` helper (clears timers, removes child listeners, kills the child exactly once)
+**When** this story adds the stall watchdog
+**Then** a **provisional** watchdog arms the instant the worker is forked, using `staleTestGraceMs` alone as its threshold (catching a hang in the worker's own `config`-discovery step, before any `config` message could arrive); once a `config` message lands, the orchestrator replaces it with the real watchdog armed at `testTimeout + staleTestGraceMs`. Either watchdog is reset (not just re-checked — a full `setTimeout` reschedule) on every `case-start`/`case-result`/module-level `progress`/`phase-progress` signal. On fire, it calls the **same** `finish()` helper the `runTimeoutMs` cap already uses (no second kill path), producing `new WorkerError(\`worker stalled: no test progress for ${elapsed}ms (threshold ${threshold}ms = testTimeout ${effectiveTestTimeoutMs}ms + grace ${this.staleTestGraceMs}ms)\`)` — a message distinguishable by substring from both `worker timed out after {N}ms` and `worker exited (code {c}, signal {s})...`.
+
+**Given** log-line arrival (stdout or stderr data)
+**When** the watchdog logic runs
+**Then** log-line arrival is explicitly **never** treated as a progress signal — only the four signal types named above reset the watchdog, so a worker that merely keeps writing to stderr while otherwise wedged is still correctly detected as stalled.
+
+**Given** `finish()` (extended by this story)
+**When** a run settles for any reason
+**Then** it also clears whichever watchdog timer (provisional or real) is currently active, and flushes any non-empty log residual — but it does **not** delete the `liveRuns` entry for that project; the entry (test list + log ring) is retained until the **next** run for that project starts (so `GET .../log` or a `get_test_status` poll immediately after a stall-kill or error still shows the state that led to it), at which point it is replaced by a fresh entry for the new run.
+
+**Given** a new read accessor `getLiveRun(projectId): { runId, testTimeoutMs?, tests: LiveTestEntry[], testsTruncated, logTail: LiveLogLine[] } | undefined`
+**When** called
+**Then** it returns `undefined` only if no run has ever started for that project (never mid-settle-cleanup, per the retention rule above), otherwise the current `LiveRunState` in `testOrder` order.
+
+**Given** the existing fan-out loop inside `setRunState` (iterates `statusListeners`, try/catch per listener)
+**When** this story factors it into a shared private `notifyStatusChange()` helper
+**Then** both `setRunState` and every live-state mutation above call it, so the UI's existing SSE push (`onStatusChange`) fires on live-state changes too, not just coarse `RunStatus` transitions.
+
+> Architecture: AD-18 (live test list), AD-19 (log capture), AD-20 (watchdog). Depends on Story 8.1 (message types), Story 8.2 (worker must actually send them), Story 8.3 (`staleTestGraceMs` config must exist), Story 8.4 (`runId`-filtering discipline this story's message handling relies on). Only touch `src/orchestrator/index.ts` and its test files — do not touch `src/mcp/server.ts` or `src/ui/index.ts` yet.
+>
+> Testing: extend `test-fixtures/blocking-worker/worker.mjs` with sentinel-file triggers to send `config`/`case-start`/`case-result`/`phase-progress` on demand (mirroring its existing `started`/`release`/`crash` convention) so tests never wait out a real `testTimeout`. New `test/orchestrator-stall-watchdog.test.ts`: fires on true stall within a small configured threshold; does not fire while progress signals keep arriving (proves the timer resets, not a fixed deadline); falls back to the lenient provisional default when `config` is never sent; message substring distinguishable from `runTimeoutMs`'s; log output alone (no progress signal) does not prevent a stall-kill. New `test/orchestrator-live-run.test.ts`: live test list populates and rings correctly at the 2000 cap; log ring bounds at 1000 lines; two concurrent different-project runs don't cross-contaminate each other's buffers; live state is retained (not `undefined`) immediately after a run errors or is stall-killed, and is replaced (not merged) once the next run for that project starts; stdout is captured while stderr is captured AND still passed through to the daemon's own `process.stderr` unchanged (regression guard).
+
+### Story 8.6: MCP Surface — Async `run_tests` Handler & `get_test_status` Live Payload
+
+As an MCP client calling `run_tests`,
+I want a fast run to return its result as it always has, and a slow run to return a job handle I can poll instead of my connection timing out,
+So that I never lose the outcome of a test run just because it took longer than my own client's patience.
+
+**Acceptance Criteria:**
+
+**Given** `run_tests`'s tool input schema (`src/mcp/server.ts`)
+**When** this story adds an optional argument
+**Then** it gains `waitMs: z.number().nullable().optional()` — `null` must validate and reach the handler distinctly from an omitted argument (not stripped or coerced).
+
+**Given** the handler's effective-`waitMs` resolution
+**When** it runs
+**Then** it resolves in this order: the `waitMs` argument if provided (including explicit `null`) → the project's `.test-mcp/config.json` `defaultRunWaitMs` if set (including explicit `null`) → the daemon's `DaemonConfig.defaultRunWaitMs` → `10_000` if nothing above is set. `null` at whichever layer wins means "wait forever."
+
+**Given** a resolved `waitMs` of `null`
+**When** `run_tests` (non-dry-run) executes
+**Then** it calls `orchestrator.startRun(...)`, immediately `await`s `result` directly (no race, no timer), and returns the full `TestResult` — byte-for-byte today's existing synchronous behavior.
+
+**Given** a resolved `waitMs` that is a number
+**When** `run_tests` executes
+**Then** it calls `startRun(...)`, attaches a `.catch(() => {})` to `result` so it can never become an unhandled rejection once detached, and races `result` against a `waitMs` timer: **on an exact tie, the result wins** — never returning a job-handle for a run whose result was already available. If `result` wins, return the full `TestResult` (unchanged from today). If the timer wins, return `{runId, projectId, state:"running", message: "still running after " + waitMs + "ms; poll get_test_status with this projectId"}` — the run keeps executing in the background regardless.
+
+**Given** `run_tests`'s tool description (currently: `"Run tests for a registered project"`)
+**When** this story updates it
+**Then** it documents the new contract explicitly, mirroring `start_watch`'s existing "poll get_test_status" phrasing — e.g. stating that a run exceeding the grace period returns a job handle to poll instead of the result.
+
+**Given** `get_test_status`'s handler (currently returns `{...orchestrator.getRunStatus(projectId), watch: watchManager?.status(projectId)}`)
+**When** this story is complete
+**Then** it additionally calls `orchestrator.getLiveRun(projectId)` and, if defined, nests the result under one `live: {tests, log, phase?, lastProgressAt}` key in the response (never spread flatly, never reusing the existing `lastResult.tests` field name) — carrying the full bounded live state (no further slicing beyond the orchestrator's own `MAX_LIVE_TEST_ENTRIES`/`MAX_LOG_LINES` caps), since a poll is a deliberate single-project request, not a broadcast.
+
+> Architecture: AD-17 (async handler), AD-21 (MCP payload parity). Depends on Story 8.3 (config fields), Story 8.4 (`startRun`), Story 8.5 (`getLiveRun`). Only touch `src/mcp/server.ts` and its test files — do not touch `src/ui/index.ts` yet (Story 8.7).
+>
+> Testing: new `test/mcp-run-tests-async.test.ts` using the blocking-worker fixture (controlled timing, no real waits): a run finishing inside `waitMs` returns the full `TestResult` unchanged; a run still going after `waitMs` returns `{runId, projectId, state:"running"}` and keeps executing afterward, verified by a subsequent `get_test_status` poll observing progress and eventually reaching `state:"complete"` with the matching `runId`; `waitMs: null` waits forever exactly like today; the four-layer resolution order (call → project → daemon → 10s default) is exercised at each layer independently. Extend `test/mcp-server.test.ts`: `get_test_status`'s payload includes `runId` and (while a run is live) a `live` key with the expected shape; `run_tests`'s tool description text mentions polling (a cheap regression guard against silently reverting the contract).
+
+### Story 8.7: UI — Live Test List & Log Tail with Follow
+
+As a human watching the monitoring UI during a long-running test suite,
+I want to see which tests are currently running/passed/failed and follow the worker's console output live,
+So that I can tell what's actually happening instead of staring at an unchanging "running" badge — including confirming whether a suite has genuinely finished its tests but the process hasn't exited.
+
+**Acceptance Criteria:**
+
+**Given** `uiSnapshot()` in `src/ui/index.ts` (currently builds `{serverTime, projects: ProjectView[]}` with no per-test/log data)
+**When** a project's `run.state === "running"`
+**Then** its `ProjectView` gains a `live` field sourced from `orchestrator.getLiveRun(projectId)`: `tests` sliced to the most-recently-touched `MAX_SNAPSHOT_TESTS = 200` entries, `log` sliced to `.slice(-20)`, plus `testsTruncated`/`testsShown` so the UI can render "showing 200 of 1400." A project not in `"running"` state has no `live` field at all.
+
+**Given** `handleUiRequest()`'s existing route-dispatch convention (`/ui/api/projects/:projectId/runs[/:runId]`)
+**When** this story adds two new routes
+**Then** `GET /ui/api/projects/:projectId/log` returns `{projectId, runId, log}` — the **full** current ring (up to 1000 lines, no further slicing) as a one-shot JSON fetch — and `GET /ui/api/projects/:projectId/log/events` opens an SSE stream that pushes only the log lines newer than the connection's own last-sent index (tracked in a closure per connection, not resent from scratch on every tick), plus the same 15-second `: keep-alive` comment pattern already used by `/ui/events`. Both are GET-only, read-only, loopback + Host/Origin gated exactly like every existing `/ui*` route — no new mutation surface, no bearer-token requirement (matching the existing `/ui*` convention).
+
+**Given** `renderProject()` in the inline `UI_HTML` template
+**When** the project's `p.live` field is present
+**Then** it renders a live test list grouped by file (reusing the existing `relPath()` helper), one row per test with a status-colored badge — extend the existing `.ok`/`.fail`/`.skip` CSS classes with a new `.run` color for `"running"` status, following the exact `<ul class="tests">` markup pattern already used in `renderRun()` for a completed run's test list.
+
+**Given** the same running-project view
+**When** this story adds a log panel
+**Then** it is a collapsible `<details>` block (matching the existing pattern already used for `tests`/`selection` sections) with a "follow" checkbox; entering the view does a one-shot `GET .../log` to seed the panel, then opens `new EventSource(".../log/events")` and appends each pushed delta into a `<pre>`, auto-scrolling to bottom only while "follow" is checked. Navigating away from that project's view (via the existing hash-router's `render()` dispatch) closes the `EventSource` — no leaked open SSE connections when browsing between projects.
+
+> Architecture: AD-21 (UI-side of MCP/UI parity). Depends on Story 8.4/8.5 (`getLiveRun` must exist). No dependency on Story 8.6 (the UI reads the orchestrator directly, not through the MCP tool layer). Only touch `src/ui/index.ts` and its test files in this story.
+>
+> Testing: extend `test/ui.test.ts`: the snapshot's `live` field is present (with the documented 200/20 slicing) while a project is running and absent once it completes; the new `GET .../log` route returns the full (not sliced) ring; the new `GET .../log/events` SSE route's second push (after more log lines are appended by a running fixture) contains only the new lines, not a full resend; both new routes 404 cleanly for an unknown `projectId`, matching the existing `/runs` 404 behavior.

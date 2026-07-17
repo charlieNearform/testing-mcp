@@ -5,10 +5,10 @@ purpose: requirements-contract
 altitude: feature
 status: final
 created: '2026-07-10'
-updated: '2026-07-16'
+updated: '2026-07-17'
 binds: []
 sources: ['../../../../docs/prd.md']
-companions: ['../../architecture/architecture-test-server-mcp-2026-07-10/ARCHITECTURE-SPINE.md', '../../architecture/architecture-epic-7-runner-plugin-api-2026-07-16/ARCHITECTURE-SPINE.md']
+companions: ['../../architecture/architecture-test-server-mcp-2026-07-10/ARCHITECTURE-SPINE.md', '../../architecture/architecture-epic-7-runner-plugin-api-2026-07-16/ARCHITECTURE-SPINE.md', '../../architecture/architecture-epic-8-async-execution-observability-2026-07-17/ARCHITECTURE-SPINE.md']
 ---
 
 # SPEC — test-server-mcp
@@ -48,6 +48,10 @@ wrapped (it's a CLI that owns the run) or rebuilt from scratch.
 | C11 | Multi-suite registration | Register more than one test surface per project (e.g. unit + e2e), each its own plugin | `RegisteredProject.suites: Record<suiteName, {configPath, plugin}>`; `test-mcp register` auto-detects via each plugin's `detect()`, explicit `--suite` override when it can't resolve |
 | C12 | Per-suite scoping + graded coverage confidence | Selection/coverage/confidence/orchestrator bookkeeping never cross suite boundaries; a suite without coverage is a defined state | `Confidence` gains a third `"unavailable"` level (extends `high`/`degraded`) for a suite whose plugin reports `capabilities.coverage === "none"`; `thresholdsMet` never falsely asserted |
 | C13 | Jest plugin (seam validation) | Prove the `RunnerPlugin` interface holds for a second real runner | Jest plugin implements run/listTestFiles/detect/changedFileDetection at seam-validation scope (not full parity); passes an equivalent hermetic test suite to the Vitest plugin's |
+| C14 | Async-capable `run_tests` | A long run must not hold one MCP tool call open for its whole duration | Returns the full result synchronously within a configurable grace period (`waitMs`: per-call → project config → daemon config → 10s default; explicit `null` at any layer = wait forever); otherwise returns `{runId, projectId, state:"running"}` and the caller polls `get_test_status`, extending the same pattern already documented for `start_watch`. A run under the grace period is byte-for-byte unchanged from today |
+| C15 | Live per-test progress | See which specific test is running/passed/failed during a long run, not just a file count | `get_test_status` and the UI expose a live, bounded pending/running/passed/failed/skipped list per test via Vitest's `onTestCaseReady`/`onTestCaseResult` hooks (Vitest 3+; degrades to today's file-level granularity when unsupported, no explicit feature-detection needed) |
+| C16 | Console log tail with follow | Observe what a long-running worker is actually doing, including a suite that finishes tests but doesn't exit | Worker stdout+stderr captured into a bounded per-run ring buffer (last 1000 lines), exposed via the UI with follow; stderr still forwarded to the daemon's own stderr unchanged |
+| C17 | Stall watchdog (on by default) | Catch a genuinely wedged worker instead of waiting forever | Worker is killed if no test-level progress arrives for `testTimeout + grace` (testTimeout read from the project's resolved Vitest config; grace configurable, default 5s); reuses the existing whole-run-timeout kill path; a coverage-measurement-phase heartbeat prevents false positives during that silent phase |
 
 ## Constraints
 
@@ -59,6 +63,8 @@ wrapped (it's a CLI that owns the run) or rebuilt from scratch.
 - **Security**: bind `127.0.0.1` only; mandatory Host/Origin validation; per-daemon bearer token (CLI-managed).
 - **Versioned schemas**: every persisted JSON carries `schemaVersion`.
 - **Third-party attribution**: retain `testpick`'s MIT copyright + license text for the vendored attribution module (`NOTICE`/`THIRD_PARTY_LICENSES` + module header); track upstream.
+- **Stall-watchdog kill path (C17)**: reuses the orchestrator's existing worker-kill mechanism (the same helper already used by the opt-in whole-run timeout) — no second kill path. All new worker↔daemon IPC message types (C14-C17) are additive to the existing message-type union; no breaking change to existing shapes.
+- **Live-state scope (C15/C16)**: per-run live state (test list, log ring buffer) is in-memory only and transient, cleared when a run settles — not persisted to `<git-root>/.test-mcp/` history, which remains the durable end-of-run record. The human UI stays strictly read-only, loopback + Host/Origin gated, unauthenticated; C14-C17 introduce no new mutation surface.
 
 ## Non-goals
 
@@ -67,6 +73,7 @@ wrapped (it's a CLI that owns the run) or rebuilt from scratch.
 - Priority scoring + test health monitoring (Phase 2).
 - Fixture/setup-time cost tracking, ordering-dependency detection, parallel resource-contention quotas (deferred, research-grade).
 - Cross-platform beyond macOS (Linux/Windows Phase 2); distributed caching.
+- **(C14-C17)** The MCP client's own default request timeout is out of scope — a client-side concern this daemon doesn't control. C14's grace period makes this moot for the default/recommended configuration; an operator explicitly configuring "always wait" knowingly opts back into that client-side risk.
 
 ## Success signal
 
@@ -74,6 +81,7 @@ wrapped (it's a CLI that owns the run) or rebuilt from scratch.
 - Coverage reverse-map buildable within one full instrumented (single-pass) run.
 - After setup-baseline subtraction, a source change selects a small fraction of the suite — spike measured ~6% (unit-file changes) and ~18% (integration-file changes) on the target repo.
 - No actual failures missed due to intelligent skipping, guaranteed by conservative full-suite fallback rather than an absolute precision claim.
+- A run exceeding its configured grace period never holds an MCP tool call open past that window; a run within it is unchanged from today (C14). A wedged worker is killed within `testTimeout + grace` of its last real progress, never earlier, never silently forever (C17).
 
 ## Deferred
 
