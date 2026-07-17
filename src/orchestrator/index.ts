@@ -57,7 +57,46 @@ export interface RunStatus {
   lastResult?: TestResult;
   lastError?: string;
   updatedAt?: string;
+  /** The run this status reflects (Story 8.4) — set when a run starts, kept through settle. */
+  runId?: string;
 }
+
+/** A single test's live status while its run is in flight (Story 8.5). */
+export interface LiveTestEntry {
+  file: string;
+  name: string;
+  status: "pending" | "running" | "passed" | "failed" | "skipped";
+}
+
+/** One line of a live run's captured console output (Story 8.5). */
+export interface LiveLogLine {
+  stream: "stdout" | "stderr";
+  text: string;
+  at: string;
+}
+
+/** Bounded, transient, in-flight-only view of one project's current/most-recent run (Story 8.5). */
+interface LiveRunState {
+  runId: string;
+  testTimeoutMs?: number;
+  lastProgressAt: number;
+  tests: Map<string, LiveTestEntry>;
+  testOrder: string[];
+  testsTruncated: boolean;
+  log: LiveLogLine[];
+  stdoutResidual: string;
+  stderrResidual: string;
+}
+
+const MAX_LIVE_TEST_ENTRIES = 2000;
+const MAX_LOG_LINES = 1000;
+const MAX_LOG_LINE_CHARS = 4000;
+const MAX_RESIDUAL_CHARS = 8000;
+const MIN_SANE_TEST_TIMEOUT_MS = 1_000;
+/** Lenient fallback when the worker's `config` message never arrives (e.g. discovery itself hangs). */
+const DEFAULT_UNKNOWN_TEST_TIMEOUT_MS = 30_000;
+/** Key for LiveTestEntry map entries — a test is identified by (file, name), not by name alone. */
+const liveTestKey = (file: string, name: string): string => `${file}\0${name}`;
 
 /** A completed run retained in the in-memory history ring buffer (for the monitoring UI). */
 export interface RunRecord {
@@ -118,6 +157,12 @@ export interface OrchestratorOptions {
   planTtlMs?: number;
   /** Global ceiling on concurrently-forked workers across all projects (default: unbounded). */
   maxConcurrentWorkers?: number;
+  /**
+   * Grace period (ms) added to a project's resolved testTimeout for the stall watchdog (Story
+   * 8.5) — on by default, unlike runTimeoutMs, since it targets a genuine hang, not a cap on a
+   * legitimately long run.
+   */
+  staleTestGraceMs?: number;
 }
 
 export class Orchestrator {
@@ -146,6 +191,10 @@ export class Orchestrator {
    * it never shrinks as old runs age out, and it self-heals deletions the next time a file re-runs.
    */
   private readonly testInventory = new Map<string, Map<string, Set<string>>>();
+  /** Bounded, transient live view of each project's current/most-recent run (Story 8.5). */
+  private readonly liveRuns = new Map<string, LiveRunState>();
+  /** Stall-watchdog grace period, added to a project's resolved testTimeout (Story 8.5). */
+  private readonly staleTestGraceMs: number;
   /** Status-change subscribers (Story 5.1 UI push). */
   private readonly statusListeners = new Set<() => void>();
 
@@ -157,6 +206,7 @@ export class Orchestrator {
     this.runTimeoutMs = opts.runTimeoutMs;
     this.planTtlMs = opts.planTtlMs ?? 300_000;
     this.maxConcurrentWorkers = Math.max(1, opts.maxConcurrentWorkers ?? Number.POSITIVE_INFINITY);
+    this.staleTestGraceMs = opts.staleTestGraceMs ?? 5000;
   }
 
   /** Acquire a global worker slot, waiting if maxConcurrentWorkers are already busy. */
@@ -195,9 +245,32 @@ export class Orchestrator {
       onProgress?: ProgressFn;
     } = {},
   ): Promise<TestResult> {
+    const { result } = this.startRun(project, opts);
+    return result;
+  }
+
+  /**
+   * Start a run and return its id immediately, before the run settles (Story 8.4). `result`
+   * resolves/rejects exactly like `runTests()` always has -- this is the mechanism that makes
+   * an async, job-handle-returning `run_tests` MCP call possible (Story 8.6) without changing
+   * anything about how the run itself executes.
+   */
+  startRun(
+    project: ProjectRef,
+    opts: {
+      files?: string[];
+      mode?: string;
+      coverage?: boolean;
+      since?: "last-run" | "head";
+      strict?: boolean;
+      onProgress?: ProgressFn;
+    } = {},
+  ): { runId: string; result: Promise<TestResult> } {
+    const runId = randomUUID();
     const sel = this.resolveSelection(project, opts);
     const coverage = opts.coverage ?? loadCoverageMap(project.path) !== null;
-    return this.enqueue(project, sel, coverage, opts.onProgress);
+    const result = this.enqueue(project, sel, coverage, runId, opts.onProgress);
+    return { runId, result };
   }
 
   /** Drop plans past their TTL so an uncommitted dry-run can't accumulate forever. */
@@ -246,6 +319,22 @@ export class Orchestrator {
     planId: string,
     opts: { onProgress?: ProgressFn } = {},
   ): Promise<TestResult> {
+    const { result } = this.startPlanRun(project, planId, opts);
+    return result;
+  }
+
+  /**
+   * `startRun`'s counterpart for a committed plan (Story 8.4) — same {runId, result} shape, so
+   * `run_tests`'s async job-handle path (Story 8.6) works identically whether the call came with
+   * a `planId` or not. Plan validation is synchronous and still throws PlanError immediately for
+   * an expired/unknown plan (no run, no runId to hand back) -- unchanged from `runPlan`'s prior
+   * behavior.
+   */
+  startPlanRun(
+    project: ProjectRef,
+    planId: string,
+    opts: { onProgress?: ProgressFn } = {},
+  ): { runId: string; result: Promise<TestResult> } {
     this.sweepExpiredPlans();
     const stored = this.plans.get(planId);
     if (!stored || stored.projectId !== project.projectId || stored.expiresAtMs < Date.now()) {
@@ -253,7 +342,8 @@ export class Orchestrator {
       throw new PlanError(`Plan ${planId} is expired or unknown; re-plan with dryRun`);
     }
     this.plans.delete(planId); // one-shot commit
-    return this.enqueue(
+    const runId = randomUUID();
+    const result = this.enqueue(
       project,
       {
         files: stored.files,
@@ -270,8 +360,10 @@ export class Orchestrator {
         confidence: stored.confidence,
       },
       false,
+      runId,
       opts.onProgress,
     );
+    return { runId, result };
   }
 
   /** Serialize a resolved selection onto the project's queue (short-circuiting empty plans). */
@@ -279,6 +371,7 @@ export class Orchestrator {
     project: ProjectRef,
     sel: ResolvedSelection,
     coverage: boolean,
+    runId: string,
     onProgress?: ProgressFn,
   ): Promise<TestResult> {
     const prev = this.queues.get(project.projectId) ?? Promise.resolve();
@@ -289,7 +382,7 @@ export class Orchestrator {
         const now = new Date().toISOString();
         this.advanceSnapshotIfDeltaRun(project, sel, result);
         this.recordRun({
-          runId: randomUUID(),
+          runId,
           projectId: project.projectId,
           startedAt: now,
           finishedAt: now,
@@ -302,10 +395,11 @@ export class Orchestrator {
           state: "complete",
           lastResult: result,
           progress: undefined,
+          runId,
         });
         return result;
       }
-      return this.execute(project, sel, coverage, onProgress);
+      return this.execute(project, sel, coverage, runId, onProgress);
     });
     // Keep the chain alive even if this run rejects, so the next run still serializes after it.
     this.queues.set(project.projectId, run.catch(() => undefined));
@@ -387,12 +481,13 @@ export class Orchestrator {
     project: ProjectRef,
     sel: ResolvedSelection,
     coverage: boolean,
+    runId: string,
     onProgress?: ProgressFn,
   ): Promise<TestResult> {
     // Bound total concurrent workers across all projects; release the slot once settled.
     await this.acquireWorker();
     try {
-      return await this.executeWorker(project, sel, coverage, onProgress);
+      return await this.executeWorker(project, sel, coverage, runId, onProgress);
     } finally {
       this.releaseWorker();
     }
@@ -402,18 +497,35 @@ export class Orchestrator {
     project: ProjectRef,
     sel: ResolvedSelection,
     coverage: boolean,
+    runId: string,
     onProgress?: ProgressFn,
   ): Promise<TestResult> {
     const { files, changed } = sel;
     return new Promise<TestResult>((resolve, reject) => {
-      const runId = randomUUID();
       const startedAt = new Date().toISOString();
       const startMs = Date.now();
       this.setRunState(project.projectId, {
         state: "running",
         progress: undefined,
         lastError: undefined,
+        runId,
       });
+
+      // Bounded, transient live view (Story 8.5) -- created up front so a hang before the worker
+      // even reaches "ready" is still observable, and retained through settle (see finish()) so
+      // an operator inspecting it right after an error/stall-kill still sees what led to it.
+      const live: LiveRunState = {
+        runId,
+        lastProgressAt: Date.now(),
+        tests: new Map(),
+        testOrder: [],
+        testsTruncated: false,
+        log: [],
+        stdoutResidual: "",
+        stderrResidual: "",
+      };
+      this.liveRuns.set(project.projectId, live);
+
       const failRun = (err: WorkerError): void => {
         this.lastFailures.delete(project.projectId);
         this.recordRun({
@@ -426,7 +538,7 @@ export class Orchestrator {
           error: err.message,
           failures: [],
         }, project.path);
-        this.setRunState(project.projectId, { state: "error", lastError: err.message, progress: undefined });
+        this.setRunState(project.projectId, { state: "error", lastError: err.message, progress: undefined, runId });
         reject(err);
       };
       const workerEnv: NodeJS.ProcessEnv = {
@@ -443,8 +555,33 @@ export class Orchestrator {
         cwd: project.path, // worker resolves the project's OWN vitest from here
         execArgv: [], // do not inherit vitest/ts loaders from the parent process
         env: workerEnv,
-        // stdout ignored (keep it clean), worker stderr flows to the daemon's stderr.
-        stdio: ["ignore", "ignore", "inherit", "ipc"],
+        // stdout/stderr piped (Story 8.5) so both can be captured into the live log ring; stderr
+        // is also still written straight through to the daemon's own stderr, unchanged from today.
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      });
+
+      const pushLogLine = (stream: "stdout" | "stderr", text: string): void => {
+        const clipped = text.length > MAX_LOG_LINE_CHARS ? text.slice(0, MAX_LOG_LINE_CHARS) + "…[truncated]" : text;
+        live.log.push({ stream, text: clipped, at: new Date().toISOString() });
+        if (live.log.length > MAX_LOG_LINES) live.log.shift();
+      };
+      const appendLog = (stream: "stdout" | "stderr", chunk: Buffer): void => {
+        const key = stream === "stdout" ? "stdoutResidual" : "stderrResidual";
+        live[key] += chunk.toString("utf8");
+        if (live[key].length > MAX_RESIDUAL_CHARS) {
+          // No newline for MAX_RESIDUAL_CHARS: force-flush so one pathological chunk can't grow forever.
+          pushLogLine(stream, live[key].slice(0, MAX_LOG_LINE_CHARS) + "…[line truncated]");
+          live[key] = "";
+        }
+        const lines = live[key].split("\n");
+        live[key] = lines.pop() ?? ""; // last (possibly partial) segment stays as residual
+        for (const l of lines) pushLogLine(stream, l);
+        if (lines.length) this.notifyStatusChange();
+      };
+      child.stdout?.on("data", (chunk: Buffer) => appendLog("stdout", chunk));
+      child.stderr?.on("data", (chunk: Buffer) => {
+        process.stderr.write(chunk); // preserve today's passthrough exactly
+        appendLog("stderr", chunk);
       });
 
       let settled = false;
@@ -463,13 +600,70 @@ export class Orchestrator {
             }, this.runTimeoutMs)
           : undefined;
 
+      // Stall watchdog (Story 8.5/AD-20) -- provisional until the worker's `config` message
+      // reports its real testTimeout (covering a hang in the worker's own config-discovery step,
+      // which can hang too), then rearmed at testTimeout + staleTestGraceMs. Resets (full
+      // setTimeout reschedule, not a poll) on every test-level progress signal. Reuses `finish()`
+      // -- no second kill path alongside the runTimeoutMs cap above.
+      let effectiveTestTimeoutMs = DEFAULT_UNKNOWN_TEST_TIMEOUT_MS;
+      let stallTimer: NodeJS.Timeout | undefined;
+      const scheduleStallCheck = (): void => {
+        if (stallTimer) clearTimeout(stallTimer);
+        const thresholdMs = effectiveTestTimeoutMs + this.staleTestGraceMs;
+        stallTimer = setTimeout(() => {
+          const elapsed = Date.now() - live.lastProgressAt;
+          finish(() =>
+            failRun(
+              new WorkerError(
+                `worker stalled: no test progress for ${elapsed}ms (threshold ${thresholdMs}ms = ` +
+                  `testTimeout ${effectiveTestTimeoutMs}ms + grace ${this.staleTestGraceMs}ms)`,
+              ),
+            ),
+          );
+        }, thresholdMs);
+      };
+      const armWatchdog = (testTimeoutMs?: number): void => {
+        if (testTimeoutMs !== undefined) {
+          effectiveTestTimeoutMs = Math.max(testTimeoutMs, MIN_SANE_TEST_TIMEOUT_MS);
+          live.testTimeoutMs = effectiveTestTimeoutMs;
+        }
+        scheduleStallCheck();
+      };
+      const touchLiveProgress = (): void => {
+        live.lastProgressAt = Date.now();
+        scheduleStallCheck();
+        this.notifyStatusChange();
+      };
+      scheduleStallCheck(); // provisional arm, before any config message can possibly arrive
+
       const finish = (act: () => void): void => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
+        if (stallTimer) clearTimeout(stallTimer);
+        // Flush any trailing partial (no-newline) line rather than silently dropping it.
+        if (live.stdoutResidual) pushLogLine("stdout", live.stdoutResidual);
+        if (live.stderrResidual) pushLogLine("stderr", live.stderrResidual);
         child.removeAllListeners();
         if (!child.killed) child.kill();
         act();
+      };
+
+      const upsertLiveTest = (
+        file: string,
+        name: string,
+        status: LiveTestEntry["status"],
+      ): void => {
+        const key = liveTestKey(file, name);
+        const isNew = !live.tests.has(key);
+        if (isNew && live.tests.size >= MAX_LIVE_TEST_ENTRIES) {
+          // Ring, not a frozen cap: evict the oldest so the visible list is always the most recent.
+          const oldest = live.testOrder.shift();
+          if (oldest !== undefined) live.tests.delete(oldest);
+          live.testsTruncated = true;
+        }
+        live.tests.set(key, { file, name, status });
+        if (isNew) live.testOrder.push(key);
       };
 
       child.on("message", (raw: unknown) => {
@@ -505,6 +699,18 @@ export class Orchestrator {
             progress: { completed: msg.completed, total: msg.total },
           });
           onProgress?.(msg.completed, msg.total);
+          touchLiveProgress();
+        } else if (msg.type === "config" && msg.runId === runId) {
+          armWatchdog(msg.testTimeoutMs);
+          touchLiveProgress();
+        } else if (msg.type === "case-start" && msg.runId === runId) {
+          upsertLiveTest(msg.file, msg.name, "running");
+          touchLiveProgress();
+        } else if (msg.type === "case-result" && msg.runId === runId) {
+          upsertLiveTest(msg.file, msg.name, msg.status);
+          touchLiveProgress();
+        } else if (msg.type === "phase-progress" && msg.runId === runId) {
+          touchLiveProgress(); // coverage-measurement heartbeat; not surfaced as primary progress
         } else if (msg.type === "result" && msg.runId === runId) {
           if (!msg.result) {
             finish(() => failRun(new WorkerError("worker returned no result")));
@@ -546,6 +752,7 @@ export class Orchestrator {
               state: "complete",
               lastResult: result,
               progress: undefined,
+              runId,
             });
             finish(() => resolve(result));
           }
@@ -562,9 +769,16 @@ export class Orchestrator {
       });
 
       child.on("error", (err) => finish(() => failRun(new WorkerError(err.message))));
-      child.on("exit", (code) =>
+      child.on("exit", (code, signal) =>
         finish(() =>
-          failRun(new WorkerError(`worker exited (code ${code}) before returning a result`)),
+          failRun(
+            new WorkerError(
+              `worker exited (code ${code}, signal ${signal}) before returning a result` +
+                (signal === "SIGKILL"
+                  ? " -- SIGKILL is almost always the OS OOM killer; check available memory"
+                  : ""),
+            ),
+          ),
         ),
       );
     });
@@ -609,6 +823,32 @@ export class Orchestrator {
   /** Current pollable run state for a project (Story 4.2). */
   getRunStatus(projectId: string): RunStatus {
     return this.runState.get(projectId) ?? { state: "idle" };
+  }
+
+  /**
+   * Bounded live view of a project's current/most-recent run (Story 8.5) — undefined only if no
+   * run has ever started for this project (never mid-settle-cleanup; live state is retained
+   * until the next run for that project starts, so a poll right after an error/stall-kill still
+   * shows what led to it).
+   */
+  getLiveRun(projectId: string):
+    | {
+        runId: string;
+        testTimeoutMs?: number;
+        tests: LiveTestEntry[];
+        testsTruncated: boolean;
+        logTail: LiveLogLine[];
+      }
+    | undefined {
+    const live = this.liveRuns.get(projectId);
+    if (!live) return undefined;
+    return {
+      runId: live.runId,
+      testTimeoutMs: live.testTimeoutMs,
+      tests: live.testOrder.map((k) => live.tests.get(k)!),
+      testsTruncated: live.testsTruncated,
+      logTail: live.log,
+    };
   }
 
   /** Retained run history for a project, newest first (in-memory, capped). */
@@ -769,6 +1009,11 @@ export class Orchestrator {
       ? { ...patch, lastResult: structuredClone(patch.lastResult) }
       : patch;
     this.runState.set(projectId, { ...prev, ...clean, updatedAt: new Date().toISOString() });
+    this.notifyStatusChange();
+  }
+
+  /** Fan out to every status-change subscriber (Story 5.1 UI push; Story 8.5 live-state pushes too). */
+  private notifyStatusChange(): void {
     for (const fn of this.statusListeners) {
       try {
         fn();

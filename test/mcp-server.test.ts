@@ -83,6 +83,15 @@ describe("createMcpServer", () => {
     await client.close();
     await server.close();
   });
+
+  it("run_tests's tool description documents the async job-handle contract (Story 8.6 regression guard)", async () => {
+    const { client, server } = await connectClient();
+    const { tools } = await client.listTools();
+    const runTests = tools.find((t) => t.name === "run_tests");
+    expect(runTests?.description).toMatch(/poll get_test_status/i);
+    await client.close();
+    await server.close();
+  });
 });
 
 describe("createMcpRequestListener keep-alive ping", () => {

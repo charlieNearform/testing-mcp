@@ -20,6 +20,22 @@ export type ToWorker =
 export type FromWorker =
   | { type: "ready" }
   | { type: "progress"; runId: string; completed: number; total: number }
+  | { type: "config"; runId: string; testTimeoutMs: number }
+  | { type: "case-start"; runId: string; file: string; name: string }
+  | {
+      type: "case-result";
+      runId: string;
+      file: string;
+      name: string;
+      status: "passed" | "failed" | "skipped";
+    }
+  | {
+      type: "phase-progress";
+      runId: string;
+      phase: "coverage";
+      completed: number;
+      total: number;
+    }
   | {
       type: "result";
       runId: string;
@@ -90,6 +106,31 @@ const FromWorkerSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("progress"),
     runId: z.string(),
+    completed: z.number(),
+    total: z.number(),
+  }),
+  z.object({
+    type: z.literal("config"),
+    runId: z.string(),
+    testTimeoutMs: z.number(),
+  }),
+  z.object({
+    type: z.literal("case-start"),
+    runId: z.string(),
+    file: z.string(),
+    name: z.string(),
+  }),
+  z.object({
+    type: z.literal("case-result"),
+    runId: z.string(),
+    file: z.string(),
+    name: z.string(),
+    status: z.enum(["passed", "failed", "skipped"]),
+  }),
+  z.object({
+    type: z.literal("phase-progress"),
+    runId: z.string(),
+    phase: z.literal("coverage"),
     completed: z.number(),
     total: z.number(),
   }),

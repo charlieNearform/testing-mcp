@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { IncomingMessage, ServerResponse, RequestListener } from "node:http";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -18,6 +20,19 @@ export interface McpServerDeps {
   orchestrator?: Orchestrator;
   /** Watch/incremental mode manager (owned by the daemon). Absent in bare unit tests. */
   watchManager?: WatchManager;
+  /**
+   * Cadence for re-sending the last known `run_tests` progress (default 20_000) to keep that
+   * call's dedicated SSE stream from going idle on a long run. Exposed for tests; production
+   * callers should rely on the default, which is well inside undici's ~5 minute idle body timeout.
+   */
+  progressKeepAliveMs?: number;
+  /**
+   * Daemon-level default for `run_tests`'s async grace period (Story 8.6/AD-17) -- how long a
+   * call waits synchronously before falling back to a {runId, state:"running"} job handle.
+   * `null` means wait forever. Overridden per-project (.test-mcp/config.json) or per-call
+   * (`waitMs` tool argument); falls back to 10s if neither this nor those set anything.
+   */
+  defaultRunWaitMs?: number | null;
 }
 
 export interface McpListenerDeps extends McpServerDeps {
@@ -34,11 +49,38 @@ function errorResult(err: AppError) {
   return { isError: true, content: [{ type: "text" as const, text: JSON.stringify(err) }] };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Best-effort read of a project's own `defaultRunWaitMs` override from
+ * `<project.path>/.test-mcp/config.json` (Story 8.6/AD-17) -- the same per-project state
+ * directory the orchestrator already uses (TEST_MCP_STATE_DIR). Absent/unreadable/malformed
+ * yields `undefined` (fall through to the daemon-level default) rather than throwing; a
+ * project-level config file is optional and never required for run_tests to work.
+ */
+function readProjectDefaultRunWaitMs(projectPath: string): number | null | undefined {
+  try {
+    const raw = fs.readFileSync(path.join(projectPath, ".test-mcp", "config.json"), "utf8");
+    const parsed = JSON.parse(raw) as { defaultRunWaitMs?: number | null };
+    return parsed.defaultRunWaitMs === null || typeof parsed.defaultRunWaitMs === "number"
+      ? parsed.defaultRunWaitMs
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Build a configured McpServer with all Phase-1 tools registered (discoverable). */
 export function createMcpServer(deps: McpServerDeps = {}): McpServer {
   const registry = deps.registry;
   const orchestrator = deps.orchestrator;
   const watchManager = deps.watchManager;
+  const progressKeepAliveMs = deps.progressKeepAliveMs ?? 20_000;
+  // Daemon-level default for run_tests's async grace period (Story 8.6/AD-17); `undefined` here
+  // (deps didn't set anything) still falls through to the built-in 10s default below.
+  const daemonDefaultRunWaitMs = deps.defaultRunWaitMs;
   const isRegistered = (projectId: string) => registry?.has(projectId) ?? false;
   const server = new McpServer({ name: "test-mcp", version: "0.0.0" });
 
@@ -98,7 +140,12 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
   server.registerTool(
     "run_tests",
     {
-      description: "Run tests for a registered project",
+      description:
+        "Run tests for a registered project. Returns the full result if the run finishes " +
+        "within the effective wait window (waitMs argument, else the project's or daemon's " +
+        "configured default, else 10s); otherwise returns {runId, projectId, state:\"running\"} " +
+        "immediately and the run keeps executing in the background -- poll get_test_status(projectId) " +
+        "until state is \"complete\" or \"error\" to get the result (same pattern as start_watch).",
       inputSchema: {
         projectId: z.string().describe("ID of a registered project"),
         mode: z.enum(["full", "incremental", "watch"]).optional().describe("Run mode"),
@@ -124,9 +171,18 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
         suite: z.string().optional().describe("Test suite name"),
         dryRun: z.boolean().optional().describe("Compute the plan without executing"),
         planId: z.string().optional().describe("Execute a previously computed plan"),
+        waitMs: z
+          .number()
+          .nullable()
+          .optional()
+          .describe(
+            "How long to wait synchronously before falling back to a {runId, state:\"running\"} " +
+              "job handle. Omit to use the project's/daemon's configured default (10s if neither " +
+              "sets one). Explicit null waits forever (today's fully-synchronous behavior).",
+          ),
       },
     },
-    async ({ projectId, files, mode, coverage, since, strict, dryRun, planId }, extra) => {
+    async ({ projectId, files, mode, coverage, since, strict, dryRun, planId, waitMs }, extra) => {
       const project = registry?.get(projectId);
       if (!project) return unknownProject(projectId);
       if (!orchestrator) {
@@ -134,29 +190,77 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
       }
       // Forward per-file progress as notifications/progress when the client supplied a token (Story 4.2).
       const progressToken = extra?._meta?.progressToken;
-      const onProgress =
-        progressToken != null
-          ? (completed: number, total: number) => {
-              void extra.sendNotification({
-                method: "notifications/progress",
-                params: { progressToken, progress: completed, total },
-              });
-            }
-          : undefined;
+      let lastProgress = { completed: 0, total: 0 };
+      // This tool call's response travels over its OWN dedicated SSE stream (the SDK opens one
+      // per request, separate from any general server-push channel) for as long as this call
+      // waits before resolving. Without traffic on that specific stream, the client's idle-body
+      // timeout (undici defaults to ~5 minutes) kills it and the eventual result is lost. Re-send
+      // the last known progress on a fixed cadence so the stream is never idle that long -- cheap
+      // insurance even now that most calls resolve within a bounded waitMs window. Only possible
+      // when a progressToken exists -- it's the only legitimate channel onto that stream.
+      let onProgress: ((completed: number, total: number) => void) | undefined;
+      let keepAliveInterval: NodeJS.Timeout | undefined;
+      if (progressToken != null) {
+        const sendProgress = (completed: number, total: number): void => {
+          lastProgress = { completed, total };
+          void extra.sendNotification({
+            method: "notifications/progress",
+            params: { progressToken, progress: completed, total },
+          });
+        };
+        onProgress = sendProgress;
+        keepAliveInterval = setInterval(
+          () => sendProgress(lastProgress.completed, lastProgress.total),
+          progressKeepAliveMs,
+        );
+      }
       try {
         if (dryRun) {
           const plan = orchestrator.plan(project, { files, mode, since, strict });
           return { content: [{ type: "text" as const, text: JSON.stringify(plan) }] };
         }
-        const result = planId
-          ? await orchestrator.runPlan(project, planId, { onProgress })
-          : await orchestrator.runTests(project, { files, mode, coverage, since, strict, onProgress });
-        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+        // Effective grace period (Story 8.6/AD-17): per-call argument -> project config ->
+        // daemon config -> 10s built-in default. `null` at any layer means wait forever.
+        const effectiveWaitMs =
+          waitMs !== undefined
+            ? waitMs
+            : (readProjectDefaultRunWaitMs(project.path) ?? daemonDefaultRunWaitMs ?? 10_000);
+
+        const { runId, result } = planId
+          ? orchestrator.startPlanRun(project, planId, { onProgress })
+          : orchestrator.startRun(project, { files, mode, coverage, since, strict, onProgress });
+        // Never let the detached promise become an unhandled rejection once we stop awaiting it.
+        result.catch(() => {});
+
+        if (effectiveWaitMs === null) {
+          const final = await result; // explicit "wait forever" -- today's exact behavior
+          return { content: [{ type: "text" as const, text: JSON.stringify(final) }] };
+        }
+        const timedOut = Symbol("run_tests wait timed out");
+        const winner = await Promise.race([result, sleep(effectiveWaitMs).then(() => timedOut)]);
+        if (winner !== timedOut) {
+          return { content: [{ type: "text" as const, text: JSON.stringify(winner) }] };
+        }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                runId,
+                projectId,
+                state: "running",
+                message: `still running after ${effectiveWaitMs}ms; poll get_test_status(${JSON.stringify(projectId)}) for the result`,
+              }),
+            },
+          ],
+        };
       } catch (err) {
         if (err instanceof PlanError) return errorResult(toAppError("PlanExpired", err.message));
         return errorResult(
           toAppError("WorkerFailure", err instanceof Error ? err.message : String(err)),
         );
+      } finally {
+        if (keepAliveInterval) clearInterval(keepAliveInterval);
       }
     },
   );
@@ -164,7 +268,10 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
   server.registerTool(
     "get_test_status",
     {
-      description: "Get the current test/watch state for a project",
+      description:
+        "Get the current test/watch state for a project. Poll this after run_tests returns a " +
+        "{runId, state:\"running\"} job handle -- includes a `live` field (bounded per-test " +
+        "pending/running/pass/fail list and console log tail) while a run is in flight (Story 8.6).",
       inputSchema: { projectId: z.string().describe("ID of a registered project") },
     },
     async ({ projectId }) => {
@@ -172,7 +279,12 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
       // Run state (Story 4.2) plus watch state (Story 3.6) — a single pollable snapshot.
       const run = orchestrator?.getRunStatus(projectId) ?? { state: "idle" as const };
       const watch = watchManager?.status(projectId);
-      return { content: [{ type: "text" as const, text: JSON.stringify({ ...run, watch }) }] };
+      // Full bounded live state (Story 8.5/8.6/AD-21) -- a poll is a deliberate single-project
+      // request, not a broadcast, so no further slicing beyond the orchestrator's own caps.
+      const live = orchestrator?.getLiveRun(projectId);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ ...run, watch, ...(live ? { live } : {}) }) }],
+      };
     },
   );
 

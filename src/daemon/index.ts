@@ -30,6 +30,18 @@ const DaemonConfigSchema = z.object({
    * net by setting this in config.json.
    */
   runTimeoutMs: z.number().int().positive().optional(),
+  /**
+   * How long (ms) `run_tests` waits synchronously before falling back to a {runId,
+   * state:"running"} job handle (Story 8.6). `null` means wait forever (today's fully
+   * synchronous behavior) -- a deliberate, non-default opt-out, not the default itself.
+   */
+  defaultRunWaitMs: z.number().int().nonnegative().nullable().optional().default(10_000),
+  /**
+   * Grace period (ms) added to a project's resolved testTimeout for the stall watchdog: the
+   * worker is killed if no test progress arrives for testTimeout + staleTestGraceMs. On by
+   * default (unlike runTimeoutMs) -- this catches a genuine hang, not a legitimate long run.
+   */
+  staleTestGraceMs: z.number().int().positive().default(5000),
 });
 
 export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
@@ -143,6 +155,8 @@ export function loadOrCreateConfig(): DaemonConfig {
     port: 7420,
     maxConcurrentWorkers: Math.max(1, os.cpus().length),
     workerIdleTtlMs: 300000,
+    defaultRunWaitMs: 10_000,
+    staleTestGraceMs: 5000,
   };
 
   fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), { mode: 0o600 });
@@ -205,6 +219,7 @@ export async function startDaemon(): Promise<DaemonHandle> {
   const orchestrator = new Orchestrator({
     maxConcurrentWorkers: cfg.maxConcurrentWorkers,
     runTimeoutMs: cfg.runTimeoutMs,
+    staleTestGraceMs: cfg.staleTestGraceMs,
   });
   // Rehydrate each registered project's run history and test inventory from disk (Story 6.2;
   // test-count-accuracy fix) so past runs and the "total tests" figure survive a restart.
@@ -222,7 +237,13 @@ export async function startDaemon(): Promise<DaemonHandle> {
   }
   const watchManager = new WatchManager(orchestrator);
   const server = http.createServer(
-    createMcpRequestListener({ token, registry, orchestrator, watchManager }),
+    createMcpRequestListener({
+      token,
+      registry,
+      orchestrator,
+      watchManager,
+      defaultRunWaitMs: cfg.defaultRunWaitMs,
+    }),
   );
 
   await new Promise<void>((resolve, reject) => {

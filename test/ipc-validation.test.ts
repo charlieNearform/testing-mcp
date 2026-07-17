@@ -71,4 +71,52 @@ describe("IPC message validation at the process boundary", () => {
     // The rest of the result survived.
     expect((parsed.result as { passed: number }).passed).toBe(1);
   });
+
+  it("accepts a well-formed config message (Story 8.1)", () => {
+    const msg = { type: "config", runId: "r1", testTimeoutMs: 5000 };
+    expect(parseFromWorker(msg)).toEqual(msg);
+  });
+
+  it("rejects a config message missing testTimeoutMs", () => {
+    expect(() => parseFromWorker({ type: "config", runId: "r1" })).toThrow();
+  });
+
+  it("accepts a well-formed case-start message (Story 8.1)", () => {
+    const msg = { type: "case-start", runId: "r1", file: "a.test.ts", name: "adds" };
+    expect(parseFromWorker(msg)).toEqual(msg);
+  });
+
+  it("rejects a case-start message missing name", () => {
+    expect(() => parseFromWorker({ type: "case-start", runId: "r1", file: "a.test.ts" })).toThrow();
+  });
+
+  it("accepts a well-formed case-result message for each status (Story 8.1)", () => {
+    for (const status of ["passed", "failed", "skipped"] as const) {
+      const msg = { type: "case-result", runId: "r1", file: "a.test.ts", name: "adds", status };
+      expect(parseFromWorker(msg)).toEqual(msg);
+    }
+  });
+
+  it("rejects a case-result message with an invalid status", () => {
+    expect(() =>
+      parseFromWorker({
+        type: "case-result",
+        runId: "r1",
+        file: "a.test.ts",
+        name: "adds",
+        status: "pending",
+      }),
+    ).toThrow();
+  });
+
+  it("accepts a well-formed phase-progress message (Story 8.1)", () => {
+    const msg = { type: "phase-progress", runId: "r1", phase: "coverage", completed: 1, total: 3 };
+    expect(parseFromWorker(msg)).toEqual(msg);
+  });
+
+  it("rejects a phase-progress message with an unknown phase", () => {
+    expect(() =>
+      parseFromWorker({ type: "phase-progress", runId: "r1", phase: "bogus", completed: 1, total: 3 }),
+    ).toThrow();
+  });
 });

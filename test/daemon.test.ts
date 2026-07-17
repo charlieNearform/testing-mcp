@@ -102,6 +102,38 @@ describe("daemon", () => {
       fs.writeFileSync(configPath(), "{ not json");
       expect(() => loadOrCreateConfig()).toThrow(/not valid JSON/);
     });
+
+    it("creates a fresh config with the documented defaultRunWaitMs/staleTestGraceMs defaults (Story 8.3)", () => {
+      fs.rmSync(configPath(), { force: true });
+      const config = loadOrCreateConfig();
+      expect(config.defaultRunWaitMs).toBe(10_000);
+      expect(config.staleTestGraceMs).toBe(5000);
+    });
+
+    it("fills in defaultRunWaitMs/staleTestGraceMs defaults for a config written before they existed (Story 8.3)", () => {
+      fs.writeFileSync(
+        configPath(),
+        JSON.stringify({ schemaVersion: SCHEMA_VERSION, port: 0, maxConcurrentWorkers: 1, workerIdleTtlMs: 300000 }),
+      );
+      const config = loadOrCreateConfig();
+      expect(config.defaultRunWaitMs).toBe(10_000);
+      expect(config.staleTestGraceMs).toBe(5000);
+    });
+
+    it("preserves an explicit defaultRunWaitMs of null (wait forever) across a load (Story 8.3)", () => {
+      fs.writeFileSync(
+        configPath(),
+        JSON.stringify({
+          schemaVersion: SCHEMA_VERSION,
+          port: 0,
+          maxConcurrentWorkers: 1,
+          workerIdleTtlMs: 300000,
+          defaultRunWaitMs: null,
+        }),
+      );
+      const config = loadOrCreateConfig();
+      expect(config.defaultRunWaitMs).toBeNull();
+    });
   });
 
   describe("resolveToken", () => {

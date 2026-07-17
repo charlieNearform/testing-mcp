@@ -57,8 +57,11 @@ interface VitestInstance {
 interface DiscoveryInstance {
   close(): Promise<void>;
   globTestSpecifications(): Promise<ReadonlyArray<{ moduleId: string }>>;
-  /** Resolved config — we read the project's coverage thresholds for the gate (Story 6.3 AC4). */
-  config?: { coverage?: { thresholds?: unknown } };
+  /**
+   * Resolved config — we read the project's coverage thresholds for the gate (Story 6.3 AC4)
+   * and its testTimeout for the stall watchdog (Story 8.2), without running any tests.
+   */
+  config?: { coverage?: { thresholds?: unknown }; testTimeout?: number };
 }
 
 interface VitestNode {
@@ -77,11 +80,17 @@ interface RunOnceResult {
   isolate: boolean;
 }
 
+/** Vitest's "pending" case state folds into "failed", matching mapModulesToResult's existing rule. */
+function mapCaseStatus(state: VTestResult["state"]): "passed" | "failed" | "skipped" {
+  return state === "pending" ? "failed" : state;
+}
+
 /** Execute Vitest once with the given filters/options and capture reporter output. */
 async function runOnce(
   startVitest: VitestNode["startVitest"],
   filters: string[],
   extraOptions: Record<string, unknown>,
+  runId: string,
   onProgress?: (completed: number, total: number) => void,
 ): Promise<RunOnceResult> {
   let modules: ReadonlyArray<VTestModule> = [];
@@ -101,12 +110,41 @@ async function runOnce(
       modules = testModules;
       unhandled = unhandledErrors;
     },
+    // Optional, Vitest 3+ only (Story 8.2) — an older project Vitest simply never calls these.
+    // Wrapped defensively: a reporter hook must never crash the worker or abort the run.
+    onTestCaseReady(testCase: VTestCase) {
+      try {
+        send({ type: "case-start", runId, file: testCase.module.moduleId, name: testCase.fullName });
+      } catch {
+        // never let a reporter hook failure break the run
+      }
+    },
+    onTestCaseResult(testCase: VTestCase) {
+      try {
+        send({
+          type: "case-result",
+          runId,
+          file: testCase.module.moduleId,
+          name: testCase.fullName,
+          status: mapCaseStatus(testCase.result().state),
+        });
+      } catch {
+        // ditto
+      }
+    },
   };
   const start = Date.now();
   const vitest = await startVitest("test", filters, {
     watch: false,
     reporters: [reporter],
     coverage: { enabled: false },
+    // Vitest intercepts console.log/error from within test files by default (to attribute them
+    // to a test in ITS OWN reporter output) instead of writing straight to this process's real
+    // stdout/stderr -- discovered via smoke testing (Story 8.5's log tail stayed empty against a
+    // real project despite console output). Disabling interception is what makes that output
+    // reach the orchestrator's log-capture pipe/tee at all; we don't consume onUserConsoleLog
+    // (Vitest's own attributed-log hook), so there's nothing else this option would break.
+    disableConsoleIntercept: true,
     ...extraOptions,
   });
   const wallClockMs = Date.now() - start;
@@ -309,6 +347,7 @@ export function mapFailureDetails(
 export async function runVitest(
   cwd: string,
   opts: { files: string[]; changed: boolean },
+  runId: string,
   onProgress?: (completed: number, total: number) => void,
 ): Promise<{ result: TestResult; failureDetails: FailureDetail[] }> {
   const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
@@ -325,10 +364,10 @@ export async function runVitest(
   // Union (Story 3.5): an explicit coverage-map selection PLUS the git static-graph (--changed),
   // merged so we run everything either signal deems affected.
   if (opts.changed && opts.files.length > 0) {
-    const primary = await runOnce(startVitest, opts.files, {}, onProgress);
+    const primary = await runOnce(startVitest, opts.files, {}, runId, onProgress);
     let staticRun: RunOnceResult | null = null;
     try {
-      staticRun = await runOnce(startVitest, [], { changed: true });
+      staticRun = await runOnce(startVitest, [], { changed: true }, runId);
     } catch {
       // Not a git repo / --changed unusable -> union is just the coverage-map selection.
       staticRun = null;
@@ -342,7 +381,7 @@ export async function runVitest(
     // report "0 passed" (a silent skip). Fall back to the full suite, matching the lone `--changed`
     // branch below (Story 6.8; closes the 6.6 union-branch gap).
     if (mergedModules.length === 0) {
-      const full = await runOnce(startVitest, [], {}, onProgress);
+      const full = await runOnce(startVitest, [], {}, runId, onProgress);
       return build(full, {
         strategy: "full",
         reason: "incremental selection matched no test files; ran full suite",
@@ -365,7 +404,7 @@ export async function runVitest(
   // Incremental (git-aware) selection — only when the caller did not pin explicit files.
   if (opts.changed && opts.files.length === 0) {
     try {
-      const inc = await runOnce(startVitest, [], { changed: true }, onProgress);
+      const inc = await runOnce(startVitest, [], { changed: true }, runId, onProgress);
       if (inc.modules.length > 0) {
         return build(inc, {
           strategy: "incremental",
@@ -376,7 +415,7 @@ export async function runVitest(
     } catch {
       // Not a git repo / --changed unusable -> fall through to a full run.
     }
-    const full = await runOnce(startVitest, [], {}, onProgress);
+    const full = await runOnce(startVitest, [], {}, runId, onProgress);
     return build(full, {
       strategy: "full",
       reason: "incremental found no affected tests (unmapped change or non-git); ran full suite",
@@ -384,12 +423,12 @@ export async function runVitest(
   }
 
   // Full run, or an explicit file selection.
-  const run = await runOnce(startVitest, opts.files, {}, onProgress);
+  const run = await runOnce(startVitest, opts.files, {}, runId, onProgress);
   if (opts.files.length > 0 && run.modules.length === 0) {
     // A selection that resolves to zero actual test files (e.g. a stale coverage-map entry
     // naming a file that no longer exists) must never silently report "0 passed" — escalate to
     // the full suite (mirrors the union branch's identical safety net above).
-    const full = await runOnce(startVitest, [], {}, onProgress);
+    const full = await runOnce(startVitest, [], {}, runId, onProgress);
     return build(full, {
       strategy: "full",
       reason: "incremental selection matched no test files; ran full suite",
@@ -472,21 +511,27 @@ async function discoverTestFiles(createVitest: VitestNode["createVitest"]): Prom
 }
 
 /**
- * Read the project's configured Vitest `coverage.thresholds` (Story 6.3 AC4) from resolved config,
- * without running or enabling coverage. Best-effort — any failure yields `undefined` (no gate).
+ * Read the project's configured Vitest `coverage.thresholds` (Story 6.3 AC4) and its resolved
+ * `testTimeout` (Story 8.2 -- the stall watchdog's threshold) from a single lightweight
+ * `createVitest` discovery instance, without running or enabling coverage. Best-effort — any
+ * failure yields both fields `undefined` (no gate, watchdog falls back to its lenient default).
  */
-async function readCoverageThresholds(
+async function readResolvedRunConfig(
   createVitest: VitestNode["createVitest"],
-): Promise<unknown> {
+): Promise<{ testTimeoutMs?: number; coverageThresholds?: unknown }> {
   try {
     const vitest = await createVitest("test", { watch: false });
     try {
-      return vitest.config?.coverage?.thresholds;
+      return {
+        testTimeoutMs:
+          typeof vitest.config?.testTimeout === "number" ? vitest.config.testTimeout : undefined,
+        coverageThresholds: vitest.config?.coverage?.thresholds,
+      };
     } finally {
       await vitest.close();
     }
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -519,6 +564,8 @@ async function buildAndPersistCoverageMap(
   cwd: string,
   projectId: string,
   files: string[],
+  runId: string,
+  thresholds: unknown,
 ): Promise<{ delta: CoverageDelta; coverage?: TestResult["coverage"] }> {
   const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
   const { startVitest, createVitest } = projectRequire("vitest/node") as VitestNode;
@@ -528,8 +575,6 @@ async function buildAndPersistCoverageMap(
       ? files.map((f) => path.resolve(cwd, f))
       : await discoverTestFiles(createVitest);
 
-  // The project's own coverage thresholds for the gate (Story 6.3 AC4) — read, never invented.
-  const thresholds = await readCoverageThresholds(createVitest);
   const baseline = await measureSetupBaseline(startVitest, cwd);
   const budgetMs = Number(process.env.TEST_MCP_MEASURE_BUDGET_MS ?? 120_000);
 
@@ -537,6 +582,7 @@ async function buildAndPersistCoverageMap(
   const rawData: Record<string, IstanbulCoverageData> = {};
   const perTestSources: Record<string, string[]> = {};
   const freshSources = new Set<string>();
+  let coverageFilesDone = 0;
   const { file, summary } = await buildCoverageMap({
     projectRoot: cwd,
     projectId,
@@ -556,6 +602,17 @@ async function buildAndPersistCoverageMap(
         perTestSources[testRel] = sources;
         for (const s of sources) freshSources.add(s);
       }
+      // Required (Story 8.2/AD-20), not optional: this phase runs a SILENT reporter (measureCoverage
+      // passes `reporters: [{}]`) and otherwise emits zero progress signals for its entire duration —
+      // without this, the stall watchdog would have no way to tell "still measuring" from "wedged".
+      coverageFilesDone += 1;
+      send({
+        type: "phase-progress",
+        runId,
+        phase: "coverage",
+        completed: coverageFilesDone,
+        total: targetTestFiles.length,
+      });
       return m;
     },
     baseline,
@@ -617,11 +674,30 @@ async function handleRun(
   msg: Extract<ToWorker, { type: "run" }>,
 ): Promise<{ result: TestResult; failureDetails: FailureDetail[]; coverageDelta?: CoverageDelta }> {
   const cwd = process.cwd();
-  const base = await runVitest(cwd, { files: msg.files, changed: msg.changed }, (completed, total) =>
-    send({ type: "progress", runId: msg.runId, completed, total }),
+  const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
+  const { createVitest } = projectRequire("vitest/node") as VitestNode;
+
+  // Read resolved config BEFORE the real run so the orchestrator's stall watchdog (Story 8.5)
+  // can be armed with the project's actual testTimeout from the start, not just its fallback.
+  const { testTimeoutMs, coverageThresholds } = await readResolvedRunConfig(createVitest);
+  if (testTimeoutMs !== undefined) {
+    send({ type: "config", runId: msg.runId, testTimeoutMs });
+  }
+
+  const base = await runVitest(
+    cwd,
+    { files: msg.files, changed: msg.changed },
+    msg.runId,
+    (completed, total) => send({ type: "progress", runId: msg.runId, completed, total }),
   );
   if (!msg.coverage) return base;
-  const { delta, coverage } = await buildAndPersistCoverageMap(cwd, msg.projectId, msg.files);
+  const { delta, coverage } = await buildAndPersistCoverageMap(
+    cwd,
+    msg.projectId,
+    msg.files,
+    msg.runId,
+    coverageThresholds,
+  );
   return {
     ...base,
     coverageDelta: delta,

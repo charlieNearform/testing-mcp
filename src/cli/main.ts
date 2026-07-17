@@ -51,6 +51,18 @@ function resolveGitRoot(cwd: string): string {
   }
 }
 
+/**
+ * Shape of `<project.path>/.test-mcp/config.json`. `defaultRunWaitMs` (Story 8.3/8.6) is an
+ * optional per-project override for run_tests's async grace period -- absent unless a user
+ * hand-edits the file; `null` means "wait forever" for this project specifically.
+ */
+interface ProjectLocalConfig {
+  schemaVersion: number;
+  projectId: string;
+  stateDir: string;
+  defaultRunWaitMs?: number | null;
+}
+
 /** Create <gitRoot>/.test-mcp/config.json if absent (idempotent). Returns the projectId. */
 function ensureProjectConfig(gitRoot: string): string {
   const stateDir = path.join(gitRoot, ".test-mcp");
@@ -58,14 +70,14 @@ function ensureProjectConfig(gitRoot: string): string {
   fs.mkdirSync(stateDir, { recursive: true });
   if (fs.existsSync(cfgPath)) {
     try {
-      const existing = JSON.parse(fs.readFileSync(cfgPath, "utf8")) as { projectId?: string };
+      const existing = JSON.parse(fs.readFileSync(cfgPath, "utf8")) as Partial<ProjectLocalConfig>;
       if (existing.projectId) return existing.projectId;
     } catch {
       // corrupt config — fall through and rewrite
     }
   }
   const projectId = computeProjectId(gitRoot);
-  const cfg = { schemaVersion: SCHEMA_VERSION, projectId, stateDir: ".test-mcp" };
+  const cfg: ProjectLocalConfig = { schemaVersion: SCHEMA_VERSION, projectId, stateDir: ".test-mcp" };
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
   return projectId;
 }

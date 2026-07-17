@@ -57,4 +57,27 @@ describe("Orchestrator run timeout (unbounded by default)", () => {
     // No release-file cleanup needed here: `executeWorker`'s `finish()` already kills the child
     // as part of the same timeout path that produced this WorkerError.
   }, 20_000);
+
+  it("reports the signal (not just a bare null code) when the worker is killed out from under it", async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-timeout-signal-"));
+    const stateDir = path.join(root, ".test-mcp");
+    const startedPath = path.join(stateDir, "started");
+    const crashPath = path.join(stateDir, "crash");
+
+    const orch = new Orchestrator({ workerPath });
+    const pending = orch.runTests({ projectId: "crashy", path: root }, { mode: "full" });
+
+    for (let i = 0; i < 200 && !fs.existsSync(startedPath); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(fs.existsSync(startedPath)).toBe(true);
+    fs.writeFileSync(crashPath, ""); // fixture SIGKILLs itself in response
+
+    const failure = await pending.catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(WorkerError);
+    // exit(code) is null for a signal-terminated process -- the message must surface the signal
+    // too, or a real OOM-kill is indistinguishable from any other unexplained null-code exit.
+    expect((failure as WorkerError).message).toContain("code null, signal SIGKILL");
+    expect((failure as WorkerError).message).toContain("OS OOM killer");
+  }, 20_000);
 });

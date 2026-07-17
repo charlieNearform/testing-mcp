@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ProjectRegistry } from "../registry/project-registry.js";
-import type { Orchestrator, RunRecord } from "../orchestrator/index.js";
+import type { Orchestrator, RunRecord, LiveLogLine } from "../orchestrator/index.js";
 
 /**
  * Human Monitoring UI (Epic 5, Phase 2). A convenience web view served by the daemon on
@@ -13,6 +13,19 @@ export interface UiDeps {
   registry?: ProjectRegistry;
   orchestrator?: Orchestrator;
 }
+
+/** Live per-test/log snapshot embedded in a running project's view (Story 8.7). Sliced smaller
+ *  than the orchestrator's own bounds -- this rides the SSE push on every test event across
+ *  every running project, unlike the full-fidelity /log routes below (AD-21). */
+interface LiveView {
+  tests: Array<{ file: string; name: string; status: string }>;
+  testsTruncated: boolean;
+  testsShown: number;
+  logTail: Array<{ stream: string; text: string; at: string }>;
+}
+
+const MAX_SNAPSHOT_TESTS = 200;
+const MAX_SNAPSHOT_LOG_LINES = 20;
 
 interface ProjectView {
   projectId: string;
@@ -34,6 +47,8 @@ interface ProjectView {
     skipped?: number;
     updatedAt?: string;
   };
+  /** Present only while state === "running" (Story 8.7). */
+  live?: LiveView;
 }
 
 /** Compact run summary for the history list (heavy fields dropped). */
@@ -67,6 +82,16 @@ export async function uiSnapshot(deps: UiDeps): Promise<{ serverTime: string; pr
       const run = deps.orchestrator?.getRunStatus(p.projectId) ?? { state: "idle" as const };
       const r = run.lastResult;
       const history = deps.orchestrator?.getRunHistory(p.projectId) ?? [];
+      // Sliced smaller than the orchestrator's own bounds (AD-21) -- this snapshot rides the SSE
+      // push to every connected tab on every single test event; the full ring is available via
+      // the dedicated /log routes below, or by polling get_test_status over MCP.
+      const live = run.state === "running" ? deps.orchestrator?.getLiveRun(p.projectId) : undefined;
+      const liveView: LiveView | undefined = live && {
+        tests: live.tests.slice(-MAX_SNAPSHOT_TESTS),
+        testsTruncated: live.testsTruncated,
+        testsShown: Math.min(live.tests.length, MAX_SNAPSHOT_TESTS),
+        logTail: live.logTail.slice(-MAX_SNAPSHOT_LOG_LINES),
+      };
       return {
         projectId: p.projectId,
         path: p.path,
@@ -85,6 +110,7 @@ export async function uiSnapshot(deps: UiDeps): Promise<{ serverTime: string; pr
           skipped: r?.skipped,
           updatedAt: run.updatedAt,
         },
+        ...(liveView ? { live: liveView } : {}),
       };
     }),
   };
@@ -170,6 +196,54 @@ export async function handleUiRequest(
     return true;
   }
 
+  // /ui/api/projects/<projectId>/log            -> one-shot full live log ring (Story 8.7)
+  // /ui/api/projects/<projectId>/log/events     -> SSE "follow" -- pushes only new lines
+  if (parts[0] === "ui" && parts[1] === "api" && parts[2] === "projects" && parts[4] === "log" && !parts[5]) {
+    const projectId = decodeURIComponent(parts[3]);
+    const live = deps.orchestrator?.getLiveRun(projectId);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ projectId, runId: live?.runId, log: live?.logTail ?? [] }));
+    return true;
+  }
+  if (parts[0] === "ui" && parts[1] === "api" && parts[2] === "projects" && parts[4] === "log" && parts[5] === "events") {
+    const projectId = decodeURIComponent(parts[3]);
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    });
+    // Track the last log line object we've already sent (by reference, not index -- the ring
+    // buffer shifts entries out from the front, so a plain length/index would drift once eviction
+    // starts). If the ring evicted past it, fall back to sending the whole current ring.
+    let lastSeenLine: LiveLogLine | undefined;
+    const push = (): void => {
+      const currentLog = deps.orchestrator?.getLiveRun(projectId)?.logTail ?? [];
+      const idx = lastSeenLine ? currentLog.indexOf(lastSeenLine) : -1;
+      const newLines = idx === -1 ? currentLog : currentLog.slice(idx + 1);
+      if (!newLines.length) return;
+      lastSeenLine = newLines[newLines.length - 1];
+      try {
+        res.write(`data: ${JSON.stringify({ log: newLines })}\n\n`);
+      } catch {
+        // socket closed mid-write; the close handler will clean up
+      }
+    };
+    push(); // seed with whatever's already in the ring on connect
+    const unsub = deps.orchestrator?.onStatusChange(push) ?? (() => {});
+    const keepAlive = setInterval(() => {
+      try {
+        res.write(": keep-alive\n\n");
+      } catch {
+        // ignore
+      }
+    }, 15_000);
+    req.on("close", () => {
+      clearInterval(keepAlive);
+      unsub();
+    });
+    return true;
+  }
+
   res.writeHead(404, { "content-type": "application/json" });
   res.end(JSON.stringify({ code: "ValidationError", message: "Not found" }));
   return true;
@@ -214,7 +288,7 @@ const UI_HTML = `<!doctype html>
   .back { color:var(--muted); font-size:13px; display:inline-block; margin-bottom:16px; }
   .back:hover { color:var(--text); }
   h2.mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:15px; margin:0 0 4px; }
-  .ok { color:var(--ok); } .fail { color:var(--fail); } .skip { color:var(--muted); }
+  .ok { color:var(--ok); } .fail { color:var(--fail); } .skip { color:var(--muted); } .run { color:var(--run); }
   .banner { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:12px 14px; margin-bottom:16px;
     background:var(--card); border:1px solid var(--border); border-radius:8px; }
   /* .counts/.summary are stacked block elements elsewhere (their margin-top spaces them from a
@@ -239,6 +313,9 @@ const UI_HTML = `<!doctype html>
   .fail-item { background:var(--card); border:1px solid var(--border); border-left:3px solid var(--fail); border-radius:6px; padding:10px 12px; margin:8px 0; }
   .fail-item .name { font-weight:600; } .fail-item .loc { color:var(--muted); font-size:12px; margin-top:2px; }
   pre { background:#0d1117; border:1px solid var(--border); border-radius:6px; padding:10px; overflow-x:auto; font-size:12px; margin:8px 0 0; }
+  #log-pre { max-height:320px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; }
+  .log-summary { display:flex; align-items:center; justify-content:space-between; }
+  .log-summary label { font-weight:normal; text-transform:none; letter-spacing:0; cursor:pointer; }
 </style>
 </head>
 <body>
@@ -306,6 +383,7 @@ function statusBanner(pid) {
 }
 
 function renderList() {
+  closeLogStream(); // leaving any project's running view -- never leak an open follow connection
   document.getElementById("clock").textContent = fmtTime(snapshot.serverTime);
   const ps = snapshot.projects || [];
   app.innerHTML = ps.length
@@ -315,13 +393,90 @@ function renderList() {
 
 // Sourced from the SSE-pushed snapshot (like statusBanner) rather than a one-shot fetch, so the
 // history table lands new rows live instead of only refreshing on the next manual navigation.
+// Live per-test list (Story 8.7), grouped by file, shown only for a state:"running" project.
+function liveTestsBlock(live, root) {
+  if (!live || !live.tests || !live.tests.length) return "";
+  const byFile = new Map();
+  for (const t of live.tests) {
+    if (!byFile.has(t.file)) byFile.set(t.file, []);
+    byFile.get(t.file).push(t);
+  }
+  const statusClass = (s) => (s === "passed" ? "ok" : s === "failed" ? "fail" : s === "running" ? "run" : "skip");
+  const rows = [...byFile.entries()].map(([file, tests]) =>
+    '<div class="ts">' + esc(relPath(file, root)) + '</div>'
+    + '<ul class="tests">' + tests.map((t) =>
+        '<li><span class="' + statusClass(t.status) + '">' + esc(t.status) + '</span> ' + esc(t.name) + '</li>').join("") + '</ul>'
+  ).join("");
+  const truncNote = live.testsTruncated
+    ? '<div class="ts">showing the ' + live.testsShown + ' most recent — suite is large</div>'
+    : "";
+  return '<div class="section-title">live tests</div>' + rows + truncNote;
+}
+
+// Console log panel with a "follow" toggle (Story 8.7). Module-level UI state (not persisted --
+// resets on reload), matching the existing no-framework/inline-JS simplicity of this page.
+let followLog = true;
+let logEventSource = null;
+let logStreamProjectId = null;
+
+function closeLogStream() {
+  if (logEventSource) { logEventSource.close(); logEventSource = null; }
+  logStreamProjectId = null;
+}
+
+function renderLogLines(lines, replace) {
+  const pre = document.getElementById("log-pre");
+  if (!pre || !lines.length) return;
+  const html = lines.map((l) => '<span class="' + (l.stream === "stderr" ? "fail" : "") + '">' + esc(l.text) + '</span>').join("\\n");
+  pre.innerHTML = replace ? html : (pre.innerHTML ? pre.innerHTML + "\\n" + html : html);
+  if (followLog) pre.scrollTop = pre.scrollHeight;
+}
+
+// renderProject() rebuilds the whole DOM (including a fresh, empty log-pre element) on every SSE
+// snapshot push, which can fire on every single test event -- so this always re-seeds the fresh
+// node with the full current ring (replace=true, no duplication within one seed). It only opens
+// a NEW EventSource when the project actually changes; reusing the existing one avoids tearing
+// down and reconnecting on every re-render, which previously caused the same lines to be
+// re-seeded AND re-appended by the freshly (re)connected stream's own first push (found via
+// smoke-testing against a real project -- duplicate lines were visible in the log panel).
+function connectLog(pid) {
+  getJSON("/ui/api/projects/" + encodeURIComponent(pid) + "/log")
+    .then((data) => renderLogLines(data.log || [], true))
+    .catch(() => {});
+  if (logStreamProjectId === pid) return;
+  closeLogStream();
+  logStreamProjectId = pid;
+  logEventSource = new EventSource("/ui/api/projects/" + encodeURIComponent(pid) + "/log/events");
+  logEventSource.onmessage = (e) => {
+    try { renderLogLines(JSON.parse(e.data).log || [], false); } catch (_) { /* ignore */ }
+  };
+}
+
+function logBlock() {
+  return '<details open><summary class="log-summary"><span>console log</span>'
+    + '<label><input type="checkbox" id="follow-log" ' + (followLog ? "checked" : "") + '> follow</label></summary>'
+    + '<pre id="log-pre"></pre></details>';
+}
+
+function wireLogPanel(pid) {
+  connectLog(pid);
+  const checkbox = document.getElementById("follow-log");
+  if (checkbox) checkbox.addEventListener("change", (e) => { followLog = e.target.checked; });
+}
+
 function renderProject(pid) {
   const p = (snapshot.projects || []).find((x) => x.projectId === pid);
   const head = '<a class="back" href="#/">← projects</a><h2 class="mono">' + esc(pid) + '</h2>' + projectLine(p && p.path);
-  if (!p) { app.innerHTML = head + '<div class="empty">Loading…</div>'; return; }
+  if (!p) { closeLogStream(); app.innerHTML = head + '<div class="empty">Loading…</div>'; return; }
   const runs = p.runs || [];
   const banner = statusBanner(pid);
-  if (!runs.length) { app.innerHTML = head + banner + '<div class="empty">No runs yet — trigger one via run_tests.</div>'; return; }
+  const running = p.run && p.run.state === "running";
+  const liveBlock = running ? liveTestsBlock(p.live, p.path) + logBlock() : "";
+  if (!runs.length) {
+    app.innerHTML = head + banner + liveBlock + (running ? "" : '<div class="empty">No runs yet — trigger one via run_tests.</div>');
+    if (running) wireLogPanel(pid); else closeLogStream();
+    return;
+  }
   const rows = runs.map((r) =>
     '<tr class="row" data-run="' + esc(r.runId) + '">'
     + '<td>' + fmtTime(r.startedAt) + '</td>'
@@ -330,13 +485,16 @@ function renderProject(pid) {
     + '<td>' + (r.total != null ? passTotal(r) : "–") + '</td>'
     + '<td>' + (r.coverageLines != null ? (Math.round(r.coverageLines * 10) / 10) + '%' : "–") + '</td>'
     + '<td>' + fmtDur(r.durationMs) + '</td></tr>').join("");
-  app.innerHTML = head + banner + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / executed</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  app.innerHTML = head + banner + liveBlock
+    + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / executed</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  if (running) wireLogPanel(pid); else closeLogStream();
   app.querySelectorAll("tr.row").forEach((el) => {
     el.addEventListener("click", () => go("/project/" + encodeURIComponent(pid) + "/run/" + encodeURIComponent(el.getAttribute("data-run"))));
   });
 }
 
 async function renderRun(pid, runId) {
+  closeLogStream(); // leaving any project's running view -- never leak an open follow connection
   const proj = (snapshot.projects || []).find((x) => x.projectId === pid);
   const root = proj ? proj.path : "";
   const back = '<a class="back" href="#/project/' + encodeURIComponent(pid) + '">← runs</a>' + projectLine(root);
