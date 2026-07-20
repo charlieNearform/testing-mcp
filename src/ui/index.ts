@@ -90,7 +90,7 @@ export async function uiSnapshot(deps: UiDeps): Promise<{ serverTime: string; pr
         tests: live.tests.slice(-MAX_SNAPSHOT_TESTS),
         testsTruncated: live.testsTruncated,
         testsShown: Math.min(live.tests.length, MAX_SNAPSHOT_TESTS),
-        logTail: live.logTail.slice(-MAX_SNAPSHOT_LOG_LINES),
+        logTail: live.log.slice(-MAX_SNAPSHOT_LOG_LINES),
       };
       return {
         projectId: p.projectId,
@@ -149,6 +149,11 @@ export async function handleUiRequest(
       "cache-control": "no-cache",
       connection: "keep-alive",
     });
+    // An abrupt client disconnect (e.g. the tab closing, or a test destroying its socket) can
+    // surface as an async 'error' event on the response/socket rather than a synchronous throw
+    // from res.write() -- without a listener, that would be an unhandled error, not something a
+    // try/catch around res.write() catches.
+    res.on("error", () => {});
     const push = async () => {
       try {
         res.write(`data: ${JSON.stringify(await uiSnapshot(deps))}\n\n`);
@@ -202,7 +207,7 @@ export async function handleUiRequest(
     const projectId = decodeURIComponent(parts[3]);
     const live = deps.orchestrator?.getLiveRun(projectId);
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ projectId, runId: live?.runId, log: live?.logTail ?? [] }));
+    res.end(JSON.stringify({ projectId, runId: live?.runId, log: live?.log ?? [] }));
     return true;
   }
   if (parts[0] === "ui" && parts[1] === "api" && parts[2] === "projects" && parts[4] === "log" && parts[5] === "events") {
@@ -212,18 +217,30 @@ export async function handleUiRequest(
       "cache-control": "no-cache",
       connection: "keep-alive",
     });
+    // See the /ui/events handler above -- an abrupt client disconnect can surface as an async
+    // 'error' event rather than a synchronous res.write() throw.
+    res.on("error", () => {});
     // Track the last log line object we've already sent (by reference, not index -- the ring
     // buffer shifts entries out from the front, so a plain length/index would drift once eviction
     // starts). If the ring evicted past it, fall back to sending the whole current ring.
     let lastSeenLine: LiveLogLine | undefined;
+    // Track which run we were last seeing lines for. A new run replaces `live.log` with a fresh
+    // array, so `lastSeenLine`'s object reference is never found in it -- without tracking runId
+    // separately, that "not found" would be sent as an *append* of the whole new ring on top of
+    // whatever the client's one-shot reseed already rendered, duplicating lines. Detecting the
+    // run change lets us tell the client to replace instead.
+    let lastSeenRunId: string | undefined;
     const push = (): void => {
-      const currentLog = deps.orchestrator?.getLiveRun(projectId)?.logTail ?? [];
-      const idx = lastSeenLine ? currentLog.indexOf(lastSeenLine) : -1;
+      const current = deps.orchestrator?.getLiveRun(projectId);
+      const currentLog = current?.log ?? [];
+      const isNewRun = current?.runId !== lastSeenRunId;
+      lastSeenRunId = current?.runId;
+      const idx = !isNewRun && lastSeenLine ? currentLog.indexOf(lastSeenLine) : -1;
       const newLines = idx === -1 ? currentLog : currentLog.slice(idx + 1);
       if (!newLines.length) return;
       lastSeenLine = newLines[newLines.length - 1];
       try {
-        res.write(`data: ${JSON.stringify({ log: newLines })}\n\n`);
+        res.write(`data: ${JSON.stringify({ log: newLines, replace: isNewRun })}\n\n`);
       } catch {
         // socket closed mid-write; the close handler will clean up
       }
@@ -448,7 +465,10 @@ function connectLog(pid) {
   logStreamProjectId = pid;
   logEventSource = new EventSource("/ui/api/projects/" + encodeURIComponent(pid) + "/log/events");
   logEventSource.onmessage = (e) => {
-    try { renderLogLines(JSON.parse(e.data).log || [], false); } catch (_) { /* ignore */ }
+    try {
+      const payload = JSON.parse(e.data);
+      renderLogLines(payload.log || [], !!payload.replace);
+    } catch (_) { /* ignore */ }
   };
 }
 

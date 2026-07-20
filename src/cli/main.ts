@@ -19,6 +19,7 @@ import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { computeProjectId } from "../registry/project-registry.js";
 import { SCHEMA_VERSION } from "../index.js";
 import { createSendFailureHandler, createTransportErrorHandler } from "./mcp-bridge-resilience.js";
+import { ProjectLocalConfigSchema, type ProjectLocalConfig } from "../types/contracts.js";
 
 /** CLI-side error for daemon reachability failures (maps to ErrorCode DaemonUnavailable). */
 function daemonUnavailable(message: string): Error {
@@ -51,18 +52,6 @@ function resolveGitRoot(cwd: string): string {
   }
 }
 
-/**
- * Shape of `<project.path>/.test-mcp/config.json`. `defaultRunWaitMs` (Story 8.3/8.6) is an
- * optional per-project override for run_tests's async grace period -- absent unless a user
- * hand-edits the file; `null` means "wait forever" for this project specifically.
- */
-interface ProjectLocalConfig {
-  schemaVersion: number;
-  projectId: string;
-  stateDir: string;
-  defaultRunWaitMs?: number | null;
-}
-
 /** Create <gitRoot>/.test-mcp/config.json if absent (idempotent). Returns the projectId. */
 function ensureProjectConfig(gitRoot: string): string {
   const stateDir = path.join(gitRoot, ".test-mcp");
@@ -70,8 +59,9 @@ function ensureProjectConfig(gitRoot: string): string {
   fs.mkdirSync(stateDir, { recursive: true });
   if (fs.existsSync(cfgPath)) {
     try {
-      const existing = JSON.parse(fs.readFileSync(cfgPath, "utf8")) as Partial<ProjectLocalConfig>;
-      if (existing.projectId) return existing.projectId;
+      const raw = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+      const parsed = ProjectLocalConfigSchema.partial().safeParse(raw);
+      if (parsed.success && parsed.data.projectId) return parsed.data.projectId;
     } catch {
       // corrupt config — fall through and rewrite
     }

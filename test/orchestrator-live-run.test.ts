@@ -117,9 +117,9 @@ describe("Orchestrator live run state (Story 8.5)", () => {
 
     const live = orch.getLiveRun("p");
     expect(live).toBeDefined();
-    expect(live!.logTail.length).toBeLessThanOrEqual(1000);
-    expect(live!.logTail.some((l) => l.text === `line-${TOTAL - 1}` && l.stream === "stdout")).toBe(true);
-    expect(live!.logTail.some((l) => l.text === "line-0")).toBe(false); // oldest evicted
+    expect(live!.log.length).toBeLessThanOrEqual(1000);
+    expect(live!.log.some((l) => l.text === `line-${TOTAL - 1}` && l.stream === "stdout")).toBe(true);
+    expect(live!.log.some((l) => l.text === "line-0")).toBe(false); // oldest evicted
 
     fs.writeFileSync(path.join(stateDir, "release"), "");
     await pending;
@@ -202,7 +202,7 @@ describe("Orchestrator live run state (Story 8.5)", () => {
       await new Promise((r) => setTimeout(r, 50));
 
       const live = orch.getLiveRun("p");
-      expect(live!.logTail.some((l) => l.text === marker && l.stream === "stderr")).toBe(true);
+      expect(live!.log.some((l) => l.text === marker && l.stream === "stderr")).toBe(true);
 
       fs.writeFileSync(path.join(stateDir, "release"), "");
       await pending;

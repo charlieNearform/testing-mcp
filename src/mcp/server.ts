@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { toAppError, type AppError } from "../types/errors.js";
+import { ProjectLocalConfigSchema } from "../types/contracts.js";
 import { ProjectRegistry, RegistryError } from "../registry/project-registry.js";
 import { Orchestrator, PlanError } from "../orchestrator/index.js";
 import { WatchManager } from "../watch/index.js";
@@ -49,24 +50,20 @@ function errorResult(err: AppError) {
   return { isError: true, content: [{ type: "text" as const, text: JSON.stringify(err) }] };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /**
  * Best-effort read of a project's own `defaultRunWaitMs` override from
  * `<project.path>/.test-mcp/config.json` (Story 8.6/AD-17) -- the same per-project state
  * directory the orchestrator already uses (TEST_MCP_STATE_DIR). Absent/unreadable/malformed
  * yields `undefined` (fall through to the daemon-level default) rather than throwing; a
- * project-level config file is optional and never required for run_tests to work.
+ * project-level config file is optional and never required for run_tests to work. Async (not
+ * `readFileSync`) so this never blocks the daemon's single event loop on the request path, and
+ * validated with the shared `ProjectLocalConfigSchema` (Zod) rather than a bare type assertion.
  */
-function readProjectDefaultRunWaitMs(projectPath: string): number | null | undefined {
+async function readProjectDefaultRunWaitMs(projectPath: string): Promise<number | null | undefined> {
   try {
-    const raw = fs.readFileSync(path.join(projectPath, ".test-mcp", "config.json"), "utf8");
-    const parsed = JSON.parse(raw) as { defaultRunWaitMs?: number | null };
-    return parsed.defaultRunWaitMs === null || typeof parsed.defaultRunWaitMs === "number"
-      ? parsed.defaultRunWaitMs
-      : undefined;
+    const raw = await fs.promises.readFile(path.join(projectPath, ".test-mcp", "config.json"), "utf8");
+    const parsed = ProjectLocalConfigSchema.partial().safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data.defaultRunWaitMs : undefined;
   } catch {
     return undefined;
   }
@@ -144,8 +141,11 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
         "Run tests for a registered project. Returns the full result if the run finishes " +
         "within the effective wait window (waitMs argument, else the project's or daemon's " +
         "configured default, else 10s); otherwise returns {runId, projectId, state:\"running\"} " +
-        "immediately and the run keeps executing in the background -- poll get_test_status(projectId) " +
-        "until state is \"complete\" or \"error\" to get the result (same pattern as start_watch).",
+        "immediately and the run keeps executing in the background -- poll " +
+        "get_test_status(projectId, runId) with that SAME runId until state is \"complete\" or " +
+        "\"error\" to get the result (same pattern as start_watch). Passing runId matters if you " +
+        "might call run_tests again for the same project before this one finishes: a second run " +
+        "queues behind the first, so polling without runId could return the earlier run's result.",
       inputSchema: {
         projectId: z.string().describe("ID of a registered project"),
         mode: z.enum(["full", "incremental", "watch"]).optional().describe("Run mode"),
@@ -173,6 +173,7 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
         planId: z.string().optional().describe("Execute a previously computed plan"),
         waitMs: z
           .number()
+          .nonnegative()
           .nullable()
           .optional()
           .describe(
@@ -220,11 +221,18 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
           return { content: [{ type: "text" as const, text: JSON.stringify(plan) }] };
         }
         // Effective grace period (Story 8.6/AD-17): per-call argument -> project config ->
-        // daemon config -> 10s built-in default. `null` at any layer means wait forever.
+        // daemon config -> 10s built-in default. `null` at any layer means wait forever -- each
+        // layer is checked with `!== undefined` (not `??`), since `??` would treat an explicit
+        // `null` the same as "absent" and incorrectly fall through to the next layer.
+        const projectDefaultWaitMs = await readProjectDefaultRunWaitMs(project.path);
         const effectiveWaitMs =
           waitMs !== undefined
             ? waitMs
-            : (readProjectDefaultRunWaitMs(project.path) ?? daemonDefaultRunWaitMs ?? 10_000);
+            : projectDefaultWaitMs !== undefined
+              ? projectDefaultWaitMs
+              : daemonDefaultRunWaitMs !== undefined
+                ? daemonDefaultRunWaitMs
+                : 10_000;
 
         const { runId, result } = planId
           ? orchestrator.startPlanRun(project, planId, { onProgress })
@@ -237,7 +245,12 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
           return { content: [{ type: "text" as const, text: JSON.stringify(final) }] };
         }
         const timedOut = Symbol("run_tests wait timed out");
-        const winner = await Promise.race([result, sleep(effectiveWaitMs).then(() => timedOut)]);
+        let waitTimer: NodeJS.Timeout | undefined;
+        const waitTimeout = new Promise<typeof timedOut>((resolve) => {
+          waitTimer = setTimeout(() => resolve(timedOut), effectiveWaitMs);
+        });
+        const winner = await Promise.race([result, waitTimeout]);
+        clearTimeout(waitTimer); // clear whichever side lost the race -- no-op if it already fired
         if (winner !== timedOut) {
           return { content: [{ type: "text" as const, text: JSON.stringify(winner) }] };
         }
@@ -271,13 +284,29 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
       description:
         "Get the current test/watch state for a project. Poll this after run_tests returns a " +
         "{runId, state:\"running\"} job handle -- includes a `live` field (bounded per-test " +
-        "pending/running/pass/fail list and console log tail) while a run is in flight (Story 8.6).",
-      inputSchema: { projectId: z.string().describe("ID of a registered project") },
+        "pending/running/pass/fail list and console log tail) while a run is in flight (Story 8.6). " +
+        "Pass the SAME runId run_tests gave you: if a different run is now occupying this " +
+        "project's slot (yours is still queued behind it), this returns {state:\"queued\", runId} " +
+        "instead of the other run's state, so you never mistake one run's result for another's.",
+      inputSchema: {
+        projectId: z.string().describe("ID of a registered project"),
+        runId: z
+          .string()
+          .optional()
+          .describe("The runId from run_tests's job handle, to disambiguate from a differently-queued run"),
+      },
     },
-    async ({ projectId }) => {
+    async ({ projectId, runId }) => {
       if (!isRegistered(projectId)) return unknownProject(projectId);
       // Run state (Story 4.2) plus watch state (Story 3.6) — a single pollable snapshot.
       const run = orchestrator?.getRunStatus(projectId) ?? { state: "idle" as const };
+      if (runId !== undefined && run.runId !== undefined && run.runId !== runId) {
+        // A different run currently occupies this project's slot -- ours is still queued behind
+        // it (per-project runs serialize). Never hand back a different run's state/result.
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ state: "queued", runId }) }],
+        };
+      }
       const watch = watchManager?.status(projectId);
       // Full bounded live state (Story 8.5/8.6/AD-21) -- a poll is a deliberate single-project
       // request, not a broadcast, so no further slicing beyond the orchestrator's own caps.

@@ -31,11 +31,11 @@ describe("Orchestrator stall watchdog (Story 8.5)", () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-stall-"));
     const stateDir = path.join(root, ".test-mcp");
 
-    const orch = new Orchestrator({ workerPath, staleTestGraceMs: 50 });
+    const orch = new Orchestrator({ workerPath, staleTestGraceMs: 150 });
     const pending = orch.runTests({ projectId: "p", path: root }, { mode: "full" });
     await waitForStarted(stateDir);
     // Small testTimeout so threshold (testTimeout + grace) is well under the test's own timeout.
-    fs.writeFileSync(path.join(stateDir, "send-config"), "50");
+    fs.writeFileSync(path.join(stateDir, "send-config"), "150");
 
     const failure = await pending.catch((e: unknown) => e);
     expect(failure).toBeInstanceOf(WorkerError);
@@ -46,35 +46,57 @@ describe("Orchestrator stall watchdog (Story 8.5)", () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-stall-alive-"));
     const stateDir = path.join(root, ".test-mcp");
 
-    const orch = new Orchestrator({ workerPath, staleTestGraceMs: 50 });
+    const orch = new Orchestrator({ workerPath, staleTestGraceMs: 150 });
     const pending = orch.runTests({ projectId: "p", path: root }, { mode: "full" });
     await waitForStarted(stateDir);
-    fs.writeFileSync(path.join(stateDir, "send-config"), "50"); // threshold = 100ms
+    fs.writeFileSync(path.join(stateDir, "send-config"), "150"); // threshold = 300ms
 
-    // Send a case-result every 30ms for 240ms (> 2x the threshold) -- if the timer didn't reset,
+    // Send a case-result every 80ms for 640ms (> 2x the threshold) -- if the timer didn't reset,
     // this would have stalled out long before we release.
     for (let i = 0; i < 8; i++) {
       fs.writeFileSync(
         path.join(stateDir, "send-case-result"),
         JSON.stringify({ file: "a.test.ts", name: `t${i}`, status: "passed" }),
       );
-      await new Promise((r) => setTimeout(r, 30));
+      await new Promise((r) => setTimeout(r, 80));
     }
     fs.writeFileSync(path.join(stateDir, "release"), "");
     const result = await pending;
     expect(result.success).toBe(true);
   }, 20_000);
 
-  it("falls back to the lenient default threshold when config is never sent", async () => {
+  it("kills quickly (grace alone) if the worker never sends any message at all", async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-stall-silent-"));
+    const stateDir = path.join(root, ".test-mcp");
+
+    // Nothing sent at all -- not even a `config` message -- proves the provisional watchdog
+    // (AD-20: armed at `staleTestGraceMs` ALONE, before the worker has said anything) catches a
+    // hang in the worker's own config-discovery step just as promptly as a later test-level stall.
+    const orch = new Orchestrator({ workerPath, staleTestGraceMs: 150 });
+    const pending = orch.runTests({ projectId: "p", path: root }, { mode: "full" });
+    await waitForStarted(stateDir);
+
+    const failure = await pending.catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(WorkerError);
+    expect((failure as WorkerError).message).toContain("provisional grace");
+  }, 20_000);
+
+  it("falls back to the default-unknown-timeout threshold once ANY message has arrived, even without config", async () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-stall-noconfig-"));
     const stateDir = path.join(root, ".test-mcp");
 
-    // No config message at all; releasing well before the (large) default fallback threshold
-    // (30_000ms + grace) proves the run isn't prematurely killed just because config is absent.
-    const orch = new Orchestrator({ workerPath, staleTestGraceMs: 50 });
+    // A single case-result (no `config` message ever sent) proves the watchdog is demoted out of
+    // its (short) provisional phase once the worker has said ANYTHING -- releasing well after the
+    // 150ms provisional grace but comfortably before the real fallback threshold (the built-in
+    // 5000ms default + grace) proves it isn't prematurely killed just because config is absent.
+    const orch = new Orchestrator({ workerPath, staleTestGraceMs: 150 });
     const pending = orch.runTests({ projectId: "p", path: root }, { mode: "full" });
     await waitForStarted(stateDir);
-    await new Promise((r) => setTimeout(r, 200));
+    fs.writeFileSync(
+      path.join(stateDir, "send-case-result"),
+      JSON.stringify({ file: "a.test.ts", name: "t1", status: "passed" }),
+    );
+    await new Promise((r) => setTimeout(r, 400));
     fs.writeFileSync(path.join(stateDir, "release"), "");
     const result = await pending;
     expect(result.success).toBe(true);
@@ -87,10 +109,10 @@ describe("Orchestrator stall watchdog (Story 8.5)", () => {
     // A tiny runTimeoutMs AND a tiny stall threshold both configured; releasing never (stall
     // fires first since it's the same order of magnitude but keyed off progress, not wall clock)
     // -- what matters here is the message text, not which one wins a race.
-    const orch = new Orchestrator({ workerPath, staleTestGraceMs: 30 });
+    const orch = new Orchestrator({ workerPath, staleTestGraceMs: 100 });
     const pending = orch.runTests({ projectId: "p", path: root }, { mode: "full" });
     await waitForStarted(stateDir);
-    fs.writeFileSync(path.join(stateDir, "send-config"), "10"); // threshold = 40ms
+    fs.writeFileSync(path.join(stateDir, "send-config"), "50"); // threshold = 150ms
 
     const failure = await pending.catch((e: unknown) => e);
     expect(failure).toBeInstanceOf(WorkerError);

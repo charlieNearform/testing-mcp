@@ -56,6 +56,10 @@ function collectSse(port: number, p: string): { stop: () => void; events: Promis
       }
     });
   });
+  // Destroying an in-flight SSE request (stop(), below) is expected to emit a client-side
+  // "socket hang up" error event -- without a listener, that's an unhandled error, not something
+  // callers of stop() need to see.
+  req.on("error", () => {});
   req.end();
   return { stop: () => req.destroy(), events: Promise.resolve(() => events) };
 }
@@ -153,7 +157,7 @@ describe("Human Monitoring UI live view (Story 8.7)", () => {
     await pending;
   }, 20_000);
 
-  it("both new log routes 404 cleanly for an unknown projectId", async () => {
+  it("both new log routes return an empty payload (not a 404) for an unknown projectId", async () => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-ui-log-404-"));
     const registry = new ProjectRegistry(path.join(tmp, "registry.json"));
     const orchestrator = new Orchestrator({ workerPath: blockingWorkerPath });
@@ -163,5 +167,10 @@ describe("Human Monitoring UI live view (Story 8.7)", () => {
     expect(res.status).toBe(200); // matches the existing /runs route: empty payload, not a 404
     const body = JSON.parse(res.body) as { log: unknown[] };
     expect(body.log).toEqual([]);
+
+    const { stop, events } = collectSse(port, "/ui/api/projects/does-not-exist/log/events");
+    await new Promise((r) => setTimeout(r, 30));
+    stop();
+    expect(await (await events)()).toEqual([]); // no lines ever pushed for an unknown project
   });
 });

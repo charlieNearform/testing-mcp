@@ -171,12 +171,12 @@ describe("get_test_status live payload (Story 8.6)", () => {
       const statusRes = await client.callTool({ name: "get_test_status", arguments: { projectId } });
       const status = JSON.parse(textOf(statusRes)) as {
         runId?: string;
-        live?: { tests: unknown[]; logTail: unknown[] };
+        live?: { tests: unknown[]; log: unknown[] };
       };
       expect(status.runId).toBe(runPayload.runId);
       expect(status.live).toBeDefined();
       expect(Array.isArray(status.live!.tests)).toBe(true);
-      expect(Array.isArray(status.live!.logTail)).toBe(true);
+      expect(Array.isArray(status.live!.log)).toBe(true);
 
       fs.writeFileSync(path.join(stateDir, "release"), "");
     } finally {

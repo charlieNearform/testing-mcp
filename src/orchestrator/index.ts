@@ -1,6 +1,7 @@
 import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import type { TestResult, FailureDetail, TestPlan } from "../types/contracts.js";
 import { parseFromWorker, type ToWorker, type FromWorker } from "../types/ipc.js";
@@ -75,6 +76,13 @@ export interface LiveLogLine {
   at: string;
 }
 
+/** Coverage-phase heartbeat surfaced identically to test-level progress (AD-20/AD-21). */
+export interface LivePhase {
+  phase: "coverage";
+  completed: number;
+  total: number;
+}
+
 /** Bounded, transient, in-flight-only view of one project's current/most-recent run (Story 8.5). */
 interface LiveRunState {
   runId: string;
@@ -86,6 +94,7 @@ interface LiveRunState {
   log: LiveLogLine[];
   stdoutResidual: string;
   stderrResidual: string;
+  phase?: LivePhase;
 }
 
 const MAX_LIVE_TEST_ENTRIES = 2000;
@@ -93,8 +102,16 @@ const MAX_LOG_LINES = 1000;
 const MAX_LOG_LINE_CHARS = 4000;
 const MAX_RESIDUAL_CHARS = 8000;
 const MIN_SANE_TEST_TIMEOUT_MS = 1_000;
-/** Lenient fallback when the worker's `config` message never arrives (e.g. discovery itself hangs). */
-const DEFAULT_UNKNOWN_TEST_TIMEOUT_MS = 30_000;
+/** A `testTimeout` this large almost certainly means the watchdog was meant to be disabled, not
+ *  that a real per-test timeout is actually that long -- cap it so a huge/misconfigured value
+ *  can't silently defeat stall detection. */
+const MAX_SANE_TEST_TIMEOUT_MS = 30 * 60_000;
+/**
+ * Fallback effective test timeout once the worker has said SOMETHING (any message) but no real
+ * `testTimeout` is known yet -- Vitest's own documented default `testTimeout` (5000ms), not an
+ * arbitrary guess, since that's what actually applies when a project doesn't override it.
+ */
+const DEFAULT_UNKNOWN_TEST_TIMEOUT_MS = 5_000;
 /** Key for LiveTestEntry map entries — a test is identified by (file, name), not by name alone. */
 const liveTestKey = (file: string, name: string): string => `${file}\0${name}`;
 
@@ -380,6 +397,19 @@ export class Orchestrator {
         const result = emptyResult(sel.reason);
         result.confidence = sel.confidence;
         const now = new Date().toISOString();
+        // This run never forks a worker, so nothing else creates a fresh live-state entry for it
+        // -- without this, getLiveRun() would keep returning a stale PREVIOUS run's tests/log
+        // under a runId that doesn't match this (empty) run's own runId.
+        this.liveRuns.set(project.projectId, {
+          runId,
+          lastProgressAt: Date.now(),
+          tests: new Map(),
+          testOrder: [],
+          testsTruncated: false,
+          log: [],
+          stdoutResidual: "",
+          stderrResidual: "",
+        });
         this.advanceSnapshotIfDeltaRun(project, sel, result);
         this.recordRun({
           runId,
@@ -565,9 +595,13 @@ export class Orchestrator {
         live.log.push({ stream, text: clipped, at: new Date().toISOString() });
         if (live.log.length > MAX_LOG_LINES) live.log.shift();
       };
+      // Separate stateful decoders per stream: a multi-byte UTF-8 character split across two
+      // `data` chunks must be reassembled correctly rather than decoded chunk-by-chunk (which
+      // would render replacement characters for the split bytes on each side).
+      const decoders = { stdout: new StringDecoder("utf8"), stderr: new StringDecoder("utf8") };
       const appendLog = (stream: "stdout" | "stderr", chunk: Buffer): void => {
         const key = stream === "stdout" ? "stdoutResidual" : "stderrResidual";
-        live[key] += chunk.toString("utf8");
+        live[key] += decoders[stream].write(chunk);
         if (live[key].length > MAX_RESIDUAL_CHARS) {
           // No newline for MAX_RESIDUAL_CHARS: force-flush so one pathological chunk can't grow forever.
           pushLogLine(stream, live[key].slice(0, MAX_LOG_LINE_CHARS) + "…[line truncated]");
@@ -600,41 +634,52 @@ export class Orchestrator {
             }, this.runTimeoutMs)
           : undefined;
 
-      // Stall watchdog (Story 8.5/AD-20) -- provisional until the worker's `config` message
-      // reports its real testTimeout (covering a hang in the worker's own config-discovery step,
-      // which can hang too), then rearmed at testTimeout + staleTestGraceMs. Resets (full
-      // setTimeout reschedule, not a poll) on every test-level progress signal. Reuses `finish()`
-      // -- no second kill path alongside the runTimeoutMs cap above.
+      // Stall watchdog (Story 8.5/AD-20) -- provisional (staleTestGraceMs ALONE, not
+      // testTimeout+grace) until the worker has sent ANY message, since a hang in the worker's own
+      // config-discovery step -- before it can send anything at all -- must be caught just as
+      // promptly as a later stall. Once heard from, rearmed at testTimeout + staleTestGraceMs on
+      // every test-level progress signal (full setTimeout reschedule, not a poll). Reuses
+      // `finish()` -- no second kill path alongside the runTimeoutMs cap above.
       let effectiveTestTimeoutMs = DEFAULT_UNKNOWN_TEST_TIMEOUT_MS;
+      let hasHeardFromWorker = false;
       let stallTimer: NodeJS.Timeout | undefined;
       const scheduleStallCheck = (): void => {
         if (stallTimer) clearTimeout(stallTimer);
-        const thresholdMs = effectiveTestTimeoutMs + this.staleTestGraceMs;
+        const thresholdMs = hasHeardFromWorker
+          ? effectiveTestTimeoutMs + this.staleTestGraceMs
+          : this.staleTestGraceMs;
         stallTimer = setTimeout(() => {
           const elapsed = Date.now() - live.lastProgressAt;
+          const basis = hasHeardFromWorker
+            ? `testTimeout ${effectiveTestTimeoutMs}ms + grace ${this.staleTestGraceMs}ms`
+            : `provisional grace ${this.staleTestGraceMs}ms, no worker message yet`;
           finish(() =>
             failRun(
               new WorkerError(
-                `worker stalled: no test progress for ${elapsed}ms (threshold ${thresholdMs}ms = ` +
-                  `testTimeout ${effectiveTestTimeoutMs}ms + grace ${this.staleTestGraceMs}ms)`,
+                `worker stalled: no test progress for ${elapsed}ms (threshold ${thresholdMs}ms = ${basis})`,
               ),
             ),
           );
         }, thresholdMs);
       };
       const armWatchdog = (testTimeoutMs?: number): void => {
+        hasHeardFromWorker = true;
         if (testTimeoutMs !== undefined) {
-          effectiveTestTimeoutMs = Math.max(testTimeoutMs, MIN_SANE_TEST_TIMEOUT_MS);
+          effectiveTestTimeoutMs = Math.min(
+            Math.max(testTimeoutMs, MIN_SANE_TEST_TIMEOUT_MS),
+            MAX_SANE_TEST_TIMEOUT_MS,
+          );
           live.testTimeoutMs = effectiveTestTimeoutMs;
         }
         scheduleStallCheck();
       };
       const touchLiveProgress = (): void => {
+        hasHeardFromWorker = true;
         live.lastProgressAt = Date.now();
         scheduleStallCheck();
         this.notifyStatusChange();
       };
-      scheduleStallCheck(); // provisional arm, before any config message can possibly arrive
+      scheduleStallCheck(); // provisional arm (staleTestGraceMs alone), before any worker message
 
       const finish = (act: () => void): void => {
         if (settled) return;
@@ -645,6 +690,11 @@ export class Orchestrator {
         if (live.stdoutResidual) pushLogLine("stdout", live.stdoutResidual);
         if (live.stderrResidual) pushLogLine("stderr", live.stderrResidual);
         child.removeAllListeners();
+        // child.stdout/stderr are separate EventEmitters -- removeAllListeners() above doesn't
+        // touch them, so without this, OS-buffered stdio arriving after kill() could still append
+        // to `live.log` for a run that has already settled.
+        child.stdout?.removeAllListeners();
+        child.stderr?.removeAllListeners();
         if (!child.killed) child.kill();
         act();
       };
@@ -710,7 +760,10 @@ export class Orchestrator {
           upsertLiveTest(msg.file, msg.name, msg.status);
           touchLiveProgress();
         } else if (msg.type === "phase-progress" && msg.runId === runId) {
-          touchLiveProgress(); // coverage-measurement heartbeat; not surfaced as primary progress
+          // Coverage-measurement heartbeat (AD-20) -- surfaced identically to test-level progress
+          // (AD-21), not merely an internal watchdog-reset signal.
+          live.phase = { phase: msg.phase, completed: msg.completed, total: msg.total };
+          touchLiveProgress();
         } else if (msg.type === "result" && msg.runId === runId) {
           if (!msg.result) {
             finish(() => failRun(new WorkerError("worker returned no result")));
@@ -837,7 +890,9 @@ export class Orchestrator {
         testTimeoutMs?: number;
         tests: LiveTestEntry[];
         testsTruncated: boolean;
-        logTail: LiveLogLine[];
+        log: LiveLogLine[];
+        phase?: LivePhase;
+        lastProgressAt: number;
       }
     | undefined {
     const live = this.liveRuns.get(projectId);
@@ -847,7 +902,9 @@ export class Orchestrator {
       testTimeoutMs: live.testTimeoutMs,
       tests: live.testOrder.map((k) => live.tests.get(k)!),
       testsTruncated: live.testsTruncated,
-      logTail: live.log,
+      log: live.log,
+      phase: live.phase,
+      lastProgressAt: live.lastProgressAt,
     };
   }
 

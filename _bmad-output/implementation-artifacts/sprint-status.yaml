@@ -1,5 +1,5 @@
 # generated: 2026-07-13
-# last_updated: 2026-07-16
+# last_updated: 2026-07-20
 # project: test-server-mcp
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-13
-last_updated: 2026-07-16
+last_updated: 2026-07-20
 project: test-server-mcp
 project_key: NOKEY
 tracking_system: file-system
@@ -73,6 +73,15 @@ story_location: "{project-root}/_bmad-output/implementation-artifacts"
 # Epic 6 opened 2026-07-15: 6-0 recorded as-built (done); 6-1, 6-2 authored ready-for-dev.
 # Post-v1 work 6-0 shipped directly on main outside the BMAD cycle (commits 572994a..18ad562);
 # captured retrospectively so the plan matches reality. 6-1/6-2 to run through dev → review.
+
+# Epic 8 opened and shipped 2026-07-17 entirely outside the per-story BMAD cycle: 8-1..8-7
+# planned (a0cb34f) and implemented (3246e24) in two commits the same day, despite epics.md's
+# "do not begin implementation without explicit go-ahead" hold note on the epic. No individual
+# story files were authored. Code-reviewed retrospectively on 2026-07-20 (bmad-code-review against
+# ARCHITECTURE-SPINE.md AD-17–AD-21 and the epics.md acceptance criteria): 2 decision-needed
+# findings resolved with the user, 15 patches applied, 2 deferred (see
+# code-review-epic-8-async-execution-observability-2026-07-20.md and deferred-work.md). All 7
+# stories recorded done as-built, same precedent as 6-0.
 
 development_status:
   # Epic 1: Core Daemon & Project Registration (Phase 1)
@@ -143,3 +152,16 @@ development_status:
   7-5-spike-jest-embeddable-run-api: ready-for-dev          # no dependency on 7-1..7-4; gates 7-6 only — can run any time, recommend starting early alongside 7-3/7-4
   7-6-jest-plugin-seam-validation: ready-for-dev            # depends on 7-1, 7-2, 7-5 (spike answer)
   epic-7-retrospective: optional
+
+  # Epic 8: Async Execution & Observability (Phase 2, continued) — opened and shipped 2026-07-17
+  # Planned (a0cb34f) and implemented (3246e24) same-day, outside the per-story BMAD cycle; no
+  # individual story files. As-built record, code-reviewed 2026-07-20 (see comment above).
+  epic-8: done
+  8-1-ipc-new-fromworker-message-types: done                # as-built (shipped 3246e24); code review clean
+  8-2-worker-config-discovery-reporter-hooks: done           # as-built; code review clean
+  8-3-daemon-cli-grace-period-config: done                  # as-built; code review clean
+  8-4-orchestrator-async-run-tests-core: done               # as-built; code review: runId-overlap ambiguity fixed (get_test_status runId param)
+  8-5-orchestrator-live-state-log-capture-stall-watchdog: done  # as-built; code review: provisional-watchdog threshold + UTF-8/listener-leak/ceiling patches applied
+  8-6-mcp-async-run-tests-get-test-status-live-payload: done    # as-built; code review: wait-forever null bug, race-timer leak, AD-21 payload-shape patches applied
+  8-7-ui-live-test-list-log-tail-follow: done               # as-built; code review: SSE duplicate-line-on-new-run patch applied
+  epic-8-retrospective: optional

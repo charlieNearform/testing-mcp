@@ -120,3 +120,18 @@ export interface TestPlan {
 export const TestResultSchema = z.object({});
 
 export const TestPlanSchema = z.object({});
+
+/**
+ * Shape of `<project.path>/.test-mcp/config.json`. `defaultRunWaitMs` (Story 8.3/8.6) is an
+ * optional per-project override for run_tests's async grace period -- absent unless a user
+ * hand-edits the file; `null` means "wait forever" for this project specifically. Single source
+ * of truth for both the CLI writer (src/cli/main.ts) and the MCP reader (src/mcp/server.ts).
+ */
+export const ProjectLocalConfigSchema = z.object({
+  schemaVersion: z.number(),
+  projectId: z.string(),
+  stateDir: z.string(),
+  defaultRunWaitMs: z.number().nullable().optional(),
+});
+
+export type ProjectLocalConfig = z.infer<typeof ProjectLocalConfigSchema>;

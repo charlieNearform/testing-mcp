@@ -24,6 +24,31 @@ Deeper project facts live in `docs/project-context.md` — load it too.
     delete the workspace anchor (a `pnpm-workspace.yaml` in `$HOME` will hijack installs
     without it).
 
+## BMAD development process (non-negotiable)
+
+- **All feature/story-sized work goes through the BMAD story cycle** —
+  `bmad-create-story` (+ `bmad-create-story:validate`) → `bmad-dev-story` → `bmad-code-review`.
+  Never implement a feature, epic, or non-trivial fix by editing source files directly outside
+  that cycle, even if a request seems simple, urgent, or "just this once." Feeling fast is not
+  a reason to skip it.
+- If asked to implement something and no story for it is already `ready-for-dev` in
+  `sprint-status.yaml`, STOP and create the story first (or point to the existing one) instead
+  of editing code ad hoc. `bmad-quick-dev` is the only sanctioned direct-implementation
+  shortcut, and only for work explicitly out of scope of the epics/stories plan — never for an
+  epic-sized feature already tracked in `epics.md`.
+- Epics/stories can carry an explicit go/no-go hold in `epics.md` (e.g. "do not begin
+  implementation of any story until explicit go-ahead"). Treat that as a hard block: a plan
+  existing is not itself permission to start coding it.
+- The moment code lands, `sprint-status.yaml` must reflect it in the same session
+  (`ready-for-dev` → `in-progress` → `review` → `done`). Do not let the tracked plan drift out
+  of sync with what's actually in the repo.
+- If work is ever discovered to have shipped outside this cycle, it must be (a) recorded in
+  `sprint-status.yaml` as an as-built entry and (b) run through `bmad-code-review`
+  retroactively before being considered `done` — never left un-reviewed just because it already
+  merged. See Epic 8 (planned and fully implemented in one day, 2026-07-17, bypassing its own
+  "await go-ahead" hold and per-story review, only reconciled on 2026-07-20) for exactly the
+  failure mode this rule exists to prevent.
+
 ## Dependencies & install config (do NOT touch without explicit approval)
 
 The following are OFF-LIMITS during story implementation. Changing them is never part of a
