@@ -330,7 +330,7 @@ const UI_HTML = `<!doctype html>
   .fail-item { background:var(--card); border:1px solid var(--border); border-left:3px solid var(--fail); border-radius:6px; padding:10px 12px; margin:8px 0; }
   .fail-item .name { font-weight:600; } .fail-item .loc { color:var(--muted); font-size:12px; margin-top:2px; }
   pre { background:#0d1117; border:1px solid var(--border); border-radius:6px; padding:10px; overflow-x:auto; font-size:12px; margin:8px 0 0; }
-  #log-pre { max-height:320px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; }
+  #log-pre { max-height:640px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; } /* doubled from 320px on request */
   .log-summary { display:flex; align-items:center; justify-content:space-between; }
   .log-summary label { font-weight:normal; text-transform:none; letter-spacing:0; cursor:pointer; }
 </style>
@@ -411,7 +411,7 @@ function renderList() {
 // Sourced from the SSE-pushed snapshot (like statusBanner) rather than a one-shot fetch, so the
 // history table lands new rows live instead of only refreshing on the next manual navigation.
 // Live per-test list (Story 8.7), grouped by file, shown only for a state:"running" project.
-function liveTestsBlock(live, root) {
+function liveTestsBlock(live, root, isOpen) {
   if (!live || !live.tests || !live.tests.length) return "";
   const byFile = new Map();
   for (const t of live.tests) {
@@ -427,12 +427,17 @@ function liveTestsBlock(live, root) {
   const truncNote = live.testsTruncated
     ? '<div class="ts">showing the ' + live.testsShown + ' most recent — suite is large</div>'
     : "";
-  return '<div class="section-title">live tests</div>' + rows + truncNote;
+  return '<details id="live-tests-details"' + (isOpen ? " open" : "") + '><summary>live tests</summary>' + rows + truncNote + '</details>';
 }
 
 // Console log panel with a "follow" toggle (Story 8.7). Module-level UI state (not persisted --
 // resets on reload), matching the existing no-framework/inline-JS simplicity of this page.
+// logOpen/liveTestsOpen track each <details> element's open/closed state across re-renders --
+// renderProject() replaces the whole DOM on every SSE push (can fire on every test event), so
+// without this a user's manual collapse would silently re-expand on the very next push.
 let followLog = true;
+let logOpen = true;
+let liveTestsOpen = true;
 let logEventSource = null;
 let logStreamProjectId = null;
 
@@ -473,7 +478,7 @@ function connectLog(pid) {
 }
 
 function logBlock() {
-  return '<details open><summary class="log-summary"><span>console log</span>'
+  return '<details id="log-details"' + (logOpen ? " open" : "") + '><summary class="log-summary"><span>console log</span>'
     + '<label><input type="checkbox" id="follow-log" ' + (followLog ? "checked" : "") + '> follow</label></summary>'
     + '<pre id="log-pre"></pre></details>';
 }
@@ -482,6 +487,13 @@ function wireLogPanel(pid) {
   connectLog(pid);
   const checkbox = document.getElementById("follow-log");
   if (checkbox) checkbox.addEventListener("change", (e) => { followLog = e.target.checked; });
+  const details = document.getElementById("log-details");
+  if (details) details.addEventListener("toggle", () => { logOpen = details.open; });
+}
+
+function wireLiveTestsPanel() {
+  const details = document.getElementById("live-tests-details");
+  if (details) details.addEventListener("toggle", () => { liveTestsOpen = details.open; });
 }
 
 function renderProject(pid) {
@@ -491,10 +503,16 @@ function renderProject(pid) {
   const runs = p.runs || [];
   const banner = statusBanner(pid);
   const running = p.run && p.run.state === "running";
-  const liveBlock = running ? liveTestsBlock(p.live, p.path) + logBlock() : "";
+  // Console log stays up top (right after the banner) per this request; live tests move to the
+  // bottom of the page and are collapsible (both panels persist their open/closed state across
+  // the frequent SSE-driven re-renders via wireLogPanel/wireLiveTestsPanel below).
+  const logSection = running ? logBlock() : "";
+  const liveTestsSection = running ? liveTestsBlock(p.live, p.path, liveTestsOpen) : "";
   if (!runs.length) {
-    app.innerHTML = head + banner + liveBlock + (running ? "" : '<div class="empty">No runs yet — trigger one via run_tests.</div>');
-    if (running) wireLogPanel(pid); else closeLogStream();
+    app.innerHTML = head + banner + logSection
+      + (running ? "" : '<div class="empty">No runs yet — trigger one via run_tests.</div>')
+      + liveTestsSection;
+    if (running) { wireLogPanel(pid); wireLiveTestsPanel(); } else closeLogStream();
     return;
   }
   const rows = runs.map((r) =>
@@ -505,9 +523,10 @@ function renderProject(pid) {
     + '<td>' + (r.total != null ? passTotal(r) : "–") + '</td>'
     + '<td>' + (r.coverageLines != null ? (Math.round(r.coverageLines * 10) / 10) + '%' : "–") + '</td>'
     + '<td>' + fmtDur(r.durationMs) + '</td></tr>').join("");
-  app.innerHTML = head + banner + liveBlock
-    + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / executed</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>';
-  if (running) wireLogPanel(pid); else closeLogStream();
+  app.innerHTML = head + banner + logSection
+    + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / executed</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>'
+    + liveTestsSection;
+  if (running) { wireLogPanel(pid); wireLiveTestsPanel(); } else closeLogStream();
   app.querySelectorAll("tr.row").forEach((el) => {
     el.addEventListener("click", () => go("/project/" + encodeURIComponent(pid) + "/run/" + encodeURIComponent(el.getAttribute("data-run"))));
   });
