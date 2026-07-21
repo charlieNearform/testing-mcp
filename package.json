@@ -20,13 +20,14 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build:compile": "tsc -p tsconfig.json",
+    "build": "pnpm run build:compile && node ./bin/test-mcp.mjs restart",
     "dev": "tsc -p tsconfig.json --watch",
-    "pretest": "pnpm build",
+    "pretest": "pnpm run build:compile",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm run build:compile"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.12.1",

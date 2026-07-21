@@ -1,5 +1,11 @@
 # Deferred Work Ledger
 
+## Deferred from: automatic daemon restart on `pnpm build` (2026-07-21)
+
+- source_spec: none (one-shot: automatic daemon refresh on `pnpm build`)
+  summary: `stopDaemon()` sends `SIGTERM` and only waits for the lockfile to disappear -- there's no logic anywhere in the daemon/orchestrator shutdown path to drain, warn about, or gracefully wait for an in-flight worker run before killing the process.
+  evidence: Pre-existing characteristic of `test-mcp stop` (unchanged by this task), but automating the trigger (`test-mcp restart` off every `pnpm build`) makes it meaningfully easier to hit by accident: a developer compiling in one terminal can now silently abort an in-progress test run being driven from another terminal/session/agent, where previously this required a deliberate manual `test-mcp stop`. Worth a real graceful-shutdown mechanism (e.g. wait for active runs to finish or hit a short grace timeout before SIGTERM) as its own follow-up.
+
 ## Deferred from: spec-vitest-pool-worker-start-retry (2026-07-21)
 
 - source_spec: `spec-vitest-pool-worker-start-retry.md`

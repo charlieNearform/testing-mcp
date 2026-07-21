@@ -329,6 +329,63 @@ program
   });
 
 program
+  .command("restart")
+  .description(
+    "Restart the daemon if it's currently running (no-op if it isn't) -- run after a build so an already-connected MCP client (e.g. a bridge session) picks up new code without needing to reconnect",
+  )
+  .action(async () => {
+    // Best-effort by design: this is a convenience hook off `pnpm build`, and a hiccup here must
+    // never make the build itself look like it failed. Every path below exits via outExit (0),
+    // never errExit -- structurally, not just by convention.
+    try {
+      // stopDaemon() already distinguishes "not running" from "stale lockfile" (and cleans the
+      // latter up itself) -- calling it unconditionally means restart inherits that for free
+      // instead of duplicating a liveness pre-check here.
+      const r = await stopDaemon();
+      if (!r.stopped) {
+        if (r.reason === "timeout") {
+          process.stderr.write(
+            `test-mcp restart: daemon (pid ${r.pid}) did not shut down in time; leaving it running\n`,
+          );
+          return outExit("test-mcp restart: skipped (stop timed out)");
+        }
+        // "not running" or "stale" (a dead lockfile, now cleaned up) -- either way, nothing to restart.
+        return outExit("test-mcp daemon not running; nothing to restart");
+      }
+      const previousPid = r.pid;
+      // Same detached-spawn pattern as ensureDaemon()'s auto-boot, including the spawn-error
+      // handler -- an unhandled 'error' event on a ChildProcess throws and would otherwise crash
+      // this process, defeating the whole "never fail the build" point of this command.
+      let spawnErr: Error | undefined;
+      const child = spawn(process.execPath, [binPath(), "start"], {
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+      });
+      child.once("error", (err) => {
+        spawnErr = err;
+      });
+      child.unref();
+      for (let i = 0; i < 50; i++) {
+        if (spawnErr) break;
+        const after = readLockfile();
+        if (after && isPidAlive(after.pid)) {
+          return outExit(`test-mcp daemon refreshed (pid ${previousPid} -> ${after.pid}, port ${after.port})`);
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const detail = spawnErr ? `: ${spawnErr.message}` : "";
+      process.stderr.write(
+        `test-mcp restart: stopped the old daemon but the new one did not come up within 5s${detail}\n`,
+      );
+      return outExit("test-mcp restart: incomplete -- run `test-mcp start` manually");
+    } catch (err) {
+      process.stderr.write(`test-mcp restart: ${(err as Error).message}\n`);
+      return outExit("test-mcp restart: failed -- check `test-mcp status`, then `test-mcp start` if needed");
+    }
+  });
+
+program
   .command("status")
   .description("Daemon status (Story 1.1)")
   .action(async () => {

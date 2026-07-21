@@ -62,6 +62,7 @@ enforced by a lockfile + known port in the central directory).
 test-mcp start      # start the singleton daemon (idempotent — no-op if already running)
 test-mcp status     # report running/stopped, pid, port, and registered-project count
 test-mcp stop       # graceful shutdown
+test-mcp restart    # restart if running (no-op if not) — picks up freshly built code
 ```
 
 - Binds **`127.0.0.1` only**, default port **7420**.
@@ -72,6 +73,17 @@ test-mcp stop       # graceful shutdown
   Override it with the `TEST_MCP_TOKEN` env var.
 - You usually don't run `start` by hand — `test-mcp register` auto-boots the daemon
   (detached) if it isn't already up.
+- **Developing on this repo itself:** `pnpm build` compiles, then calls `test-mcp restart` —
+  if a daemon is already running it's replaced with a fresh one on the same port/token, so an
+  already-connected MCP client (e.g. Cursor's `mcp-bridge` stdio session) picks up the new
+  code on its next call without needing to reconnect (the bridge's existing session-recovery
+  logic — a 404 from the new daemon's empty session table — handles this transparently).
+  `restart` is best-effort and never fails the build: if the old daemon won't stop in time it
+  just leaves it running (`test-mcp restart: skipped (stop timed out)`), and if the new one
+  doesn't come up it says so (`... incomplete -- run test-mcp start manually`) — either way,
+  check `test-mcp status` if a build reports anything other than "refreshed".
+  `pnpm test`'s `pretest` step compiles without triggering this, so running the test suite
+  never disturbs a daemon you have running for other work.
 
 ## Register a project
 
