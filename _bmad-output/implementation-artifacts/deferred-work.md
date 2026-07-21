@@ -1,5 +1,11 @@
 # Deferred Work Ledger
 
+## Deferred from: spec-vitest-pool-worker-start-retry (2026-07-21)
+
+- source_spec: `spec-vitest-pool-worker-start-retry.md`
+  summary: The same transient `[vitest-pool]: Failed to start ... worker for test files ...` upstream bug can also hit the coverage-measurement code path (`buildAndPersistCoverageMap`/`measureCoverage` in `src/worker/index.ts`), which calls `startVitest` directly and bypasses this fix's retry/heartbeat entirely.
+  evidence: Found via adversarial review while building the `run_tests` retry fix. Worse than the original bug report: `measureCoverage`'s caller wraps it in `withTimeout(...)`, whose fallback silently converts ANY rejection (including this one) into `{ sources: [], measured: false }` with no retry and no surfaced error — coverage quality silently degrades instead of the loud `WorkerFailure` the run_tests path had. Out of scope for this fix (a different code path, different existing error-handling philosophy); worth its own follow-up.
+
 ## Deferred from: story-3-2-coverage-reverse-map-build-persist (2026-07-14)
 
 - **Single-pass V8 snapshot-diff measurement** — Story 3.2 was implemented with per-test-file measurement (one Vitest run per test file), which the spike proved correct. The architecture's single-pass serial snapshot-diff (same accuracy, ~6x cheaper) is a performance optimisation deferred here. [supersedes AC1's "single-pass" wording; approved trade-off]

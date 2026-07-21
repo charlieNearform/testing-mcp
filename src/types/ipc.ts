@@ -20,7 +20,12 @@ export type ToWorker =
 export type FromWorker =
   | { type: "ready" }
   | { type: "progress"; runId: string; completed: number; total: number }
-  | { type: "config"; runId: string; testTimeoutMs: number }
+  // testTimeoutMs is optional so a pool-start-retry heartbeat (Story: vitest-pool worker-start
+  // retry) can resend `config` purely to reset the orchestrator's stall watchdog even when no
+  // real testTimeout is known yet -- armWatchdog() already treats an absent value as "just
+  // reset the timer, don't touch the effective one," so this is additive, not a behavior change
+  // for the original (testTimeoutMs-bearing) use of this message.
+  | { type: "config"; runId: string; testTimeoutMs?: number }
   | { type: "case-start"; runId: string; file: string; name: string }
   | {
       type: "case-result";
@@ -112,7 +117,7 @@ const FromWorkerSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("config"),
     runId: z.string(),
-    testTimeoutMs: z.number(),
+    testTimeoutMs: z.number().optional(),
   }),
   z.object({
     type: z.literal("case-start"),

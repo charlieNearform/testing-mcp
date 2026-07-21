@@ -102,6 +102,31 @@ describe("Orchestrator stall watchdog (Story 8.5)", () => {
     expect(result.success).toBe(true);
   }, 20_000);
 
+  it("does not fire while repeated `config` heartbeats keep arriving (the exact cross-component assumption the vitest-pool-worker-start retry relies on)", async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-stall-config-heartbeat-"));
+    const stateDir = path.join(root, ".test-mcp");
+
+    // The worker-side pool-start retry (src/worker/index.ts) survives the stall watchdog ONLY
+    // because it resends `config` repeatedly while an attempt is pending. This proves that
+    // assumption directly against the REAL orchestrator -- iteration 1 of that fix broke exactly
+    // here (a between-retries-only heartbeat never got a chance to run before the watchdog fired),
+    // and that gap went unverified by any test until now.
+    const orch = new Orchestrator({ workerPath, staleTestGraceMs: 150 });
+    const pending = orch.runTests({ projectId: "p", path: root }, { mode: "full" });
+    await waitForStarted(stateDir);
+    fs.writeFileSync(path.join(stateDir, "send-config"), "150"); // threshold = 300ms
+
+    // Resend `config` every 80ms for 640ms (> 2x the threshold) -- if it didn't reset the timer,
+    // this would have stalled out long before we release.
+    for (let i = 0; i < 8; i++) {
+      fs.writeFileSync(path.join(stateDir, "send-config"), "150");
+      await new Promise((r) => setTimeout(r, 80));
+    }
+    fs.writeFileSync(path.join(stateDir, "release"), "");
+    const result = await pending;
+    expect(result.success).toBe(true);
+  }, 20_000);
+
   it("produces a message distinguishable from the runTimeoutMs whole-run cap", async () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-stall-vs-timeout-"));
     const stateDir = path.join(root, ".test-mcp");

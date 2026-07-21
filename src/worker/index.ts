@@ -85,6 +85,74 @@ function mapCaseStatus(state: VTestResult["state"]): "passed" | "failed" | "skip
   return state === "pending" ? "failed" : state;
 }
 
+// Vitest 4's default `forks` pool has a documented, transient upstream bug: its own internal
+// ~90s WORKER_START_TIMEOUT can fire spawning a per-file worker under resource pressure, throwing
+// `[vitest-pool]: Failed to start <worker> worker for test files <...>` even though a re-run
+// typically succeeds. 1 initial attempt + 2 retries, delay scaled per attempt (a failure
+// attributed to "resource pressure" deserves a little more room to clear before trying again,
+// not the same fixed wait every time).
+const POOL_START_MAX_ATTEMPTS = 3;
+const POOL_START_RETRY_DELAY_MS = 1000;
+// While an attempt is pending, heartbeat the orchestrator so its stall watchdog (armed at
+// testTimeoutMs + staleTestGraceMs, ~10s by default) doesn't kill the worker mid-wait -- Vitest's
+// own internal timeout for this specific failure is ~90s, far longer than that default. Capped
+// PER ATTEMPT (not cumulatively across retries -- each attempt is an independent, fresh chance at
+// the same ~90s-scale wait) so a GENUINELY wedged startVitest() call (a different, real bug)
+// still eventually falls back to the orchestrator's normal stall detection.
+const POOL_START_HEARTBEAT_INTERVAL_MS = 4000;
+const POOL_START_HEARTBEAT_MAX_MS = 130_000;
+
+/** Classify by message only, never by error type -- Vitest throws a plain Error here, and this
+ *  must never widen to "retry any startVitest failure" (a real test/config error must fail fast).
+ *  `[\s\S]` (not `.`) so an embedded newline in the message still matches. */
+function isTransientPoolStartFailure(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /\[vitest-pool\]:\s*Failed to start[\s\S]+worker for test files/.test(message);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Run `attempt` with a `config` heartbeat firing on an interval while it's pending, so the
+ * orchestrator's stall watchdog sees signs of life during Vitest's own slow-but-legitimate
+ * worker-start wait. Sends `testTimeoutMs` when known; omits it when not -- either way
+ * `armWatchdog` on the receiving end resets the watchdog's timer (an absent value just skips
+ * updating the *effective* timeout, per its existing, unchanged behavior), so this closes the
+ * gap for projects whose config discovery didn't resolve a real value instead of accepting it.
+ */
+async function withPoolStartHeartbeat<T>(
+  runId: string,
+  testTimeoutMs: number | undefined,
+  attempt: () => Promise<T>,
+): Promise<T> {
+  const sendHeartbeat = (): void => {
+    try {
+      send({ type: "config", runId, ...(testTimeoutMs !== undefined ? { testTimeoutMs } : {}) });
+    } catch {
+      // never let a heartbeat failure (e.g. a torn-down IPC channel) crash the worker
+    }
+  };
+  // Fire one immediately -- if testTimeoutMs is unknown, the orchestrator's watchdog is still in
+  // its short provisional phase (staleTestGraceMs alone, default 5000ms); waiting for the first
+  // POOL_START_HEARTBEAT_INTERVAL_MS tick could burn most of that margin before any signal arrives.
+  sendHeartbeat();
+  const heartbeatStart = Date.now();
+  const timer = setInterval(() => {
+    if (Date.now() - heartbeatStart > POOL_START_HEARTBEAT_MAX_MS) {
+      clearInterval(timer);
+      return;
+    }
+    sendHeartbeat();
+  }, POOL_START_HEARTBEAT_INTERVAL_MS);
+  try {
+    return await attempt();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 /** Execute Vitest once with the given filters/options and capture reporter output. */
 async function runOnce(
   startVitest: VitestNode["startVitest"],
@@ -92,62 +160,92 @@ async function runOnce(
   extraOptions: Record<string, unknown>,
   runId: string,
   onProgress?: (completed: number, total: number) => void,
+  testTimeoutMs?: number,
 ): Promise<RunOnceResult> {
+  // Fresh per attempt (buildReporter(), not a single shared closure) -- a discarded attempt's
+  // partial progress (onTestRunStart/onTestModuleEnd having already fired before a LATER pool
+  // worker failed to start for a subsequent file) must never leak into a retried attempt's numbers.
+  const buildReporter = () => {
+    let modules: ReadonlyArray<VTestModule> = [];
+    let unhandled: ReadonlyArray<VError> = [];
+    let total = 0;
+    let completed = 0;
+    const reporter = {
+      onTestRunStart(specifications: ReadonlyArray<unknown>) {
+        total = specifications.length;
+        onProgress?.(0, total);
+      },
+      onTestModuleEnd() {
+        completed += 1;
+        onProgress?.(completed, total);
+      },
+      onTestRunEnd(testModules: ReadonlyArray<VTestModule>, unhandledErrors: ReadonlyArray<VError>) {
+        modules = testModules;
+        unhandled = unhandledErrors;
+      },
+      // Optional, Vitest 3+ only (Story 8.2) — an older project Vitest simply never calls these.
+      // Wrapped defensively: a reporter hook must never crash the worker or abort the run.
+      onTestCaseReady(testCase: VTestCase) {
+        try {
+          send({ type: "case-start", runId, file: testCase.module.moduleId, name: testCase.fullName });
+        } catch {
+          // never let a reporter hook failure break the run
+        }
+      },
+      onTestCaseResult(testCase: VTestCase) {
+        try {
+          send({
+            type: "case-result",
+            runId,
+            file: testCase.module.moduleId,
+            name: testCase.fullName,
+            status: mapCaseStatus(testCase.result().state),
+          });
+        } catch {
+          // ditto
+        }
+      },
+    };
+    return { reporter, getModules: () => modules, getUnhandled: () => unhandled };
+  };
+
+  let vitest: VitestInstance | false | undefined;
+  let wallClockMs = 0;
   let modules: ReadonlyArray<VTestModule> = [];
   let unhandled: ReadonlyArray<VError> = [];
-  let total = 0;
-  let completed = 0;
-  const reporter = {
-    onTestRunStart(specifications: ReadonlyArray<unknown>) {
-      total = specifications.length;
-      onProgress?.(0, total);
-    },
-    onTestModuleEnd() {
-      completed += 1;
-      onProgress?.(completed, total);
-    },
-    onTestRunEnd(testModules: ReadonlyArray<VTestModule>, unhandledErrors: ReadonlyArray<VError>) {
-      modules = testModules;
-      unhandled = unhandledErrors;
-    },
-    // Optional, Vitest 3+ only (Story 8.2) — an older project Vitest simply never calls these.
-    // Wrapped defensively: a reporter hook must never crash the worker or abort the run.
-    onTestCaseReady(testCase: VTestCase) {
-      try {
-        send({ type: "case-start", runId, file: testCase.module.moduleId, name: testCase.fullName });
-      } catch {
-        // never let a reporter hook failure break the run
-      }
-    },
-    onTestCaseResult(testCase: VTestCase) {
-      try {
-        send({
-          type: "case-result",
-          runId,
-          file: testCase.module.moduleId,
-          name: testCase.fullName,
-          status: mapCaseStatus(testCase.result().state),
-        });
-      } catch {
-        // ditto
-      }
-    },
-  };
-  const start = Date.now();
-  const vitest = await startVitest("test", filters, {
-    watch: false,
-    reporters: [reporter],
-    coverage: { enabled: false },
-    // Vitest intercepts console.log/error from within test files by default (to attribute them
-    // to a test in ITS OWN reporter output) instead of writing straight to this process's real
-    // stdout/stderr -- discovered via smoke testing (Story 8.5's log tail stayed empty against a
-    // real project despite console output). Disabling interception is what makes that output
-    // reach the orchestrator's log-capture pipe/tee at all; we don't consume onUserConsoleLog
-    // (Vitest's own attributed-log hook), so there's nothing else this option would break.
-    disableConsoleIntercept: true,
-    ...extraOptions,
-  });
-  const wallClockMs = Date.now() - start;
+  for (let attempt = 1; attempt <= POOL_START_MAX_ATTEMPTS; attempt++) {
+    const { reporter, getModules, getUnhandled } = buildReporter();
+    const attemptStart = Date.now();
+    try {
+      vitest = await withPoolStartHeartbeat(runId, testTimeoutMs, () =>
+        startVitest("test", filters, {
+          watch: false,
+          reporters: [reporter],
+          coverage: { enabled: false },
+          // Vitest intercepts console.log/error from within test files by default (to attribute
+          // them to a test in ITS OWN reporter output) instead of writing straight to this
+          // process's real stdout/stderr -- discovered via smoke testing (Story 8.5's log tail
+          // stayed empty against a real project despite console output). Disabling interception
+          // is what makes that output reach the orchestrator's log-capture pipe/tee at all; we
+          // don't consume onUserConsoleLog (Vitest's own attributed-log hook), so there's nothing
+          // else this option would break.
+          disableConsoleIntercept: true,
+          ...extraOptions,
+        }),
+      );
+      wallClockMs = Date.now() - attemptStart; // per-attempt, so retry/backoff time never inflates it
+      modules = getModules();
+      unhandled = getUnhandled();
+      break;
+    } catch (err) {
+      if (!isTransientPoolStartFailure(err) || attempt === POOL_START_MAX_ATTEMPTS) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `[test-mcp] retrying vitest-pool worker start (attempt ${attempt}/${POOL_START_MAX_ATTEMPTS}): ${message}\n`,
+      );
+      await sleep(POOL_START_RETRY_DELAY_MS * attempt);
+    }
+  }
   if (!vitest) throw new Error("Vitest failed to start");
   const isolate = vitest.config.isolate ?? true;
   try {
@@ -349,9 +447,20 @@ export async function runVitest(
   opts: { files: string[]; changed: boolean },
   runId: string,
   onProgress?: (completed: number, total: number) => void,
+  /** The project's resolved Vitest testTimeout (Story 8.2's readResolvedRunConfig), threaded down
+   *  so a pool-start retry (below) can heartbeat the orchestrator's stall watchdog while an
+   *  attempt is pending. Undefined when discovery couldn't resolve it -- the heartbeat still
+   *  fires, just without a testTimeoutMs value. */
+  testTimeoutMs?: number,
+  /** Test-only seam: inject a fake `startVitest` to exercise the pool-start retry logic
+   *  deterministically, without needing to shadow the real `vitest` package's module exports.
+   *  Never set in production -- the real project's Vitest is always resolved normally. */
+  startVitestOverride?: VitestNode["startVitest"],
 ): Promise<{ result: TestResult; failureDetails: FailureDetail[] }> {
-  const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
-  const { startVitest } = projectRequire("vitest/node") as VitestNode;
+  const startVitest =
+    startVitestOverride ??
+    (createRequire(path.join(cwd, "__test-mcp-resolve__.js"))("vitest/node") as VitestNode)
+      .startVitest;
 
   const build = (
     r: RunOnceResult,
@@ -364,10 +473,10 @@ export async function runVitest(
   // Union (Story 3.5): an explicit coverage-map selection PLUS the git static-graph (--changed),
   // merged so we run everything either signal deems affected.
   if (opts.changed && opts.files.length > 0) {
-    const primary = await runOnce(startVitest, opts.files, {}, runId, onProgress);
+    const primary = await runOnce(startVitest, opts.files, {}, runId, onProgress, testTimeoutMs);
     let staticRun: RunOnceResult | null = null;
     try {
-      staticRun = await runOnce(startVitest, [], { changed: true }, runId);
+      staticRun = await runOnce(startVitest, [], { changed: true }, runId, undefined, testTimeoutMs);
     } catch {
       // Not a git repo / --changed unusable -> union is just the coverage-map selection.
       staticRun = null;
@@ -381,7 +490,7 @@ export async function runVitest(
     // report "0 passed" (a silent skip). Fall back to the full suite, matching the lone `--changed`
     // branch below (Story 6.8; closes the 6.6 union-branch gap).
     if (mergedModules.length === 0) {
-      const full = await runOnce(startVitest, [], {}, runId, onProgress);
+      const full = await runOnce(startVitest, [], {}, runId, onProgress, testTimeoutMs);
       return build(full, {
         strategy: "full",
         reason: "incremental selection matched no test files; ran full suite",
@@ -404,7 +513,7 @@ export async function runVitest(
   // Incremental (git-aware) selection — only when the caller did not pin explicit files.
   if (opts.changed && opts.files.length === 0) {
     try {
-      const inc = await runOnce(startVitest, [], { changed: true }, runId, onProgress);
+      const inc = await runOnce(startVitest, [], { changed: true }, runId, onProgress, testTimeoutMs);
       if (inc.modules.length > 0) {
         return build(inc, {
           strategy: "incremental",
@@ -415,7 +524,7 @@ export async function runVitest(
     } catch {
       // Not a git repo / --changed unusable -> fall through to a full run.
     }
-    const full = await runOnce(startVitest, [], {}, runId, onProgress);
+    const full = await runOnce(startVitest, [], {}, runId, onProgress, testTimeoutMs);
     return build(full, {
       strategy: "full",
       reason: "incremental found no affected tests (unmapped change or non-git); ran full suite",
@@ -423,12 +532,12 @@ export async function runVitest(
   }
 
   // Full run, or an explicit file selection.
-  const run = await runOnce(startVitest, opts.files, {}, runId, onProgress);
+  const run = await runOnce(startVitest, opts.files, {}, runId, onProgress, testTimeoutMs);
   if (opts.files.length > 0 && run.modules.length === 0) {
     // A selection that resolves to zero actual test files (e.g. a stale coverage-map entry
     // naming a file that no longer exists) must never silently report "0 passed" — escalate to
     // the full suite (mirrors the union branch's identical safety net above).
-    const full = await runOnce(startVitest, [], {}, runId, onProgress);
+    const full = await runOnce(startVitest, [], {}, runId, onProgress, testTimeoutMs);
     return build(full, {
       strategy: "full",
       reason: "incremental selection matched no test files; ran full suite",
@@ -689,6 +798,7 @@ async function handleRun(
     { files: msg.files, changed: msg.changed },
     msg.runId,
     (completed, total) => send({ type: "progress", runId: msg.runId, completed, total }),
+    testTimeoutMs,
   );
   if (!msg.coverage) return base;
   const { delta, coverage } = await buildAndPersistCoverageMap(

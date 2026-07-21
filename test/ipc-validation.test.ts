@@ -77,8 +77,19 @@ describe("IPC message validation at the process boundary", () => {
     expect(parseFromWorker(msg)).toEqual(msg);
   });
 
-  it("rejects a config message missing testTimeoutMs", () => {
-    expect(() => parseFromWorker({ type: "config", runId: "r1" })).toThrow();
+  it("accepts a config message without testTimeoutMs (vitest-pool worker-start retry heartbeat)", () => {
+    // testTimeoutMs is optional so a pool-start-retry heartbeat can resend `config` purely to
+    // reset the orchestrator's stall watchdog even when no real testTimeout is known yet.
+    const msg = { type: "config", runId: "r1" };
+    expect(parseFromWorker(msg)).toEqual(msg);
+  });
+
+  it("rejects a config message with a non-numeric testTimeoutMs", () => {
+    expect(() => parseFromWorker({ type: "config", runId: "r1", testTimeoutMs: "5000" })).toThrow();
+  });
+
+  it("rejects a config message missing runId", () => {
+    expect(() => parseFromWorker({ type: "config", testTimeoutMs: 5000 })).toThrow();
   });
 
   it("accepts a well-formed case-start message (Story 8.1)", () => {
