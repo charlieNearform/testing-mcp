@@ -17,10 +17,42 @@ import {
   updateCoverageData,
   combineCoverage,
   coveredSourceFiles,
+  coverageDataPath,
   type IstanbulCoverageData,
   type TestCoverage,
 } from "../coverage/combined.js";
 import { computeHashes } from "../snapshot/index.js";
+
+// TEMPORARY diagnostic instrumentation (not a permanent feature) for investigating a real-project
+// OOM crash during coverage-enabled runs: heap climbs to the default ~4GB ceiling over a long run
+// and the worker crashes rather than completing. ON BY DEFAULT for now (to capture data on the
+// affected machine without needing extra env-var setup there) -- set TEST_MCP_DEBUG_MEMORY=0 to
+// silence it. Written to a file (not stderr) because the daemon normally spawns with
+// stdio:"ignore", so stderr never reaches anywhere the operator can read it; a file inside the
+// project's own .test-mcp/ (already the convention for per-project state, see CLAUDE.md) is
+// reachable regardless of how the daemon/worker were started. Remove once the leak is found and
+// fixed -- flip this back to opt-in (or delete entirely) once real data is in hand.
+function logMemory(cwd: string, label: string, extra: Record<string, unknown> = {}): void {
+  if (process.env.TEST_MCP_DEBUG_MEMORY === "0") return;
+  try {
+    const m = process.memoryUsage();
+    const mb = (n: number) => Math.round(n / 1024 / 1024);
+    const line = JSON.stringify({
+      t: new Date().toISOString(),
+      label,
+      rssMB: mb(m.rss),
+      heapUsedMB: mb(m.heapUsed),
+      heapTotalMB: mb(m.heapTotal),
+      externalMB: mb(m.external),
+      arrayBuffersMB: mb(m.arrayBuffers),
+      ...extra,
+    });
+    fs.mkdirSync(path.join(cwd, ".test-mcp"), { recursive: true });
+    fs.appendFileSync(path.join(cwd, ".test-mcp", "debug-memory.log"), line + "\n");
+  } catch {
+    // diagnostic logging must never crash the very run it's trying to help debug
+  }
+}
 
 // Minimal structural typing for the parts of the Vitest reporter API we consume.
 // (Vitest is resolved dynamically from the project, so we cannot import its types here.)
@@ -772,10 +804,14 @@ export async function buildAndPersistCoverageMap(
   // reproducing the exact stall this fix exists to prevent (bad_spec fix -- see Spec Change Log).
   const heartbeatMaxMs = Math.max(COVERAGE_HEARTBEAT_MAX_MS, budgetMs + COVERAGE_HEARTBEAT_INTERVAL_MS);
 
+  logMemory(cwd, "coverage-phase-start", { filesRequested: files.length });
+
   const targetTestFiles =
     files.length > 0
       ? files.map((f) => path.resolve(cwd, f))
       : await withCoverageHeartbeat(runId, 0, 0, heartbeatMaxMs, () => discoverTestFiles(createVitest));
+
+  logMemory(cwd, "after-discovery", { targetTestFiles: targetTestFiles.length });
 
   // total is targetTestFiles.length (the already-resolved real count), NOT the raw `files` param --
   // `files.length` is always 0 in discovery mode, which would report a wrong total on a value the
@@ -783,6 +819,8 @@ export async function buildAndPersistCoverageMap(
   const baseline = await withCoverageHeartbeat(runId, 0, targetTestFiles.length, heartbeatMaxMs, () =>
     measureSetupBaseline(startVitest, cwd),
   );
+
+  logMemory(cwd, "after-baseline", { baselineSources: baseline.length });
 
   // Capture each measured test file's raw coverage data + the sources it touched as we go.
   const rawData: Record<string, IstanbulCoverageData> = {};
@@ -835,13 +873,28 @@ export async function buildAndPersistCoverageMap(
       } catch {
         // never let a progress-signal failure crash the worker
       }
+      // Every 25 files (not every file -- Object.keys()/JSON.stringify() on a large rawData is
+      // itself non-trivial work, and this is diagnostic-only). Tests whether memory grows roughly
+      // linearly with files measured -- if it does, rawData (all of this run's raw per-file
+      // coverage JSON, held simultaneously until persistAndCombine at the very end) is a prime
+      // suspect for the OOM.
+      if (coverageFilesDone % 25 === 0 || coverageFilesDone === targetTestFiles.length) {
+        logMemory(cwd, "coverage-file-measured", {
+          filesDone: coverageFilesDone,
+          filesTotal: targetTestFiles.length,
+          rawDataEntries: Object.keys(rawData).length,
+          rawDataApproxBytes: Buffer.byteLength(JSON.stringify(rawData)),
+        });
+      }
       return m;
     },
     baseline,
   });
   saveCoverageMap(cwd, file);
 
+  logMemory(cwd, "before-persist-and-combine", { rawDataEntries: Object.keys(rawData).length });
   const coverage = persistAndCombine(cwd, projectId, rawData, perTestSources, freshSources, thresholds);
+  logMemory(cwd, "after-persist-and-combine");
   return { delta: { ...summary }, coverage };
 }
 
@@ -872,15 +925,29 @@ function persistAndCombine(
       measured[testRel] = { measuredAt: now, sourceHashes, data };
     }
     const existsTest = (testRel: string): boolean => fs.existsSync(path.join(cwd, testRel));
-    const updated = updateCoverageData(loadCoverageData(cwd), projectId, now, measured, existsTest);
+    let dataFileBytesOnDisk: number | undefined;
+    try {
+      dataFileBytesOnDisk = fs.statSync(coverageDataPath(cwd)).size;
+    } catch {
+      // no existing file yet -- fine, just means this is the first coverage-enabled run
+    }
+    logMemory(cwd, "persist-before-load", { measuredThisRun: Object.keys(measured).length, dataFileBytesOnDisk });
+    const loaded = loadCoverageData(cwd);
+    logMemory(cwd, "persist-after-load", { existingTestsTracked: loaded ? Object.keys(loaded.tests).length : 0 });
+    const updated = updateCoverageData(loaded, projectId, now, measured, existsTest);
+    logMemory(cwd, "persist-after-update", { totalTestsTracked: Object.keys(updated.tests).length });
     saveCoverageData(cwd, updated);
+    logMemory(cwd, "persist-after-save");
     // Current hashes of every source any surviving test measured — to detect stale (changed) sources.
     const allSources = new Set<string>();
     for (const tc of Object.values(updated.tests)) {
       for (const s of Object.keys(tc.sourceHashes)) allSources.add(s);
     }
     const currentHashes = computeHashes(cwd, [...allSources]);
-    return combineCoverage(updated, cwd, currentHashes, freshSources, thresholds) ?? undefined;
+    logMemory(cwd, "persist-after-hashes", { sourcesHashed: allSources.size });
+    const result = combineCoverage(updated, cwd, currentHashes, freshSources, thresholds) ?? undefined;
+    logMemory(cwd, "persist-after-combine");
+    return result;
   } catch (err) {
     process.stderr.write(
       `[test-mcp] combined coverage unavailable this run: ${
