@@ -180,7 +180,44 @@ export function resolveToken(cfg: DaemonConfig): string {
   return token;
 }
 
+/**
+ * Global last-resort safety net. Without this, ANY synchronous throw inside an event-handler
+ * callback anywhere in the process (a timer, a child-process event, an HTTP request handler that
+ * isn't wrapped) silently kills the whole daemon with zero trace -- exactly the failure mode
+ * reported on a real project (the daemon itself died, no OOM, and the last diagnostic line was
+ * mid-coverage-phase). Logs full detail to a durable file (stdout/stderr are normally discarded
+ * -- the daemon spawns with stdio:"ignore") before doing anything else, so a crash is diagnosable
+ * instead of silent.
+ *
+ * uncaughtException exits (after logging): Node's own guidance is that resuming after one is
+ * unsafe -- state may be corrupted in a way that's worse than a clean restart. unhandledRejection
+ * logs and keeps running: a rejected promise's own async operation already failed through its own
+ * (already-guarded) error path elsewhere; the process's synchronous execution state was never
+ * disturbed, so exiting here would violate this project's own "never crash the daemon" invariant
+ * for no corresponding safety benefit.
+ */
+function installCrashLogger(): void {
+  const crashLogPath = path.join(centralDir(), "crash.log");
+  const logCrash = (kind: string, err: unknown): void => {
+    try {
+      fs.mkdirSync(centralDir(), { recursive: true, mode: 0o700 });
+      const detail = err instanceof Error ? `${err.message}\n${err.stack}` : String(err);
+      fs.appendFileSync(crashLogPath, `[${new Date().toISOString()}] ${kind}: ${detail}\n\n`);
+    } catch {
+      // the crash logger itself must never throw -- there would be nothing left to catch it
+    }
+  };
+  process.on("uncaughtException", (err) => {
+    logCrash("uncaughtException", err);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    logCrash("unhandledRejection", reason);
+  });
+}
+
 export async function startDaemon(): Promise<DaemonHandle> {
+  installCrashLogger();
   const dir = centralDir();
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 
