@@ -153,6 +153,68 @@ async function withPoolStartHeartbeat<T>(
   }
 }
 
+// The per-file coverage-measurement pass (buildAndPersistCoverageMap below) runs each test file
+// individually with a SILENT reporter and can legitimately take well over a minute per file; the
+// orchestrator's stall watchdog is tuned for per-test timing (testTimeout + staleTestGraceMs,
+// often ~10-35s) and is only reset by a phase-progress message sent AFTER a file finishes -- so a
+// single slow file used to get the whole worker killed mid-measurement. Same shape of problem as
+// the pool-start wait above; same fix. Kept as a separate constant/function pair rather than
+// generalizing withPoolStartHeartbeat -- the two heartbeat different IPC message shapes (config
+// vs phase-progress), and one shared abstraction would cost more clarity than it saves.
+const COVERAGE_HEARTBEAT_INTERVAL_MS = 4000;
+// A FLOOR, not the sole ceiling -- buildAndPersistCoverageMap derives the actual per-call cap from
+// this and the operator-configurable TEST_MCP_MEASURE_BUDGET_MS (see its own comment). A fixed
+// value here alone would silently cap coverage measurement below whatever budget an operator
+// configures, walking right back into the stall this whole fix exists to prevent.
+const COVERAGE_HEARTBEAT_MAX_MS = 130_000;
+
+/**
+ * Run `attempt` with a `phase-progress` heartbeat firing on an interval while it's pending, so
+ * the orchestrator's stall watchdog sees signs of life during a slow-but-legitimate coverage
+ * discovery/baseline/per-file measurement. `completed`/`total` are the CURRENT counts, unchanged
+ * by the heartbeat itself -- it only re-signals "still on it," never fakes progress ahead of the
+ * real completion message sent by the caller once `attempt` resolves. Stops within one interval
+ * tick after `maxMs` elapses (checked inside the interval callback, not a separate hard deadline)
+ * so a genuinely wedged `attempt` (a different, real bug) still falls through to the orchestrator's
+ * normal stall detection instead of being heartbeated forever -- discoverTestFiles/
+ * measureSetupBaseline have no timeout of their own today, so without this cap heartbeating would
+ * mask a real hang in either. `maxMs` is a parameter (not a fixed constant) so callers can pass a
+ * budget-aware value instead of one disconnected from how long the operation is actually allowed
+ * to legitimately run.
+ */
+async function withCoverageHeartbeat<T>(
+  runId: string,
+  completed: number,
+  total: number,
+  maxMs: number,
+  attempt: () => Promise<T>,
+): Promise<T> {
+  const sendHeartbeat = (): void => {
+    try {
+      send({ type: "phase-progress", runId, phase: "coverage", completed, total });
+    } catch {
+      // never let a heartbeat failure (e.g. a torn-down IPC channel) crash the worker
+    }
+  };
+  // Fire one immediately -- the orchestrator's provisional pre-worker-message watchdog phase uses
+  // staleTestGraceMs alone (default 5000ms); waiting for the first interval tick could burn most
+  // of that margin before any signal arrives.
+  sendHeartbeat();
+  const heartbeatStart = Date.now();
+  const timer = setInterval(() => {
+    if (Date.now() - heartbeatStart > maxMs) {
+      clearInterval(timer);
+      return;
+    }
+    sendHeartbeat();
+  }, COVERAGE_HEARTBEAT_INTERVAL_MS);
+  try {
+    return await attempt();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 /** Execute Vitest once with the given filters/options and capture reporter output. */
 async function runOnce(
   startVitest: VitestNode["startVitest"],
@@ -669,23 +731,58 @@ function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
  * Returns the map summary plus the COMBINED whole-project coverage (union of each test file's latest
  * measurement) — derived from the SAME per-file measurement runs, so no extra suite execution.
  */
-async function buildAndPersistCoverageMap(
+export async function buildAndPersistCoverageMap(
   cwd: string,
   projectId: string,
   files: string[],
   runId: string,
   thresholds: unknown,
+  /** Test-only seams: inject fake `startVitest`/`createVitest` to exercise the coverage-phase
+   *  heartbeat logic deterministically (e.g. a slow or never-resolving fake), without needing to
+   *  shadow the real `vitest` package's module exports. Never set in production -- the real
+   *  project's Vitest is always resolved normally. A call that overrides one but leaves the OTHER
+   *  unset AND still exercises it (guarded below) would otherwise silently fall through to a real
+   *  Vitest pass against whatever `cwd` is, instead of failing fast. */
+  startVitestOverride?: VitestNode["startVitest"],
+  createVitestOverride?: VitestNode["createVitest"],
 ): Promise<{ delta: CoverageDelta; coverage?: TestResult["coverage"] }> {
+  // measureSetupBaseline (below) always runs and always needs startVitest, regardless of `files`
+  // -- so createVitestOverride without startVitestOverride is ALWAYS a mismatch. createVitest is
+  // only reached when files=[] (discovery); when an explicit file list is given, discovery never
+  // runs, so a test overriding just startVitest for that case is legitimate, not a footgun.
+  if (createVitestOverride !== undefined && startVitestOverride === undefined) {
+    throw new Error(
+      "buildAndPersistCoverageMap: startVitestOverride must also be provided when createVitestOverride is set -- setup-baseline measurement always runs and needs it",
+    );
+  }
+  if (files.length === 0 && startVitestOverride !== undefined && createVitestOverride === undefined) {
+    throw new Error(
+      "buildAndPersistCoverageMap: createVitestOverride must also be provided when startVitestOverride is set and files=[] -- discovery will run and needs it",
+    );
+  }
   const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
-  const { startVitest, createVitest } = projectRequire("vitest/node") as VitestNode;
+  const resolved = projectRequire("vitest/node") as VitestNode;
+  const startVitest = startVitestOverride ?? resolved.startVitest;
+  const createVitest = createVitestOverride ?? resolved.createVitest;
+
+  const budgetMs = Number(process.env.TEST_MCP_MEASURE_BUDGET_MS ?? 120_000);
+  // A floor, not a fixed ceiling -- if an operator raises TEST_MCP_MEASURE_BUDGET_MS to legitimately
+  // tolerate slower per-file measurement, the heartbeat's own safety margin must rise with it, or
+  // heartbeating would cut off before the file's own configured allowance is reached, silently
+  // reproducing the exact stall this fix exists to prevent (bad_spec fix -- see Spec Change Log).
+  const heartbeatMaxMs = Math.max(COVERAGE_HEARTBEAT_MAX_MS, budgetMs + COVERAGE_HEARTBEAT_INTERVAL_MS);
 
   const targetTestFiles =
     files.length > 0
       ? files.map((f) => path.resolve(cwd, f))
-      : await discoverTestFiles(createVitest);
+      : await withCoverageHeartbeat(runId, 0, 0, heartbeatMaxMs, () => discoverTestFiles(createVitest));
 
-  const baseline = await measureSetupBaseline(startVitest, cwd);
-  const budgetMs = Number(process.env.TEST_MCP_MEASURE_BUDGET_MS ?? 120_000);
+  // total is targetTestFiles.length (the already-resolved real count), NOT the raw `files` param --
+  // `files.length` is always 0 in discovery mode, which would report a wrong total on a value the
+  // orchestrator surfaces as user-visible live progress (bad_spec fix -- see Spec Change Log).
+  const baseline = await withCoverageHeartbeat(runId, 0, targetTestFiles.length, heartbeatMaxMs, () =>
+    measureSetupBaseline(startVitest, cwd),
+  );
 
   // Capture each measured test file's raw coverage data + the sources it touched as we go.
   const rawData: Record<string, IstanbulCoverageData> = {};
@@ -698,10 +795,17 @@ async function buildAndPersistCoverageMap(
     targetTestFiles,
     existing: loadCoverageMap(cwd),
     measure: async (abs) => {
-      const m = await withTimeout(measureCoverage(startVitest, cwd, abs), budgetMs, {
-        sources: [],
-        measured: false,
-      });
+      const m = await withCoverageHeartbeat(
+        runId,
+        coverageFilesDone,
+        targetTestFiles.length,
+        heartbeatMaxMs,
+        () =>
+          withTimeout(measureCoverage(startVitest, cwd, abs), budgetMs, {
+            sources: [],
+            measured: false,
+          }),
+      );
       if (m.measured && m.data) {
         const testRel = path.relative(cwd, abs);
         rawData[testRel] = m.data as IstanbulCoverageData;
@@ -712,16 +816,25 @@ async function buildAndPersistCoverageMap(
         for (const s of sources) freshSources.add(s);
       }
       // Required (Story 8.2/AD-20), not optional: this phase runs a SILENT reporter (measureCoverage
-      // passes `reporters: [{}]`) and otherwise emits zero progress signals for its entire duration —
-      // without this, the stall watchdog would have no way to tell "still measuring" from "wedged".
+      // passes `reporters: [{}]`) and otherwise emits zero progress signals for its entire duration.
+      // The withCoverageHeartbeat wrap above now covers the IN-PROGRESS gap; this remains the
+      // authoritative "file N of M actually done" signal once measurement settles. Guarded like
+      // every heartbeat send() above -- found via this fix's own tests: previously, a torn-down
+      // IPC channel here threw uncaught, which handleRun's caller turns into ANOTHER send() (the
+      // error-result path) that would also throw on the same dead channel, surfacing as an
+      // unhandled rejection instead of the worker just quietly losing this one signal.
       coverageFilesDone += 1;
-      send({
-        type: "phase-progress",
-        runId,
-        phase: "coverage",
-        completed: coverageFilesDone,
-        total: targetTestFiles.length,
-      });
+      try {
+        send({
+          type: "phase-progress",
+          runId,
+          phase: "coverage",
+          completed: coverageFilesDone,
+          total: targetTestFiles.length,
+        });
+      } catch {
+        // never let a progress-signal failure crash the worker
+      }
       return m;
     },
     baseline,
