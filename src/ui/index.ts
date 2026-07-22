@@ -347,17 +347,29 @@ const UI_HTML = `<!doctype html>
      disclosure triangle that the other <details> blocks on this page get for free, so it's
      recreated explicitly here and rotated to match the [open] state. */
   .log-summary { display:flex; align-items:center; justify-content:space-between; }
-  .log-summary label { font-weight:normal; text-transform:none; letter-spacing:0; cursor:pointer; }
   .log-summary .chevron { display:inline-block; margin-right:6px; transition:transform .15s ease; }
+  .log-playpause { font:inherit; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted);
+    background:#21262d; border:1px solid var(--border); border-radius:4px; padding:2px 10px; cursor:pointer; }
+  .log-playpause:hover { color:var(--text); }
   details[open] > .log-summary .chevron { transform:rotate(90deg); }
   .log-marker { color:var(--muted); text-align:center; margin:6px 0; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
 </style>
 </head>
 <body>
 <header><span class="dot" id="live"></span><h1>test-mcp</h1><span id="clock" style="color:var(--muted);font-size:12px;"></span></header>
-<main id="app"><div class="empty">Connecting…</div></main>
+<main id="app"><div id="view-top"><div class="empty">Connecting…</div></div><div id="view-log-slot"></div><div id="view-bottom"></div></main>
 <script>
-const app = document.getElementById("app");
+// #app itself is never assigned .innerHTML -- only its two children view-top/view-bottom are, on
+// every render. view-log-slot sits between them, untouched by either, so it stays a stable,
+// never-rebuilt ancestor of the persistent log element (see ensureLogEl/placeLogEl below). That's
+// what actually keeps it attached to the live document across every SSE-driven re-render, rather
+// than merely being detached and immediately reattached into a freshly-recreated placeholder --
+// the latter (an earlier version of this fix) still cleared the user's text selection on every
+// render, confirmed via Playwright: detach-then-reattach in the same tick does NOT reliably
+// preserve a live Selection/Range, even when it's literally the same DOM node object.
+const viewTop = document.getElementById("view-top");
+const viewLogSlot = document.getElementById("view-log-slot");
+const viewBottom = document.getElementById("view-bottom");
 const live = document.getElementById("live");
 let snapshot = { projects: [], serverTime: null };
 
@@ -424,9 +436,10 @@ function renderList() {
   viewingLiveRunId = null;
   document.getElementById("clock").textContent = fmtTime(snapshot.serverTime);
   const ps = snapshot.projects || [];
-  app.innerHTML = ps.length
+  viewTop.innerHTML = ps.length
     ? '<div class="grid">' + ps.map(card).join("") + '</div>'
     : '<div class="empty">No projects registered.</div>';
+  viewBottom.innerHTML = "";
 }
 
 // Sourced from the SSE-pushed snapshot (like statusBanner) rather than a one-shot fetch, so the
@@ -451,16 +464,29 @@ function liveTestsBlock(live, root, isOpen) {
   return '<details id="live-tests-details"' + (isOpen ? " open" : "") + '><summary>live tests</summary>' + rows + truncNote + '</details>';
 }
 
-// Console log panel with a "follow" toggle (Story 8.7). Module-level UI state (not persisted --
-// resets on reload), matching the existing no-framework/inline-JS simplicity of this page.
-// logOpen/liveTestsOpen track each <details> element's open/closed state across re-renders --
-// renderProject() replaces the whole DOM on every SSE push (can fire on every test event), so
-// without this a user's manual collapse would silently re-expand on the very next push.
-let followLog = true;
+// Console log panel state. Module-level, not persisted -- resets on reload, matching the existing
+// no-framework/inline-JS simplicity of this page. logOpen/liveTestsOpen track each <details>
+// element's open/closed state across navigation. logPlaying replaces the old "follow" checkbox:
+// while playing, new lines append immediately and the view auto-scrolls to the bottom; paused
+// defers DOM updates entirely (queued in pendingLogEntries, nothing is lost from the transcript)
+// so an in-progress text selection/copy is never disturbed by incoming lines -- flushed on resume.
+let logPlaying = true;
 let logOpen = true;
 let liveTestsOpen = true;
 let logEventSource = null;
 let logStreamProjectId = null;
+let pendingLogEntries = [];
+
+// The <details id="log-details"> DOM node itself persists across re-renders of the SAME project
+// (unlike everything else on this page, which renderProject()/renderLiveRun() rebuild from a
+// fresh HTML string on every SSE push). Destroying and recreating it on every test-progress event
+// was clearing the user's text selection mid-copy and defeating the browser's natural "stay
+// scrolled where you are" behavior (which only works if the scrollable element is never removed).
+// Reused across renderProject() and renderLiveRun() for the same project (both show the same
+// transcript); released via closeLogStream() when navigating to a different project or away
+// entirely -- see ensureLogEl() below.
+let logEl = null;
+let logElProjectId = null;
 
 // The console log transcript itself, kept independent of whichever run happens to be in flight --
 // the backend's own live ring is scoped to a single run and gets wiped the instant the next one
@@ -478,18 +504,23 @@ function resetLogBufferForProject(pid) {
   if (logBufferProjectId === pid) return;
   logBufferProjectId = pid;
   logBuffer = [];
+  pendingLogEntries = [];
 }
 
-// Appends to the transcript and returns just the newly-added entries, so an incremental SSE push
-// can paint only the delta (cheap, and leaves scroll position alone) while a full DOM rebuild
-// (fresh, empty #log-pre) can still repaint the whole thing from logBuffer. isNewRun inserts a
-// separator instead of the old behavior of wiping the panel back to empty -- but only when there's
-// prior content to separate from, so the very first run shown in a fresh buffer doesn't open with
-// a spurious "new run" banner.
+// Appends to the transcript and returns just the newly-added entries, so an incremental push can
+// append only the delta onto the persistent #log-pre (or queue it while paused -- see
+// setLogPlaying). isNewRun inserts a separator instead of wiping the panel back to empty -- but
+// only when there's prior content to separate from, so the very first run shown in a fresh buffer
+// doesn't open with a spurious "new run" banner.
 function appendToLogBuffer(lines, isNewRun) {
   const added = [];
   if (isNewRun && logBuffer.length) {
-    const marker = { marker: true, text: "New test run started " + new Date().toLocaleString() };
+    // The real server-provided timestamp of the first line in this batch, not client "now" --
+    // "now" used to be a reasonable enough approximation when every batch rendered immediately,
+    // but now that a paused stream can defer rendering indefinitely (see setLogPlaying), "now"
+    // could lag the actual run start by however long the user stayed paused.
+    const at = lines[0] && lines[0].at ? fmtTime(lines[0].at) : new Date().toLocaleTimeString();
+    const marker = { marker: true, text: "New test run started " + at };
     logBuffer.push(marker);
     added.push(marker);
   }
@@ -502,10 +533,57 @@ function appendToLogBuffer(lines, isNewRun) {
   return added;
 }
 
+// A minimal ANSI SGR (foreground color) escape-sequence parser -- not a full terminal emulator,
+// just enough to respect real console-log colors (chalk, Vitest's own coloring when forced, etc.)
+// instead of force-coloring every stderr line red regardless of its actual content. Text with no
+// escape codes at all (the common case once color-detecting libraries see a non-TTY pipe) renders
+// in the panel's default (light) color rather than red. Any well-formed CSI sequence that ISN'T
+// SGR (cursor movement, line-clear, show/hide -- common in progress-spinner output, e.g. ESC[2K
+// or ESC[?25l) is consumed and ignored without touching the color state; only unrecognized SGR
+// parameters (256-color, truecolor, bold/underline, background colors) are the ones silently
+// dropped with no visual signal.
+const ANSI_ESC_CHAR = String.fromCharCode(27);
+// A CSI sequence is ESC "[" then parameter bytes (0x30-0x3F: digits, semicolon/colon/lt/eq/gt/?) then exactly one
+// final byte (0x40-0x7E). Matching the REAL terminator (whatever it is) -- not just searching for
+// the next literal "m" anywhere in the string -- matters: a non-SGR sequence never contains "m" at
+// all, so blindly searching for one would swallow everything up to some unrelated "m" inside later
+// plain text (e.g. the word "message") as if it were color parameters, or drop the rest of the
+// line entirely if no later "m" happened to exist.
+// Every backslash in this regex is doubled in the source below so it survives being embedded
+// inside the outer UI_HTML template literal -- a single backslash here would be consumed as an
+// unrecognized, silently-dropped escape by the OUTER string's own parsing before the browser ever
+// sees it (the same reason a literal newline elsewhere in this file is written doubled too).
+const ANSI_CSI_RE = /^\\[([0-9:;<=>?]*)([\\x40-\\x7e])/;
+const ANSI_FG = {
+  30: "#6e7681", 31: "#f85149", 32: "#3fb950", 33: "#d29922", 34: "#58a6ff", 35: "#bc8cff", 36: "#39c5cf", 37: "#c9d1d9",
+  90: "#6e7681", 91: "#ff7b72", 92: "#56d364", 93: "#e3b341", 94: "#79c0ff", 95: "#d2a8ff", 96: "#56d4dd", 97: "#f0f6fc",
+};
+function ansiToHtml(text) {
+  const wrap = (s, color) => (s ? (color ? '<span style="color:' + color + '">' + esc(s) + '</span>' : esc(s)) : "");
+  let out = "";
+  let color = null;
+  let i = 0;
+  while (i < text.length) {
+    const start = text.indexOf(ANSI_ESC_CHAR, i);
+    if (start === -1) { out += wrap(text.slice(i), color); break; }
+    out += wrap(text.slice(i, start), color);
+    const match = ANSI_CSI_RE.exec(text.slice(start + 1));
+    if (!match) { i = start + 1; continue; } // stray ESC not followed by a CSI sequence -- drop just that byte
+    if (match[2] === "m") {
+      for (const raw of match[1].split(";")) {
+        const p = raw === "" ? 0 : Number(raw);
+        if (p === 0 || p === 39) color = null;
+        else if (ANSI_FG[p] !== undefined) color = ANSI_FG[p];
+      }
+    }
+    // Any other terminator (K, G, l, h, A, B, ...) -- consumed, color state left untouched.
+    i = start + 1 + match[0].length;
+  }
+  return out;
+}
+
 function logEntryHtml(l) {
-  return l.marker
-    ? '<div class="log-marker">— ' + esc(l.text) + ' —</div>'
-    : '<span class="' + (l.stream === "stderr" ? "fail" : "") + '">' + esc(l.text) + '</span>';
+  return l.marker ? '<div class="log-marker">— ' + esc(l.text) + ' —</div>' : ansiToHtml(l.text);
 }
 // The run-detail page's own live view re-renders on every SSE push while it's open (a completed
 // run's detail is otherwise immutable, see the SSE handler below) -- this is the runId that's
@@ -515,11 +593,9 @@ let viewingLiveRunId = null;
 const LOG_HEIGHT_KEY = "test-mcp:log-height-px";
 let logHeightObserver = null;
 
-// #log-pre is a brand-new DOM node on every re-render (renderProject/renderRun fully replace
-// app.innerHTML), so the user's resize has to be persisted out-of-band and reapplied each time --
-// there is no existing element to have "kept" the height across a rebuild.
+// Applied once, when #log-pre is first created (it now persists -- see ensureLogEl -- so this
+// never needs to be re-applied to a "fresh" node on every render the way it used to).
 function applyStoredLogHeight(pre) {
-  if (!pre) return;
   const saved = Number(localStorage.getItem(LOG_HEIGHT_KEY));
   if (saved > 0) pre.style.height = saved + "px";
   if (logHeightObserver) logHeightObserver.disconnect();
@@ -529,80 +605,119 @@ function applyStoredLogHeight(pre) {
   logHeightObserver.observe(pre);
 }
 
-// Same DOM-rebuild problem as the height above: the scroll position lives on a node that's about
-// to be destroyed, so callers must capture it (via currentLogScrollTop) BEFORE the rebuild and
-// hand it back in here once the fresh node is repopulated.
-function currentLogScrollTop() {
-  const pre = document.getElementById("log-pre");
-  return pre ? pre.scrollTop : null;
-}
-
+// Full teardown: closes the live stream and releases the persistent log element -- used when
+// navigating to a different project, to the project list, or to a completed (non-live) run detail
+// page, none of which show this project's log. NOT used for ordinary re-renders of the SAME
+// project's view (that's the entire point of ensureLogEl persisting the element instead).
 function closeLogStream() {
   if (logEventSource) { logEventSource.close(); logEventSource = null; }
   logStreamProjectId = null;
+  if (logHeightObserver) { logHeightObserver.disconnect(); logHeightObserver = null; }
+  logEl = null;
+  logElProjectId = null;
+  viewLogSlot.innerHTML = ""; // release whatever was actually in the DOM, not just our own refs
 }
 
-// Full repaint from logBuffer -- used whenever #log-pre is a brand-new, empty DOM node (every
-// renderProject()/renderLiveRun() rebuild replaces app.innerHTML wholesale). Following jumps to
-// the bottom on every repaint. Not following must NOT reset to 0 (the default for a freshly-built
-// node) -- that made the follow-off toggle pointless, since the very next SSE-driven re-render
-// silently snapped the view back to the top anyway.
-function paintLogPreFull(restoreScrollTop) {
-  const pre = document.getElementById("log-pre");
-  if (!pre) return;
-  pre.innerHTML = logBuffer.map(logEntryHtml).join("\\n");
-  if (followLog) pre.scrollTop = pre.scrollHeight;
-  else if (restoreScrollTop != null) pre.scrollTop = restoreScrollTop;
-}
-
-// Cheap incremental append onto the SAME (already-painted) DOM node for a live SSE push that
-// arrives without any surrounding re-render -- appending naturally leaves an existing scroll
-// position alone, so (unlike the full repaint above) there is nothing to restore here.
+// Appends new entries onto the persistent #log-pre. Always scrolls to the bottom when called --
+// callers only ever call this while actively playing, or once (from setLogPlaying) to catch up
+// after a pause, both of which want to land at the bottom; a paused stream never calls this at all
+// (entries are queued in pendingLogEntries instead), so there is no "should I scroll?" branch here.
 function appendLogPreIncremental(added) {
   if (!added.length) return;
   const pre = document.getElementById("log-pre");
   if (!pre) return;
   const html = added.map(logEntryHtml).join("\\n");
-  pre.innerHTML = pre.innerHTML ? pre.innerHTML + "\\n" + html : html;
-  if (followLog) pre.scrollTop = pre.scrollHeight;
+  pre.insertAdjacentHTML("beforeend", (pre.childNodes.length ? "\\n" : "") + html);
+  pre.scrollTop = pre.scrollHeight;
 }
 
-// The transcript persists across runs (only a manual collapse of the <details> hides it), so the
-// fresh DOM node created on every re-render just gets repainted from whatever logBuffer already
-// holds -- no re-fetch needed. The server's /log/events handler sends the project's full current
-// ring as the very first message on every NEW connection (see its own "seed on connect" comment),
-// which is exactly the seed this needs the FIRST time a project's panel is opened in this tab; a
-// separate one-shot GET here would race that first SSE message and double up the same lines
-// (found via smoke-testing: the panel opened with every line duplicated once, plus a spurious
-// "new run" marker inserted between the two copies since the second copy saw a non-empty buffer).
-function connectLog(pid, restoreScrollTop) {
-  resetLogBufferForProject(pid);
-  paintLogPreFull(restoreScrollTop);
+function setLogPlaying(playing) {
+  logPlaying = playing;
+  if (playing && pendingLogEntries.length) {
+    appendLogPreIncremental(pendingLogEntries);
+    pendingLogEntries = [];
+  }
+}
+
+// Persistent EventSource per project -- opened once and reused across renderProject()/
+// renderLiveRun() re-renders and view switches for the SAME project; only reconnected when the
+// project actually changes. New lines append directly onto the persistent #log-pre (or queue in
+// pendingLogEntries while paused) -- never a full repaint of the whole transcript.
+function connectLogStream(pid) {
   if (logStreamProjectId === pid) return;
-  closeLogStream();
+  if (logEventSource) { logEventSource.close(); logEventSource = null; }
   logStreamProjectId = pid;
   logEventSource = new EventSource("/ui/api/projects/" + encodeURIComponent(pid) + "/log/events");
   logEventSource.onmessage = (e) => {
     try {
       const payload = JSON.parse(e.data);
-      appendLogPreIncremental(appendToLogBuffer(payload.log || [], !!payload.replace));
+      const added = appendToLogBuffer(payload.log || [], !!payload.replace);
+      if (logPlaying) {
+        appendLogPreIncremental(added);
+      } else {
+        pendingLogEntries.push(...added);
+        // Capped AFTER the push (not inside appendToLogBuffer, which returns before the caller
+        // -- here -- actually queues anything) so a paused stream can't run over by one batch.
+        if (pendingLogEntries.length > MAX_BUFFERED_LOG_LINES) {
+          pendingLogEntries.splice(0, pendingLogEntries.length - MAX_BUFFERED_LOG_LINES);
+        }
+      }
     } catch (_) { /* ignore */ }
   };
 }
 
-function logBlock() {
-  return '<details id="log-details"' + (logOpen ? " open" : "") + '><summary class="log-summary"><span><span class="chevron">▸</span>console log</span>'
-    + '<label><input type="checkbox" id="follow-log" ' + (followLog ? "checked" : "") + '> follow</label></summary>'
-    + '<pre id="log-pre"></pre></details>';
+// Builds (or reuses, for the same project) the persistent <details id="log-details"> node --
+// listeners and the height observer are wired exactly once, at creation, since re-wiring them on
+// every render would stack up duplicate listeners on a node that's no longer recreated each time.
+function ensureLogEl(pid) {
+  if (logEl && logElProjectId === pid) return logEl;
+  resetLogBufferForProject(pid);
+  const details = document.createElement("details");
+  details.id = "log-details";
+  details.open = logOpen;
+  details.addEventListener("toggle", () => { logOpen = details.open; });
+  const summary = document.createElement("summary");
+  summary.className = "log-summary";
+  summary.innerHTML = '<span><span class="chevron">▸</span>console log</span>'
+    + '<button type="button" id="log-playpause" class="log-playpause"'
+    + ' aria-pressed="' + (!logPlaying) + '" aria-label="' + (logPlaying ? "Pause" : "Resume") + ' console log updates">'
+    + (logPlaying ? "⏸ pause" : "▶ play") + '</button>';
+  const playBtn = summary.querySelector("#log-playpause");
+  playBtn.addEventListener("click", (e) => {
+    e.preventDefault(); // clicking inside <summary> would otherwise also toggle open/closed
+    e.stopPropagation();
+    setLogPlaying(!logPlaying);
+    playBtn.textContent = logPlaying ? "⏸ pause" : "▶ play";
+    // aria-pressed reflects "pause" as the toggled-on state (paused = pressed), same convention
+    // as a mute button -- paired with aria-label so a screen reader also hears what clicking it
+    // will do next, since (like the visible label) that's the opposite of the current state.
+    playBtn.setAttribute("aria-pressed", String(!logPlaying));
+    playBtn.setAttribute("aria-label", (logPlaying ? "Pause" : "Resume") + " console log updates");
+  });
+  const pre = document.createElement("pre");
+  pre.id = "log-pre";
+  pre.innerHTML = logBuffer.map(logEntryHtml).join("\\n");
+  details.appendChild(summary);
+  details.appendChild(pre);
+  applyStoredLogHeight(pre);
+  if (logPlaying) pre.scrollTop = pre.scrollHeight;
+  logEl = details;
+  logElProjectId = pid;
+  connectLogStream(pid);
+  return details;
 }
 
-function wireLogPanel(pid, restoreScrollTop) {
-  connectLog(pid, restoreScrollTop);
-  applyStoredLogHeight(document.getElementById("log-pre"));
-  const checkbox = document.getElementById("follow-log");
-  if (checkbox) checkbox.addEventListener("change", (e) => { followLog = e.target.checked; });
-  const details = document.getElementById("log-details");
-  if (details) details.addEventListener("toggle", () => { logOpen = details.open; });
+// Puts this project's persistent log element into view-log-slot -- but only touches the slot's DOM
+// at all when it doesn't already hold this exact node. Re-render after re-render of the SAME
+// project, ensureLogEl() returns the same object and this becomes a complete no-op: view-log-slot
+// itself is never touched, which is the whole point (see the comment on view-log-slot's
+// declaration) -- an in-progress text selection or a manual scroll inside it survives untouched.
+function placeLogEl(pid) {
+  const el = ensureLogEl(pid);
+  if (viewLogSlot.firstChild !== el) {
+    viewLogSlot.innerHTML = "";
+    viewLogSlot.appendChild(el);
+  }
 }
 
 function wireLiveTestsPanel() {
@@ -614,21 +729,18 @@ function renderProject(pid) {
   viewingLiveRunId = null;
   const p = (snapshot.projects || []).find((x) => x.projectId === pid);
   const head = '<a class="back" href="#/">← projects</a><h2 class="mono">' + esc(pid) + '</h2>' + projectLine(p && p.path);
-  if (!p) { closeLogStream(); app.innerHTML = head + '<div class="empty">Loading…</div>'; return; }
+  if (!p) { closeLogStream(); viewTop.innerHTML = head + '<div class="empty">Loading…</div>'; viewBottom.innerHTML = ""; return; }
   const runs = p.runs || [];
   const banner = statusBanner(pid);
   const running = p.run && p.run.state === "running";
   // The log panel persists once the project has ever run -- a run completing (or the next one
-  // starting) no longer hides it; only manually collapsing the <details> does. Live tests stay
-  // running-only (a per-test status list is much less meaningful once nothing is in flight) and
-  // move to the bottom of the page, collapsible (both panels persist their open/closed state
-  // across the frequent SSE-driven re-renders via wireLogPanel/wireLiveTestsPanel below).
+  // starting) no longer hides it; only manually collapsing the <details> does. It lives in
+  // view-log-slot (see placeLogEl), a sibling of view-top/view-bottom that THIS function never
+  // assigns .innerHTML to -- that's what makes an in-progress text selection/copy and scroll
+  // position survive this function's own frequent SSE-driven rebuilds of everything around it.
+  // The live-tests list moved to the run's own live-detail page (renderLiveRun) -- it's about "this
+  // one running job," not the project's history.
   const everRan = running || runs.length > 0;
-  const logSection = everRan ? logBlock() : "";
-  const liveTestsSection = running ? liveTestsBlock(p.live, p.path, liveTestsOpen) : "";
-  // Capture the outgoing #log-pre's scroll position (if any) before app.innerHTML destroys it --
-  // paintLogPreFull needs it to avoid snapping a follow-off reader back to the top on this rebuild.
-  const prevLogScrollTop = followLog ? null : currentLogScrollTop();
   // Running run gets its own row at the top of the history table (newest-first) so it's clickable
   // straight to its live detail view, even though it has no RunRecord yet (it's still in flight).
   const liveRow = (running && p.live && p.live.runId)
@@ -640,12 +752,10 @@ function renderProject(pid) {
       + '<td>–</td>'
       + '<td>–</td></tr>'
     : "";
+  viewTop.innerHTML = head + banner;
+  if (everRan) placeLogEl(pid); else closeLogStream();
   if (!runs.length && !liveRow) {
-    app.innerHTML = head + banner + logSection
-      + (running ? "" : '<div class="empty">No runs yet — trigger one via run_tests.</div>')
-      + liveTestsSection;
-    if (everRan) wireLogPanel(pid, prevLogScrollTop); else closeLogStream();
-    if (running) wireLiveTestsPanel();
+    viewBottom.innerHTML = running ? "" : '<div class="empty">No runs yet — trigger one via run_tests.</div>';
     return;
   }
   const rows = runs.map((r) =>
@@ -656,12 +766,9 @@ function renderProject(pid) {
     + '<td>' + (r.total != null ? passTotal(r) : "–") + '</td>'
     + '<td>' + (r.coverageLines != null ? (Math.round(r.coverageLines * 10) / 10) + '%' : "–") + '</td>'
     + '<td>' + fmtDur(r.durationMs) + '</td></tr>').join("");
-  app.innerHTML = head + banner + logSection
-    + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / executed</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + liveRow + rows + '</tbody></table>'
-    + liveTestsSection;
-  if (everRan) wireLogPanel(pid, prevLogScrollTop); else closeLogStream();
-  if (running) wireLiveTestsPanel();
-  app.querySelectorAll("tr.row").forEach((el) => {
+  viewBottom.innerHTML =
+    '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / executed</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + liveRow + rows + '</tbody></table>';
+  viewBottom.querySelectorAll("tr.row").forEach((el) => {
     el.addEventListener("click", () => go("/project/" + encodeURIComponent(pid) + "/run/" + encodeURIComponent(el.getAttribute("data-run"))));
   });
 }
@@ -670,23 +777,21 @@ function renderProject(pid) {
 // log is just as useful (arguably more so) scoped to its own run -- reachable by clicking the
 // "running" row renderProject() now prepends to the history table. That row's runId matches
 // live.runId exactly while the run is in flight, which is how this is told apart from a normal
-// completed-run lookup below.
+// completed-run lookup below. The live per-test status list lives here too -- it's about this one
+// running job, not the project's history (which is what renderProject shows).
 function renderLiveRun(pid, runId, proj, back) {
-  // Capture the outgoing #log-pre's scroll position BEFORE app.innerHTML destroys it -- reading
-  // it after the rebuild (as an earlier version of this function did) always sees the fresh,
-  // empty node's default scrollTop of 0, silently defeating the follow-off scroll preservation.
-  const prevLogScrollTop = followLog ? null : currentLogScrollTop();
   const r = proj.run || {};
   const grid = '<div class="detail-grid">'
     + kv("status", badge("running"))
     + kv("pass / executed", r.total != null ? passTotal(r) : "–")
     + kv("duration", "running…") + '</div>';
-  app.innerHTML = back
+  viewTop.innerHTML = back
     + '<h2 class="mono">run ' + esc(String(runId).slice(0, 8)) + '…</h2>'
     + '<div class="ts">' + fmtTime(r.updatedAt) + ' · in progress</div>'
-    + grid
-    + logBlock();
-  wireLogPanel(pid, prevLogScrollTop);
+    + grid;
+  placeLogEl(pid);
+  viewBottom.innerHTML = liveTestsBlock(proj.live, proj.path, liveTestsOpen);
+  wireLiveTestsPanel();
 }
 
 async function renderRun(pid, runId) {
@@ -697,10 +802,11 @@ async function renderRun(pid, runId) {
   viewingLiveRunId = isLive ? runId : null;
   if (isLive) { renderLiveRun(pid, runId, proj, back); return; }
   closeLogStream(); // leaving any project's running view -- never leak an open follow connection
-  app.innerHTML = back + '<div class="empty">Loading…</div>';
+  viewBottom.innerHTML = ""; // this view puts everything in viewTop; drop any other view's leftovers
+  viewTop.innerHTML = back + '<div class="empty">Loading…</div>';
   let rec;
   try { rec = await getJSON("/ui/api/projects/" + encodeURIComponent(pid) + "/runs/" + encodeURIComponent(runId)); }
-  catch (e) { app.innerHTML = back + '<div class="empty">Run not found (evicted from in-memory history?).</div>'; return; }
+  catch (e) { viewTop.innerHTML = back + '<div class="empty">Run not found (evicted from in-memory history?).</div>'; return; }
   const res = rec.result || {};
   const sel = res.selection || {};
   const grid = '<div class="detail-grid">'
@@ -789,7 +895,7 @@ async function renderRun(pid, runId) {
   // Failures render right after the status grid — the thing you came to look at — ahead of
   // confidence/coverage. Selection and Tests are collapsed by default (both can be long, and
   // are lower-signal than failures/confidence/coverage at a glance).
-  app.innerHTML = back
+  viewTop.innerHTML = back
     + '<h2 class="mono">run ' + esc(String(runId).slice(0, 8)) + '…</h2>'
     + '<div class="ts">' + fmtTime(rec.startedAt) + ' · ' + esc(sel.reason || "") + '</div>'
     + grid
