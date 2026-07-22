@@ -18,6 +18,9 @@ export interface UiDeps {
  *  than the orchestrator's own bounds -- this rides the SSE push on every test event across
  *  every running project, unlike the full-fidelity /log routes below (AD-21). */
 interface LiveView {
+  /** The in-progress run's id -- lets the UI link a "running" history row straight to this run's
+   *  live detail view instead of only ever linking to completed RunRecords. */
+  runId: string;
   tests: Array<{ file: string; name: string; status: string }>;
   testsTruncated: boolean;
   testsShown: number;
@@ -87,6 +90,7 @@ export async function uiSnapshot(deps: UiDeps): Promise<{ serverTime: string; pr
       // the dedicated /log routes below, or by polling get_test_status over MCP.
       const live = run.state === "running" ? deps.orchestrator?.getLiveRun(p.projectId) : undefined;
       const liveView: LiveView | undefined = live && {
+        runId: live.runId,
         tests: live.tests.slice(-MAX_SNAPSHOT_TESTS),
         testsTruncated: live.testsTruncated,
         testsShown: Math.min(live.tests.length, MAX_SNAPSHOT_TESTS),
@@ -234,10 +238,16 @@ export async function handleUiRequest(
       const current = deps.orchestrator?.getLiveRun(projectId);
       const currentLog = current?.log ?? [];
       const isNewRun = current?.runId !== lastSeenRunId;
-      lastSeenRunId = current?.runId;
       const idx = !isNewRun && lastSeenLine ? currentLog.indexOf(lastSeenLine) : -1;
       const newLines = idx === -1 ? currentLog : currentLog.slice(idx + 1);
+      // A run can start (replacing the live state with a fresh, empty log) well before it writes
+      // its first line -- if THIS call finds isNewRun but nothing to send yet, committing
+      // lastSeenRunId here would permanently lose the transition: the next call (once real lines
+      // exist) would compare against a runId that's already been updated and see isNewRun=false,
+      // silently downgrading what should be a run-boundary push to a plain append. Only commit
+      // once we've actually decided to send something.
       if (!newLines.length) return;
+      lastSeenRunId = current?.runId;
       lastSeenLine = newLines[newLines.length - 1];
       try {
         res.write(`data: ${JSON.stringify({ log: newLines, replace: isNewRun })}\n\n`);
@@ -330,9 +340,17 @@ const UI_HTML = `<!doctype html>
   .fail-item { background:var(--card); border:1px solid var(--border); border-left:3px solid var(--fail); border-radius:6px; padding:10px 12px; margin:8px 0; }
   .fail-item .name { font-weight:600; } .fail-item .loc { color:var(--muted); font-size:12px; margin-top:2px; }
   pre { background:#0d1117; border:1px solid var(--border); border-radius:6px; padding:10px; overflow-x:auto; font-size:12px; margin:8px 0 0; }
-  #log-pre { max-height:640px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; } /* doubled from 320px on request */
+  /* Fixed (not max-) height so content can't push the panel taller as lines arrive -- height
+     itself is user-resizable (native CSS resize) and persisted to localStorage in JS. */
+  #log-pre { height:640px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; resize:vertical; min-height:120px; }
+  /* display:flex (needed to lay out the label on the right) drops the browser's own <summary>
+     disclosure triangle that the other <details> blocks on this page get for free, so it's
+     recreated explicitly here and rotated to match the [open] state. */
   .log-summary { display:flex; align-items:center; justify-content:space-between; }
   .log-summary label { font-weight:normal; text-transform:none; letter-spacing:0; cursor:pointer; }
+  .log-summary .chevron { display:inline-block; margin-right:6px; transition:transform .15s ease; }
+  details[open] > .log-summary .chevron { transform:rotate(90deg); }
+  .log-marker { color:var(--muted); text-align:center; margin:6px 0; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
 </style>
 </head>
 <body>
@@ -364,6 +382,8 @@ const projectLine = (root) => root ? '<div class="path">Project: ' + esc(root) +
 // is green, never red) — replaces a separate pass/fail/total trio that showed red even at 0 fails.
 // The denominator is EXECUTED tests (passed+failed) so skips can't dilute the ratio; a skip count
 // is called out separately alongside it instead of being folded into "total".
+const kv = (k, v) => '<div class="kv"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
+
 function passTotal(r) {
   if (r.total == null) return "";
   const executed = (r.passed || 0) + (r.failed || 0);
@@ -401,6 +421,7 @@ function statusBanner(pid) {
 
 function renderList() {
   closeLogStream(); // leaving any project's running view -- never leak an open follow connection
+  viewingLiveRunId = null;
   document.getElementById("clock").textContent = fmtTime(snapshot.serverTime);
   const ps = snapshot.projects || [];
   app.innerHTML = ps.length
@@ -441,30 +462,122 @@ let liveTestsOpen = true;
 let logEventSource = null;
 let logStreamProjectId = null;
 
+// The console log transcript itself, kept independent of whichever run happens to be in flight --
+// the backend's own live ring is scoped to a single run and gets wiped the instant the next one
+// starts, but per request this panel should read as one continuous transcript across runs (with a
+// marker line at each boundary) that only a manual collapse of the <details> hides, never a run
+// completing/starting. Per-project (not per-run); cleared only when the user views a DIFFERENT
+// project. Not persisted across a real page reload, and not a substitute for run history -- see
+// the /runs/:runId route for what's actually durable (no console output there, see its own route
+// comment).
+let logBuffer = [];
+let logBufferProjectId = null;
+const MAX_BUFFERED_LOG_LINES = 2000;
+
+function resetLogBufferForProject(pid) {
+  if (logBufferProjectId === pid) return;
+  logBufferProjectId = pid;
+  logBuffer = [];
+}
+
+// Appends to the transcript and returns just the newly-added entries, so an incremental SSE push
+// can paint only the delta (cheap, and leaves scroll position alone) while a full DOM rebuild
+// (fresh, empty #log-pre) can still repaint the whole thing from logBuffer. isNewRun inserts a
+// separator instead of the old behavior of wiping the panel back to empty -- but only when there's
+// prior content to separate from, so the very first run shown in a fresh buffer doesn't open with
+// a spurious "new run" banner.
+function appendToLogBuffer(lines, isNewRun) {
+  const added = [];
+  if (isNewRun && logBuffer.length) {
+    const marker = { marker: true, text: "New test run started " + new Date().toLocaleString() };
+    logBuffer.push(marker);
+    added.push(marker);
+  }
+  for (const l of lines) {
+    const entry = { marker: false, stream: l.stream, text: l.text };
+    logBuffer.push(entry);
+    added.push(entry);
+  }
+  if (logBuffer.length > MAX_BUFFERED_LOG_LINES) logBuffer.splice(0, logBuffer.length - MAX_BUFFERED_LOG_LINES);
+  return added;
+}
+
+function logEntryHtml(l) {
+  return l.marker
+    ? '<div class="log-marker">— ' + esc(l.text) + ' —</div>'
+    : '<span class="' + (l.stream === "stderr" ? "fail" : "") + '">' + esc(l.text) + '</span>';
+}
+// The run-detail page's own live view re-renders on every SSE push while it's open (a completed
+// run's detail is otherwise immutable, see the SSE handler below) -- this is the runId that's
+// currently allowed to keep doing that, cleared once the run finishes or the user navigates away.
+let viewingLiveRunId = null;
+
+const LOG_HEIGHT_KEY = "test-mcp:log-height-px";
+let logHeightObserver = null;
+
+// #log-pre is a brand-new DOM node on every re-render (renderProject/renderRun fully replace
+// app.innerHTML), so the user's resize has to be persisted out-of-band and reapplied each time --
+// there is no existing element to have "kept" the height across a rebuild.
+function applyStoredLogHeight(pre) {
+  if (!pre) return;
+  const saved = Number(localStorage.getItem(LOG_HEIGHT_KEY));
+  if (saved > 0) pre.style.height = saved + "px";
+  if (logHeightObserver) logHeightObserver.disconnect();
+  logHeightObserver = new ResizeObserver(() => {
+    localStorage.setItem(LOG_HEIGHT_KEY, String(Math.round(pre.getBoundingClientRect().height)));
+  });
+  logHeightObserver.observe(pre);
+}
+
+// Same DOM-rebuild problem as the height above: the scroll position lives on a node that's about
+// to be destroyed, so callers must capture it (via currentLogScrollTop) BEFORE the rebuild and
+// hand it back in here once the fresh node is repopulated.
+function currentLogScrollTop() {
+  const pre = document.getElementById("log-pre");
+  return pre ? pre.scrollTop : null;
+}
+
 function closeLogStream() {
   if (logEventSource) { logEventSource.close(); logEventSource = null; }
   logStreamProjectId = null;
 }
 
-function renderLogLines(lines, replace) {
+// Full repaint from logBuffer -- used whenever #log-pre is a brand-new, empty DOM node (every
+// renderProject()/renderLiveRun() rebuild replaces app.innerHTML wholesale). Following jumps to
+// the bottom on every repaint. Not following must NOT reset to 0 (the default for a freshly-built
+// node) -- that made the follow-off toggle pointless, since the very next SSE-driven re-render
+// silently snapped the view back to the top anyway.
+function paintLogPreFull(restoreScrollTop) {
   const pre = document.getElementById("log-pre");
-  if (!pre || !lines.length) return;
-  const html = lines.map((l) => '<span class="' + (l.stream === "stderr" ? "fail" : "") + '">' + esc(l.text) + '</span>').join("\\n");
-  pre.innerHTML = replace ? html : (pre.innerHTML ? pre.innerHTML + "\\n" + html : html);
+  if (!pre) return;
+  pre.innerHTML = logBuffer.map(logEntryHtml).join("\\n");
+  if (followLog) pre.scrollTop = pre.scrollHeight;
+  else if (restoreScrollTop != null) pre.scrollTop = restoreScrollTop;
+}
+
+// Cheap incremental append onto the SAME (already-painted) DOM node for a live SSE push that
+// arrives without any surrounding re-render -- appending naturally leaves an existing scroll
+// position alone, so (unlike the full repaint above) there is nothing to restore here.
+function appendLogPreIncremental(added) {
+  if (!added.length) return;
+  const pre = document.getElementById("log-pre");
+  if (!pre) return;
+  const html = added.map(logEntryHtml).join("\\n");
+  pre.innerHTML = pre.innerHTML ? pre.innerHTML + "\\n" + html : html;
   if (followLog) pre.scrollTop = pre.scrollHeight;
 }
 
-// renderProject() rebuilds the whole DOM (including a fresh, empty log-pre element) on every SSE
-// snapshot push, which can fire on every single test event -- so this always re-seeds the fresh
-// node with the full current ring (replace=true, no duplication within one seed). It only opens
-// a NEW EventSource when the project actually changes; reusing the existing one avoids tearing
-// down and reconnecting on every re-render, which previously caused the same lines to be
-// re-seeded AND re-appended by the freshly (re)connected stream's own first push (found via
-// smoke-testing against a real project -- duplicate lines were visible in the log panel).
-function connectLog(pid) {
-  getJSON("/ui/api/projects/" + encodeURIComponent(pid) + "/log")
-    .then((data) => renderLogLines(data.log || [], true))
-    .catch(() => {});
+// The transcript persists across runs (only a manual collapse of the <details> hides it), so the
+// fresh DOM node created on every re-render just gets repainted from whatever logBuffer already
+// holds -- no re-fetch needed. The server's /log/events handler sends the project's full current
+// ring as the very first message on every NEW connection (see its own "seed on connect" comment),
+// which is exactly the seed this needs the FIRST time a project's panel is opened in this tab; a
+// separate one-shot GET here would race that first SSE message and double up the same lines
+// (found via smoke-testing: the panel opened with every line duplicated once, plus a spurious
+// "new run" marker inserted between the two copies since the second copy saw a non-empty buffer).
+function connectLog(pid, restoreScrollTop) {
+  resetLogBufferForProject(pid);
+  paintLogPreFull(restoreScrollTop);
   if (logStreamProjectId === pid) return;
   closeLogStream();
   logStreamProjectId = pid;
@@ -472,19 +585,20 @@ function connectLog(pid) {
   logEventSource.onmessage = (e) => {
     try {
       const payload = JSON.parse(e.data);
-      renderLogLines(payload.log || [], !!payload.replace);
+      appendLogPreIncremental(appendToLogBuffer(payload.log || [], !!payload.replace));
     } catch (_) { /* ignore */ }
   };
 }
 
 function logBlock() {
-  return '<details id="log-details"' + (logOpen ? " open" : "") + '><summary class="log-summary"><span>console log</span>'
+  return '<details id="log-details"' + (logOpen ? " open" : "") + '><summary class="log-summary"><span><span class="chevron">▸</span>console log</span>'
     + '<label><input type="checkbox" id="follow-log" ' + (followLog ? "checked" : "") + '> follow</label></summary>'
     + '<pre id="log-pre"></pre></details>';
 }
 
-function wireLogPanel(pid) {
-  connectLog(pid);
+function wireLogPanel(pid, restoreScrollTop) {
+  connectLog(pid, restoreScrollTop);
+  applyStoredLogHeight(document.getElementById("log-pre"));
   const checkbox = document.getElementById("follow-log");
   if (checkbox) checkbox.addEventListener("change", (e) => { followLog = e.target.checked; });
   const details = document.getElementById("log-details");
@@ -497,22 +611,41 @@ function wireLiveTestsPanel() {
 }
 
 function renderProject(pid) {
+  viewingLiveRunId = null;
   const p = (snapshot.projects || []).find((x) => x.projectId === pid);
   const head = '<a class="back" href="#/">← projects</a><h2 class="mono">' + esc(pid) + '</h2>' + projectLine(p && p.path);
   if (!p) { closeLogStream(); app.innerHTML = head + '<div class="empty">Loading…</div>'; return; }
   const runs = p.runs || [];
   const banner = statusBanner(pid);
   const running = p.run && p.run.state === "running";
-  // Console log stays up top (right after the banner) per this request; live tests move to the
-  // bottom of the page and are collapsible (both panels persist their open/closed state across
-  // the frequent SSE-driven re-renders via wireLogPanel/wireLiveTestsPanel below).
-  const logSection = running ? logBlock() : "";
+  // The log panel persists once the project has ever run -- a run completing (or the next one
+  // starting) no longer hides it; only manually collapsing the <details> does. Live tests stay
+  // running-only (a per-test status list is much less meaningful once nothing is in flight) and
+  // move to the bottom of the page, collapsible (both panels persist their open/closed state
+  // across the frequent SSE-driven re-renders via wireLogPanel/wireLiveTestsPanel below).
+  const everRan = running || runs.length > 0;
+  const logSection = everRan ? logBlock() : "";
   const liveTestsSection = running ? liveTestsBlock(p.live, p.path, liveTestsOpen) : "";
-  if (!runs.length) {
+  // Capture the outgoing #log-pre's scroll position (if any) before app.innerHTML destroys it --
+  // paintLogPreFull needs it to avoid snapping a follow-off reader back to the top on this rebuild.
+  const prevLogScrollTop = followLog ? null : currentLogScrollTop();
+  // Running run gets its own row at the top of the history table (newest-first) so it's clickable
+  // straight to its live detail view, even though it has no RunRecord yet (it's still in flight).
+  const liveRow = (running && p.live && p.live.runId)
+    ? '<tr class="row" data-run="' + esc(p.live.runId) + '">'
+      + '<td>' + fmtTime(p.run.updatedAt) + '</td>'
+      + '<td>' + badge("running") + '</td>'
+      + '<td></td>'
+      + '<td>' + (p.run.total != null ? passTotal(p.run) : "–") + '</td>'
+      + '<td>–</td>'
+      + '<td>–</td></tr>'
+    : "";
+  if (!runs.length && !liveRow) {
     app.innerHTML = head + banner + logSection
       + (running ? "" : '<div class="empty">No runs yet — trigger one via run_tests.</div>')
       + liveTestsSection;
-    if (running) { wireLogPanel(pid); wireLiveTestsPanel(); } else closeLogStream();
+    if (everRan) wireLogPanel(pid, prevLogScrollTop); else closeLogStream();
+    if (running) wireLiveTestsPanel();
     return;
   }
   const rows = runs.map((r) =>
@@ -524,26 +657,52 @@ function renderProject(pid) {
     + '<td>' + (r.coverageLines != null ? (Math.round(r.coverageLines * 10) / 10) + '%' : "–") + '</td>'
     + '<td>' + fmtDur(r.durationMs) + '</td></tr>').join("");
   app.innerHTML = head + banner + logSection
-    + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / executed</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + rows + '</tbody></table>'
+    + '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / executed</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + liveRow + rows + '</tbody></table>'
     + liveTestsSection;
-  if (running) { wireLogPanel(pid); wireLiveTestsPanel(); } else closeLogStream();
+  if (everRan) wireLogPanel(pid, prevLogScrollTop); else closeLogStream();
+  if (running) wireLiveTestsPanel();
   app.querySelectorAll("tr.row").forEach((el) => {
     el.addEventListener("click", () => go("/project/" + encodeURIComponent(pid) + "/run/" + encodeURIComponent(el.getAttribute("data-run"))));
   });
 }
 
+// The console log section was originally added only to the project page, but a running test's
+// log is just as useful (arguably more so) scoped to its own run -- reachable by clicking the
+// "running" row renderProject() now prepends to the history table. That row's runId matches
+// live.runId exactly while the run is in flight, which is how this is told apart from a normal
+// completed-run lookup below.
+function renderLiveRun(pid, runId, proj, back) {
+  // Capture the outgoing #log-pre's scroll position BEFORE app.innerHTML destroys it -- reading
+  // it after the rebuild (as an earlier version of this function did) always sees the fresh,
+  // empty node's default scrollTop of 0, silently defeating the follow-off scroll preservation.
+  const prevLogScrollTop = followLog ? null : currentLogScrollTop();
+  const r = proj.run || {};
+  const grid = '<div class="detail-grid">'
+    + kv("status", badge("running"))
+    + kv("pass / executed", r.total != null ? passTotal(r) : "–")
+    + kv("duration", "running…") + '</div>';
+  app.innerHTML = back
+    + '<h2 class="mono">run ' + esc(String(runId).slice(0, 8)) + '…</h2>'
+    + '<div class="ts">' + fmtTime(r.updatedAt) + ' · in progress</div>'
+    + grid
+    + logBlock();
+  wireLogPanel(pid, prevLogScrollTop);
+}
+
 async function renderRun(pid, runId) {
-  closeLogStream(); // leaving any project's running view -- never leak an open follow connection
   const proj = (snapshot.projects || []).find((x) => x.projectId === pid);
   const root = proj ? proj.path : "";
   const back = '<a class="back" href="#/project/' + encodeURIComponent(pid) + '">← runs</a>' + projectLine(root);
+  const isLive = !!(proj && proj.run && proj.run.state === "running" && proj.live && proj.live.runId === runId);
+  viewingLiveRunId = isLive ? runId : null;
+  if (isLive) { renderLiveRun(pid, runId, proj, back); return; }
+  closeLogStream(); // leaving any project's running view -- never leak an open follow connection
   app.innerHTML = back + '<div class="empty">Loading…</div>';
   let rec;
   try { rec = await getJSON("/ui/api/projects/" + encodeURIComponent(pid) + "/runs/" + encodeURIComponent(runId)); }
   catch (e) { app.innerHTML = back + '<div class="empty">Run not found (evicted from in-memory history?).</div>'; return; }
   const res = rec.result || {};
   const sel = res.selection || {};
-  const kv = (k, v) => '<div class="kv"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
   const grid = '<div class="detail-grid">'
     + kv("status", badge(rec.status))
     + kv("pass / executed", res.total != null ? passTotal(res) : "–")
@@ -657,8 +816,12 @@ function connect() {
     try { snapshot = JSON.parse(e.data); } catch (_) { return; }
     const p = routeParts();
     // Every route re-renders from the freshly-pushed snapshot except a run detail, which is
-    // immutable once recorded (its own record never changes after the run completes).
-    if (p[0] === "project" && p[2] === "run") return;
+    // immutable once recorded (its own record never changes after the run completes) -- UNLESS
+    // it's the run currently in flight (viewingLiveRunId), which needs live re-renders same as
+    // the project page. render() re-derives isLive from this fresh snapshot, so the one push where
+    // a live run just finished still falls through to fetching its now-final RunRecord instead of
+    // being stuck on the last "running…" frame.
+    if (p[0] === "project" && p[2] === "run" && decodeURIComponent(p[3]) !== viewingLiveRunId) return;
     render();
   };
   es.onerror = () => { live.classList.remove("live"); };

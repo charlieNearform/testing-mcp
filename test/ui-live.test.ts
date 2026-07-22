@@ -106,8 +106,14 @@ describe("Human Monitoring UI live view (Story 8.7)", () => {
     await new Promise((r) => setTimeout(r, 30));
 
     const running = await get(port, "/ui/api/status");
-    const runningSnap = JSON.parse(running.body) as { projects: Array<{ live?: unknown }> };
+    const runningSnap = JSON.parse(running.body) as {
+      projects: Array<{ live?: { runId?: string } }>;
+    };
     expect(runningSnap.projects[0].live).toBeDefined();
+    // The UI links a "running" history row straight to this run's live detail view by matching
+    // its runId, so the field has to actually be present on the live snapshot, not just tests/log.
+    expect(typeof runningSnap.projects[0].live?.runId).toBe("string");
+    expect(runningSnap.projects[0].live?.runId).not.toBe("");
 
     fs.writeFileSync(path.join(stateDir, "release"), "");
     await pending;
@@ -155,6 +161,52 @@ describe("Human Monitoring UI live view (Story 8.7)", () => {
 
     fs.writeFileSync(path.join(stateDir, "release"), "");
     await pending;
+  }, 20_000);
+
+  it("a new run is still flagged (replace:true) to SSE listeners even if it emits a line-less status change first", async () => {
+    // Regression: /log/events tracked "have we seen this run before" by updating its lastSeenRunId
+    // on EVERY push attempt, including ones with nothing new to send. A run replaces the live log
+    // with a fresh, empty array before it writes its first line, but other worker messages
+    // (case-start, progress, ...) can trigger a push in that in-between window; before the fix,
+    // that empty, line-less push would silently consume the "this is a new run" signal, so the
+    // NEXT push (carrying the run's actual first line) went out with replace:false -- indistinguishable
+    // from a same-run append. The UI's console log panel now depends on this to insert a "new run
+    // started" separator instead of quietly concatenating two different runs' output.
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-ui-log-newrun-"));
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-ui-log-newrun-project-"));
+    fs.writeFileSync(path.join(root, "vitest.config.ts"), "export default {};\n");
+    const registry = new ProjectRegistry(path.join(tmp, "registry.json"));
+    const { projectId } = await registry.register(root);
+    const orchestrator = new Orchestrator({ workerPath: blockingWorkerPath });
+    const port = await startUiOnlyServer(orchestrator, registry);
+    const stateDir = path.join(root, ".test-mcp");
+
+    const runA = orchestrator.runTests({ projectId, path: root }, { mode: "full" });
+    await waitForStarted(stateDir);
+    fs.writeFileSync(path.join(stateDir, "send-stdout"), "line-a");
+    await new Promise((r) => setTimeout(r, 30));
+    fs.writeFileSync(path.join(stateDir, "release"), "");
+    await runA;
+
+    const { stop, events } = collectSse(port, `/ui/api/projects/${encodeURIComponent(projectId)}/log/events`);
+    await new Promise((r) => setTimeout(r, 30)); // let the initial seed push (run A's line) land
+
+    const runB = orchestrator.runTests({ projectId, path: root }, { mode: "full" });
+    await waitForStarted(stateDir);
+    // A line-less status change while run B's live log is already fresh/empty -- exactly the
+    // window that used to let the run-boundary signal get silently swallowed.
+    fs.writeFileSync(path.join(stateDir, "send-case-start"), JSON.stringify({ file: "b.test.ts", name: "t1" }));
+    await new Promise((r) => setTimeout(r, 30));
+    fs.writeFileSync(path.join(stateDir, "send-stdout"), "line-b");
+    await new Promise((r) => setTimeout(r, 30));
+    fs.writeFileSync(path.join(stateDir, "release"), "");
+    await runB;
+
+    const got = (await events)().map((g) => JSON.parse(g) as { log: Array<{ text: string }>; replace: boolean });
+    stop();
+    const lineBPush = got.find((p) => p.log.some((l) => l.text === "line-b"));
+    expect(lineBPush).toBeDefined();
+    expect(lineBPush!.replace).toBe(true);
   }, 20_000);
 
   it("both new log routes return an empty payload (not a 404) for an unknown projectId", async () => {
