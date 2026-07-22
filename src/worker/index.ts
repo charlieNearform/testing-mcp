@@ -963,6 +963,17 @@ async function handleRun(
   msg: Extract<ToWorker, { type: "run" }>,
 ): Promise<{ result: TestResult; failureDetails: FailureDetail[]; coverageDelta?: CoverageDelta }> {
   const cwd = process.cwd();
+  // Unconditional (fires regardless of msg.coverage) -- confirms this worker is actually running
+  // the instrumented build, and whether coverage was even requested for this run, before anything
+  // else can go wrong. All the OTHER logMemory calls only fire once buildAndPersistCoverageMap is
+  // reached (msg.coverage truthy); if that log line never shows up in debug-memory.log, this one
+  // tells us whether that's because coverage wasn't enabled for this run at all, or because
+  // something upstream of this point never even got this far.
+  logMemory(cwd, "handle-run-start", {
+    coverageRequested: !!msg.coverage,
+    filesRequested: msg.files.length,
+    workerPid: process.pid,
+  });
   const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
   const { createVitest } = projectRequire("vitest/node") as VitestNode;
 
