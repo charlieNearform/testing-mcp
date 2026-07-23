@@ -40,11 +40,37 @@ afterEach(() => {
 });
 
 describe("coverage reverse-map build & persist", () => {
-  it("builds and persists a correct source->test map on a full coverage run", async () => {
+  // Story 3.7: a full-suite coverage run (no explicit files) is now a single native Vitest pass
+  // and deliberately never builds/refreshes the reverse map -- that's exclusively the
+  // incremental/selective (explicit `files`) path's job, exercised by the tests below.
+  it("a full-suite coverage run reports a fresh native combined percentage but never builds the map", async () => {
     proj = makeProject();
     const orch = new Orchestrator({ workerPath });
 
     const result = await orch.runTests({ projectId: "cov1", path: proj }, { coverage: true });
+    expect(result.total).toBe(2);
+
+    expect(result.coverage).toBeDefined();
+    expect(result.coverage!.combined).toBeUndefined(); // native single pass, not a per-file union
+    expect(result.coverage!.total.lines).toBeGreaterThan(0);
+    expect(result.coverage!.total.lines).toBeLessThanOrEqual(100);
+    expect(result.coverage!.files.some((f) => f.file.includes("math.ts"))).toBe(true);
+    expect(result.coverage!.confidence?.level).toBe("high");
+    expect(result.coverage!.files.every((f) => f.fresh === true)).toBe(true);
+
+    // The reverse map is never bootstrapped by a full-suite run (confirmed product decision,
+    // Story 3.7 Dev Notes) -- only an explicit-files selective run builds it (see tests below).
+    expect(loadCoverageMap(proj)).toBeNull();
+  }, 120_000);
+
+  it("builds and persists a correct source->test map on an explicit-files coverage run", async () => {
+    proj = makeProject();
+    const orch = new Orchestrator({ workerPath });
+
+    const result = await orch.runTests(
+      { projectId: "cov1", path: proj },
+      { coverage: true, files: ["math.test.ts", "other.test.ts"] },
+    );
     expect(result.total).toBe(2);
 
     // Story 6.3/6.10: a coverage run carries a COMBINED overall + per-file coverage report.
@@ -70,7 +96,11 @@ describe("coverage reverse-map build & persist", () => {
     proj = makeProject();
     const orch = new Orchestrator({ workerPath });
 
-    await orch.runTests({ projectId: "cov1", path: proj }, { coverage: true });
+    // Seed the map via an explicit-files run (full-suite runs never build it -- Story 3.7).
+    await orch.runTests(
+      { projectId: "cov1", path: proj },
+      { coverage: true, files: ["math.test.ts", "other.test.ts"] },
+    );
     // Incremental re-measure of just math.test.ts.
     await orch.runTests({ projectId: "cov1", path: proj }, { coverage: true, files: ["math.test.ts"] });
 
@@ -87,8 +117,12 @@ describe("coverage reverse-map build & persist", () => {
     proj = makeProject();
     const o = new Orchestrator({ workerPath });
 
-    // Baseline full coverage run: whole project measured, high confidence.
-    const baseline = await o.runTests({ projectId: "cov1", path: proj }, { coverage: true });
+    // Baseline run: whole project measured via explicit files (full-suite never builds the map
+    // that this combined-report scenario depends on -- Story 3.7), high confidence.
+    const baseline = await o.runTests(
+      { projectId: "cov1", path: proj },
+      { coverage: true, files: ["math.test.ts", "other.test.ts"] },
+    );
     expect(baseline.coverage!.confidence?.level).toBe("high");
     expect(baseline.coverage!.files.map((f) => f.file).sort()).toEqual(["math.ts", "other.ts"]);
 
@@ -144,16 +178,36 @@ describe("coverage default (opt-out once a project has a coverage map)", () => {
     expect(loadCoverageMap(proj)).toBeNull();
   }, 120_000);
 
-  it("omitting `coverage` after the project has a map defaults it to true", async () => {
+  // Story 3.7 AC4: the map-exists auto-default now only applies to full-suite runs. An
+  // incremental/selective run must opt in explicitly, even once a map exists.
+  it("omitting `coverage` on an incremental/selective run still opts out, even with a map", async () => {
     proj = makeProject();
     const orch = new Orchestrator({ workerPath });
 
-    // Build the map with an explicit opt-in, as today.
-    await orch.runTests({ projectId: "cov1", path: proj }, { coverage: true });
+    // Seed a map via an explicit-files run (full-suite runs never build one -- Story 3.7).
+    await orch.runTests(
+      { projectId: "cov1", path: proj },
+      { coverage: true, files: ["math.test.ts", "other.test.ts"] },
+    );
     expect(loadCoverageMap(proj)).not.toBeNull();
 
-    // A later run that doesn't mention `coverage` at all now gets it by default.
+    // An explicit-files (selective) run that doesn't mention `coverage` stays off, even with a map.
     const result = await orch.runTests({ projectId: "cov1", path: proj }, { files: ["math.test.ts"] });
+    expect(result.coverage).toBeUndefined();
+  }, 120_000);
+
+  it("omitting `coverage` on a full-suite run still defaults it to true once a map exists", async () => {
+    proj = makeProject();
+    const orch = new Orchestrator({ workerPath });
+
+    await orch.runTests(
+      { projectId: "cov1", path: proj },
+      { coverage: true, files: ["math.test.ts", "other.test.ts"] },
+    );
+    expect(loadCoverageMap(proj)).not.toBeNull();
+
+    // A later full-suite run (no files) that doesn't mention `coverage` at all still gets it.
+    const result = await orch.runTests({ projectId: "cov1", path: proj }, {});
     expect(result.coverage).toBeDefined();
   }, 120_000);
 
@@ -161,7 +215,10 @@ describe("coverage default (opt-out once a project has a coverage map)", () => {
     proj = makeProject();
     const orch = new Orchestrator({ workerPath });
 
-    await orch.runTests({ projectId: "cov1", path: proj }, { coverage: true });
+    await orch.runTests(
+      { projectId: "cov1", path: proj },
+      { coverage: true, files: ["math.test.ts", "other.test.ts"] },
+    );
     expect(loadCoverageMap(proj)).not.toBeNull();
 
     const result = await orch.runTests(

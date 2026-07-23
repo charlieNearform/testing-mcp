@@ -153,9 +153,15 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
           .boolean()
           .optional()
           .describe(
-            "Build/refresh the source->test coverage map for this run. If omitted, defaults to " +
-              "true once the project already has a coverage map (pass false to opt out for this " +
-              "run), otherwise defaults to false until first enabled.",
+            "Measure coverage for this run (a full-suite run reports a whole-project percentage " +
+              "via one native pass; an incremental/selective run that names specific files also " +
+              "refreshes the source->test coverage map for those files -- an incremental run " +
+              "with no map yet and no specific files resolved gets the same one-native-pass, " +
+              "no-map-refresh treatment as a full-suite run). If omitted on a full-suite run, " +
+              "defaults to true once the project already has a coverage map (pass false to opt " +
+              "out), otherwise false until first enabled. If omitted on an incremental/selective " +
+              "run, always defaults to false regardless of whether a map exists -- pass true " +
+              "explicitly to measure coverage there.",
           ),
         files: z.array(z.string()).optional().describe("Specific files to run"),
         since: z

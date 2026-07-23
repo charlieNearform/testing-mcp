@@ -53,12 +53,16 @@ export interface TestResult {
   /**
    * Coverage report for a `coverage: true` run — overall + per-file percentages
    * (statements/branches/functions/lines). Absent on plain runs (coverage is only measured when
-   * requested) and when no coverage provider is present. As of Story 6.10 this is the COMBINED
-   * (whole-project) picture: the union of every test file's latest measurement, so an incremental
-   * run reports whole-project coverage without re-running everything. `combined` marks that; each
-   * file carries `fresh` (re-measured this run) / `stale` (source changed since measured); and
-   * `confidence` is `degraded` when a changed source is unmeasured (Story 6.8) so "100%" is only
-   * asserted at `high` confidence.
+   * requested) and when no coverage provider is present. Populated by one of two paths:
+   * - **Full-suite run (Story 3.7):** a single native Vitest coverage pass over the whole suite
+   *   (the equivalent of `vitest run --coverage`) — always fresh, always `confidence: "high"`,
+   *   `combined` omitted (this is a fresh single measurement, not a union of historic ones).
+   * - **Incremental/selective run (Story 6.10):** the COMBINED (whole-project) picture — the
+   *   union of every test file's latest measurement, so a selective run still reports
+   *   whole-project coverage without re-running everything. `combined: true` marks this case;
+   *   each file carries `fresh` (re-measured this run) / `stale` (source changed since measured);
+   *   `confidence` is `degraded` when a changed source is unmeasured (Story 6.8), so "100%" is
+   *   only asserted at `high` confidence.
    */
   coverage?: {
     total: CoveragePct;

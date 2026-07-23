@@ -197,12 +197,21 @@ if it isn't already registered):
 This project's tests are run through the `test-mcp` MCP server, not by shelling out to
 `vitest`/`pnpm test` directly.
 
-- To run tests, call `run_tests` with `{ projectId: "<id>", mode: "incremental" }`. Only use
-  `mode: "full"` when you need certainty — before a release, after touching shared/setup
-  modules, or if incremental results seem wrong.
-- On the first run, or whenever incremental selection looks stale, pass `coverage: true` to
-  rebuild the source→test map. Selection is conservative: an unmapped or uncertain file
-  triggers a full-suite fallback rather than silently skipping a test.
+- For fast, in-loop iteration while developing, call `run_tests` with
+  `{ projectId: "<id>", mode: "incremental" }` and leave `coverage` unset (it defaults to
+  `false` there, even once a map exists) — this stays fast because it never measures
+  coverage. Selection is conservative: an unmapped or uncertain file triggers a full-suite
+  fallback rather than silently skipping a test.
+- Use `mode: "full"` (with `coverage: true`) as a **gate**, not something to avoid — before
+  a release, after touching shared/setup modules, or if incremental results seem wrong. It's
+  a single native Vitest coverage pass now (roughly the cost of a plain `vitest run`), not
+  something that needs to be minimized. It reports a whole-project coverage percentage but
+  does **not** refresh the source→test map (see below).
+- To improve incremental selection precision for specific files, call `run_tests` with
+  `{ projectId: "<id>", coverage: true, files: [...] }` naming them explicitly — this is the
+  only path that builds/refreshes the source→test map (cheap at this scale). Without ever
+  doing this, incremental selection still works, just via the static import graph alone
+  (slightly less precise for dynamic imports) rather than the coverage map.
 - Before a large or full run, call with `dryRun: true` first to see which files would run
   and why (the `reasoning` field), then execute that exact selection by passing its
   `planId` back in. An expired `planId` returns `PlanExpired` — just re-run the dry-run.
@@ -225,17 +234,20 @@ This project's tests are run through the `test-mcp` MCP server, not by shelling 
 // Full suite.
 { "projectId": "…", "mode": "full" }
 
-// Refresh the source→test coverage map on this run (needed for incremental to work well).
+// Full-suite coverage gate: one native Vitest pass, reports a whole-project % — does NOT
+// refresh the source→test map (that's the incremental/selective path below).
 { "projectId": "…", "mode": "full", "coverage": true }
 
-// Specific files.
-{ "projectId": "…", "files": ["test/foo.test.ts"] }
+// Specific files, with coverage: refreshes/builds the source→test map for these files.
+{ "projectId": "…", "coverage": true, "files": ["test/foo.test.ts"] }
 ```
 
 **Selection is conservative.** If a changed file is unknown to the coverage map, is a
 setup-baseline module (e.g. a shared `i18n.ts`), or belongs to a test that couldn't be
-measured, the daemon runs the **full suite** rather than risk skipping a relevant test.
-Build/refresh the coverage map (`coverage: true`) to get the incremental speedup.
+measured, the daemon runs the **full suite** rather than risk skipping a relevant test. The
+coverage map is only built/refreshed by an incremental/selective run naming files with
+`coverage: true` — a full-suite run never touches it, by design, since attribution
+precision only matters for narrowing an incremental selection, not for a whole-project gate.
 
 `run_tests` streams per-file progress as MCP `notifications/progress` when the client
 supplies a `progressToken`. The final response is the authoritative `TestResult`.
@@ -261,8 +273,11 @@ Plans are cached briefly; an expired `planId` returns `PlanExpired` — re-run t
 { "projectId": "…", "fastMode": false } // also refresh the coverage map (slower)
 ```
 
-`fastMode` defaults to `true` (skips coverage for speed). Poll `get_test_status` for the
-latest watch result; call `stop_watch` to end it.
+`fastMode` defaults to `true` (skips coverage for speed). With `fastMode: false`, a
+watch-triggered run that resolves to an incremental/selective selection still refreshes the
+coverage map as before; one that falls back to a full-suite selection (e.g. a setup-file
+edit) takes the cheap native full-suite pass instead and does not refresh the map for that
+run. Poll `get_test_status` for the latest watch result; call `stop_watch` to end it.
 
 ## Monitoring UI (for humans)
 

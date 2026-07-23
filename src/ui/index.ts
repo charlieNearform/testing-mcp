@@ -791,14 +791,17 @@ function renderProject(pid) {
 // The coverage-measurement phase uses a silent reporter (AD-20) -- no console output, and the
 // per-test list stops updating too (it's per-FILE, not per-case, during this phase) -- so without
 // this, a large project's coverage pass reads as a hang even though heartbeats are keeping it
-// alive underneath. phase.total is 0 during discovery/baseline (the real file count isn't known
-// yet); show an indeterminate state rather than a misleading "0 / 0".
+// alive underneath. phase.total is 0 during baseline measurement (brief) AND for the entire
+// duration of a full-suite native coverage pass (Story 3.7 -- no per-file count exists there);
+// show an indeterminate state rather than a misleading "0 / 0" either way. "in progress" (not
+// "starting") since this can legitimately persist for minutes on a full-suite pass, not just
+// the brief window before the first file-count is known.
 function phaseProgressBlock(phase) {
   if (!phase) return "";
   const known = phase.total > 0;
   const pct = known ? Math.min(100, Math.round((phase.completed / phase.total) * 100)) : 6;
   return '<div class="phase-progress"><div class="label"><span>Measuring coverage</span><span>'
-    + (known ? phase.completed + ' / ' + phase.total + ' files' : 'starting…')
+    + (known ? phase.completed + ' / ' + phase.total + ' files' : 'in progress…')
     + '</span></div><div class="bar"><div class="fill" style="width:' + pct + '%"></div></div></div>';
 }
 

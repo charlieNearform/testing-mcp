@@ -1,5 +1,11 @@
 # Deferred Work Ledger
 
+## Deferred from: code review of story-3-7-native-full-suite-coverage-pass (2026-07-23)
+
+- source_spec: `3-7-native-full-suite-coverage-pass.md`
+  summary: The per-file coverage measurement path (`measureCoverage` in `src/worker/index.ts`, used by incremental/selective coverage runs) has the same two robustness gaps that were found and fixed in this story's NEW native-pass code, but left as-is in the untouched per-file path: (1) `budgetMs = Number(process.env.TEST_MCP_MEASURE_BUDGET_MS ?? 120_000)` — a non-numeric env value produces `NaN`, and `Math.max(COVERAGE_HEARTBEAT_MAX_MS, NaN + 4000)` is `NaN`, which would silently disable the per-file heartbeat cap forever rather than fall back to the default floor; (2) `measureCoverage`'s `JSON.parse(fs.readFileSync(covFile, "utf8"))` is unguarded — a truncated/corrupt `coverage-final.json` throws instead of degrading to `{ sources: [], measured: false }` like the adjacent `!fs.existsSync` branch already does.
+  evidence: Found via adversarial code review while fixing the identical pattern in the new `buildNativeFullSuiteCoverage` function this story added. Out of scope for Story 3.7 (a different, untouched code path); worth its own follow-up given both are cheap, contained fixes.
+
 ## Deferred from: automatic daemon restart on `pnpm build` (2026-07-21)
 
 - source_spec: none (one-shot: automatic daemon refresh on `pnpm build`)
@@ -14,10 +20,20 @@
 
 ## Deferred from: story-3-2-coverage-reverse-map-build-persist (2026-07-14)
 
-- **Single-pass V8 snapshot-diff measurement** — Story 3.2 was implemented with per-test-file measurement (one Vitest run per test file), which the spike proved correct. The architecture's single-pass serial snapshot-diff (same accuracy, ~6x cheaper) is a performance optimisation deferred here. [supersedes AC1's "single-pass" wording; approved trade-off]
-- **Vendoring `testpick` (MIT) attribution + license retention** — AC2 (NOTICE/THIRD_PARTY_LICENSES + vendored-module header) is N/A while we do not vendor testpick. Revisit if/when the single-pass algorithm is adopted from testpick.
+- ~~**Single-pass V8 snapshot-diff measurement**~~ — **Superseded, resolved differently
+  (Story 3.7, 2026-07-23).** Confirmed on a real project that per-test-file measurement costs
+  6-8x a plain run and crashes the daemon at full-suite scale — this was not just a performance
+  optimisation left on the table, it made coverage mode unusable for larger suites. Story 3.7
+  does not implement single-pass snapshot-diffing (researched `testpick`'s actual technique:
+  it's the same per-file-attribution work, just batched more efficiently — ~1.8x faster, not a
+  removal of the cost). Instead, a full-suite run never performs per-file attribution at all —
+  one native Vitest coverage pass instead, no reverse-map refresh. This is a closed gap, not a
+  still-deferred one.
+- ~~**Vendoring `testpick` (MIT) attribution + license retention**~~ — **Permanently N/A
+  (Story 3.7, 2026-07-23).** `testpick` is never vendored; see above for why the single-pass
+  approach it would have provided was not the right fix for the actual reported problem.
 - Surface `coverageDelta` to the MCP `run_tests` response — currently the map is persisted to disk and the summary returned over IPC only; not exposed to the tool caller.
-- Prune stale source files that no test covers after a full rebuild across renamed/deleted sources — current build only prunes edges for re-measured test files (incremental) or starts fresh (full).
+- Prune stale source files that no test covers after a full rebuild across renamed/deleted sources — current build only prunes edges for re-measured test files (incremental) or starts fresh (full). **Note (Story 3.7, 2026-07-23):** "full rebuild" here now only ever happens via an incremental/selective call naming every test file explicitly — a true full-suite run (`files: []`) no longer calls the map builder at all, so this item's scope is now bounded to that explicit-full-file-list case, not a real full-suite run.
 
 ## Deferred from: code review of story-3-1-git-aware-delta-selection (2026-07-14)
 

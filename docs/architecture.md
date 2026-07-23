@@ -303,11 +303,16 @@ coverage, attributing execution → source→test-file map. Granularity is **tes
 
 > **Implementation note (current):** the engine measures **per test file** (each in its own
 > Vitest run) and tracks freshness with a `lastMeasured` timestamp per entry; it re-measures
-> the explicit set of target files it is given. The **single-pass** snapshot-diff and
-> **content-hash**-driven incremental re-measure described below are the intended design but
-> are not yet implemented (see `deferred-work.md`).
+> the explicit set of target files it is given (an incremental/selective run — cheap at that
+> scale). **A full-suite run never uses this per-file path at all** (Story 3.7): it runs one
+> native Vitest coverage pass over the whole suite instead — the equivalent of
+> `vitest run --coverage` — and does not build or refresh the reverse map. The map is
+> therefore populated exclusively by incremental/selective runs; a project that only ever runs
+> full-suite (gate) + no-coverage-iterative cycles never builds one at all, by deliberate
+> design — see "Single-pass, not per-file" below for why this replaces rather than implements
+> the originally-planned single-pass snapshot-diff approach.
 
-Validated by the spike (`docs/coverage-spike-findings.md`) on the real target repo. Two
+Validated by the spike (`docs/coverage-spike-findings.md`) on the real target repo. Three
 mandatory refinements came out of it:
 
 1. **Subtract the setup baseline.** `setupFiles` (e.g. `vitest.setup.ts`) run before every
@@ -315,9 +320,17 @@ mandatory refinements came out of it:
    the target). Measure a setup-only baseline (coverage of a no-op test) once and subtract
    it from each test's attribution; the subtracted modules become full-suite triggers.
    Without this the map is nearly useless (a common-lib edit selects the whole suite).
-2. **Single-pass, not per-file.** Naive per-file measurement was ~6× a single combined run
-   on the target (77s vs 13s for 22 files); per-file startup dominates. Single-pass keeps
-   accuracy while amortizing startup.
+2. **Single-pass, not per-file — resolved differently than originally planned (Story 3.7).**
+   Naive per-file measurement was ~6× a single combined run on the target (77s vs 13s for 22
+   files) and, at real full-suite scale (286 files), cost 6-8x a plain run and crashed the
+   daemon outright. The original plan was to vendor `testpick`'s (MIT) single-pass serial
+   snapshot-diff attribution technique to make per-file measurement itself cheaper. Story 3.7
+   instead never performs per-file attribution for a full-suite run at all — the reverse map's
+   attribution precision only matters for the incremental/selective path (Story selection
+   engine falls back gracefully to the static import graph when the map is absent/stale for a
+   source), so a full-suite run only needs a whole-project **percentage**, which Vitest's own
+   native combined pass already produces with zero per-file overhead. `testpick` was never
+   vendored; this is resolved, not deferred.
 3. **Unmeasurable tests are always-run.** Some heavy tests (e.g. AG-Grid-mounting
    `CalendarPage.test.tsx`) exceed the measurement budget under coverage and yield no data.
    Any test the engine cannot measure (timeout/crash/no coverage) is recorded as
@@ -347,9 +360,18 @@ Tool errors return structured MCP error responses (never crash the daemon):
 
 ## Open Risks
 
-1. **Coverage-map accuracy/perf** — spike-validated (see above); residual risk is the
-   single-pass snapshot-diff implementation and setup-baseline detection holding up across
-   projects. Mitigated by the conservative always-run fallback.
+1. ~~**Coverage-map accuracy/perf**~~ — **Resolved for the case that actually caused the
+   reported crash (Story 3.7, 2026-07-23): full-suite scale.** Full-suite coverage no longer
+   performs per-file attribution at all (one native Vitest pass instead); the reverse map is
+   built exclusively by incremental/selective runs, where per-file measurement is cheap
+   (bounded by the touched-file count, normally small). Single-pass snapshot-diffing /
+   vendoring `testpick` is no longer needed for the full-suite case — that gap is closed by a
+   different mechanism. **Residual scope, not closed:** the incremental/selective path's
+   per-test-file measurement mechanism itself is unchanged — a future change that drives many
+   files through that path at once (e.g. a broad refactor touching hundreds of test files in
+   one incremental call) would still pay the same per-file cost this risk originally named;
+   it just isn't the scenario that caused the reported crash. Setup-baseline detection
+   (Story 3.3) continues to apply to the incremental/selective path unchanged.
 2. **Heavy/unmeasurable tests** — coverage instrumentation can push heavy tests past their
    budget (observed on the target's AG-Grid suite). Handled by always-run fallback, but it
    erodes the incremental benefit for suites with many such tests; measurement budget is

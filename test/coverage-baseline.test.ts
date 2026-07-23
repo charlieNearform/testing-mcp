@@ -44,7 +44,11 @@ describe("setup-baseline subtraction", () => {
     proj = makeProject();
     const orch = new Orchestrator({ workerPath });
 
-    await orch.runTests({ projectId: "base1", path: proj }, { coverage: true });
+    // Explicit files -- a full-suite run never builds the map (Story 3.7).
+    await orch.runTests(
+      { projectId: "base1", path: proj },
+      { coverage: true, files: ["math.test.ts", "other.test.ts"] },
+    );
 
     const map = loadCoverageMap(proj);
     expect(map).not.toBeNull();

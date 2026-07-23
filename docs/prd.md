@@ -407,6 +407,15 @@ worker; setup-baseline subtraction is added by us.
 > slower. Setup-baseline subtraction is what makes selection useful: without it a common-lib
 > edit re-runs the whole suite; with it, ~6% (unit) / ~18% (integration) of the suite.
 
+> **Superseded 2026-07-23 (Story 3.7):** shipped instead with per-file measurement for the
+> incremental/selective path (not single-pass/vendored-testpick); confirmed on a real project
+> this cost 6-8x a plain run and crashed the daemon at full-suite scale. Story 3.7 resolves
+> this differently: a full-suite run (AC1 above, "a full run executes with V8 coverage")
+> no longer builds/refreshes the map at all — it runs one native Vitest coverage pass for a
+> whole-project percentage instead. The map is now built exclusively by an incremental run
+> naming specific files (AC3), which was always cheap at that scale. `testpick` is never
+> vendored. See `docs/architecture.md`'s "Coverage Map Build" section for the current design.
+
 #### Story 3.3: Smart Re-run Decisions
 **ID:** `coverage-002`
 

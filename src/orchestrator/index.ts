@@ -249,10 +249,15 @@ export class Orchestrator {
       files?: string[];
       mode?: string;
       /**
-       * Explicit override. When omitted, defaults to whether the project already has a
-       * coverage map: "opt out" (pass `false`) once coverage has been enabled for a project,
-       * "opt in" (off) until it has — a project that has never proven coverage works there
-       * isn't forced into an unmeasured attempt on every run.
+       * Explicit override. When omitted on a FULL-SUITE run, defaults to whether the project
+       * already has a coverage map: "opt out" (pass `false`) once coverage has been enabled for
+       * a project, "opt in" (off) until it has — a project that has never proven coverage works
+       * there isn't forced into an unmeasured attempt on every run. On an incremental/selective
+       * run, omitted always means `false` regardless of whether a map exists (Story 3.7 AC4) —
+       * a full-suite run's coverage is now one cheap native Vitest pass, so auto-enabling it
+       * there costs little; auto-enabling it on a fast, in-loop selective run would silently
+       * re-trigger the (still real, if bounded) per-file measurement cost that story is meant to
+       * avoid during iterative development.
        */
       coverage?: boolean;
       /** Incremental baseline: "last-run" (default, hash-diff vs snapshot) or "head" (git HEAD). */
@@ -285,7 +290,9 @@ export class Orchestrator {
   ): { runId: string; result: Promise<TestResult> } {
     const runId = randomUUID();
     const sel = this.resolveSelection(project, opts);
-    const coverage = opts.coverage ?? loadCoverageMap(project.path) !== null;
+    // The map-exists auto-default only applies to a genuine full-suite run (Story 3.7 AC4) --
+    // any other resolved strategy (incremental/changed-only) defaults to `false` when omitted.
+    const coverage = opts.coverage ?? (sel.strategy === "full" && loadCoverageMap(project.path) !== null);
     const result = this.enqueue(project, sel, coverage, runId, opts.onProgress);
     return { runId, result };
   }

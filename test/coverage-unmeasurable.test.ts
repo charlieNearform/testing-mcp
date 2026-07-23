@@ -43,7 +43,11 @@ describe("unmeasurable tests -> always-run", () => {
     process.env.TEST_MCP_MEASURE_BUDGET_MS = "500"; // slow.test.ts (3s) will exceed this
     const orch = new Orchestrator({ workerPath });
 
-    await orch.runTests({ projectId: "unmeas1", path: proj }, { coverage: true });
+    // Explicit files -- a full-suite run never builds the map (Story 3.7).
+    await orch.runTests(
+      { projectId: "unmeas1", path: proj },
+      { coverage: true, files: ["fast.test.ts", "slow.test.ts"] },
+    );
 
     const map = loadCoverageMap(proj);
     expect(map).not.toBeNull();

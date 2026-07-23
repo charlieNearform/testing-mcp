@@ -21,6 +21,15 @@ Security**, referencing the GitHub issue (`#123`) where applicable.
 
 ### Fixed
 
+- **Full-suite coverage no longer costs 6-8x a plain run (and could crash the daemon on a
+  large project).** A full-suite `run_tests` with `coverage: true` previously measured
+  coverage once per test file (one Vitest process per file, on top of the run itself);
+  confirmed on a real ~286-file project this cost 800+s (vs ~100s without coverage) and
+  crashed the daemon outright. It now runs one native Vitest coverage pass over the whole
+  suite instead — the equivalent of `vitest run --coverage` — with no per-file measurement.
+  This intentionally means a full-suite run no longer refreshes the source→test reverse map
+  (only an incremental/selective run does, where per-file measurement is cheap); selection
+  still works without a map via the static import-graph fallback, just at lower precision.
 - **Coverage watch mode no longer self-loops.** A coverage-enabled watch run wrote+deleted a
   transient baseline test in the project root, which the watcher saw and re-triggered
   forever; the watcher now ignores `__test-mcp-*` files.
@@ -75,6 +84,13 @@ Security**, referencing the GitHub issue (`#123`) where applicable.
 
 ### Changed
 
+- **`coverage`'s map-exists auto-default now only applies to full-suite runs.** Previously,
+  omitting `coverage` on ANY run (including a fast incremental/selective one) defaulted it
+  to `true` once a project had a coverage map — meaning an agent iterating quickly could
+  silently re-trigger coverage measurement. An incremental/selective run now always defaults
+  to `false` when omitted, regardless of whether a map exists; pass `coverage: true`
+  explicitly to measure it there. A full-suite run's default is unchanged (still `true` once
+  a map exists) since it's now a single cheap native pass either way.
 - The `/mcp` bearer token is now **stable across daemon restarts** instead of regenerated
   on every start: resolved as `TEST_MCP_TOKEN` env override → persisted `config.token` →
   generated once and written back to `~/.test-mcp/config.json`. This lets MCP clients be

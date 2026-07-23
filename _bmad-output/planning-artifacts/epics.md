@@ -388,9 +388,17 @@ So that a source edit resolves to the tests that exercise it.
 **When** a full run executes with V8 coverage (single-pass, serial snapshot-diff; attribution algorithm vendored from `testpick`, MIT, adapted to run inside the per-project worker)
 **Then** a source-file → test-file map is generated and persisted keyed by `projectId`, surviving restarts.
 
+> **Superseded 2026-07-22 (Story 3.7):** shipped instead with per-file measurement (see
+> `deferred-work.md`); confirmed on a real project to cost 6-8x a plain run and crash the daemon
+> at full-suite scale. Story 3.7 resolves this by never doing per-file attribution for full-suite
+> runs at all (native single Vitest coverage pass instead) rather than ever implementing the
+> single-pass/testpick approach described in this AC.
+
 **Given** the vendored `testpick` (MIT) attribution code is included
 **When** the package is built/released
 **Then** testpick's copyright + MIT license text is retained (`NOTICE`/`THIRD_PARTY_LICENSES` + a header on the vendored module).
+
+> **Superseded 2026-07-22 (Story 3.7):** N/A — testpick is never vendored; see above.
 
 **Given** a coverage map exists and specific test files changed
 **When** the run completes
@@ -467,6 +475,31 @@ So that iterative development stays fast.
 **Given** an incremental single-file change in watch mode (NFR1 — interactive latency)
 **When** affected tests re-run
 **Then** the run completes fast enough for interactive development (<15s aspirational target per PRD Success Metrics; recorded for tuning, not a hard gate).
+
+### Story 3.7: Native Full-Suite Coverage Pass
+
+Added 2026-07-22 (epic reopened) — supersedes Story 3.2's deferred single-pass AC1/AC2 with a
+different, cheaper resolution. See `3-7-native-full-suite-coverage-pass.md` for full detail.
+
+As an AI agent,
+I want a full-suite, coverage-enabled `run_tests` to execute as one native Vitest coverage pass
+instead of one process per test file,
+So that requesting coverage on a full run costs about a second `vitest run`, not 6-8x (which
+crashed the daemon on a real project).
+
+**Acceptance Criteria:**
+
+**Given** a full-suite run with coverage requested
+**When** the coverage phase runs
+**Then** it executes exactly one native Vitest pass over all test files with coverage enabled — not one process per test file — and does not refresh the reverse coverage map.
+
+**Given** an incremental/selective run with coverage requested
+**When** the coverage phase runs
+**Then** behavior is unchanged: the existing per-file measurement path keeps the reverse map fresh for the touched files.
+
+**Given** a project with a persisted coverage map and a caller that omits `coverage`
+**When** the run is incremental/selective
+**Then** coverage defaults to `false` (explicit opt-in only); on a full-suite run it still defaults to `true` when a map exists.
 
 ## Epic 4: Agent Workflow — Dry Run, Output & Status (Phase 1)
 

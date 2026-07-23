@@ -39,7 +39,11 @@ async function makeProjectWithMap(): Promise<string> {
     path.join(dir, "other.test.ts"),
     `import { test, expect } from "vitest";\nimport { sub } from "./other.ts";\ntest("sub", () => expect(sub(2, 1)).toBe(1));\n`,
   );
-  await new Orchestrator({ workerPath }).runTests({ projectId: "w1", path: dir }, { coverage: true });
+  // Explicit files -- a full-suite run never builds the map (Story 3.7).
+  await new Orchestrator({ workerPath }).runTests(
+    { projectId: "w1", path: dir },
+    { coverage: true, files: ["math.test.ts", "other.test.ts"] },
+  );
   execFileSync("git", ["init", "-q"], { cwd: dir });
   execFileSync("git", ["add", "-A"], { cwd: dir });
   execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir, env: GIT_ENV });

@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-13
-last_updated: 2026-07-20
+last_updated: 2026-07-23
 project: test-server-mcp
 project_key: NOKEY
 tracking_system: file-system
@@ -101,6 +101,16 @@ development_status:
   epic-2-retrospective: optional
 
   # Epic 3: Intelligent Test Selection (Phase 1)
+  # Reopened 2026-07-22, re-closed 2026-07-23: 3-2 shipped with naive per-test-file coverage
+  # measurement instead of the architecture's own "mandatory" single-pass snapshot-diff design
+  # (docs/architecture.md Open Risk #1; deferred-work.md recorded this as an "approved trade-off"
+  # at the time). Confirmed on a real project to cause ~8x slowdown and daemon crashes, negating
+  # the tool's purpose for larger suites. 3-7 resolved this differently: full-suite coverage
+  # becomes a single native Vitest pass (no per-file attribution, no reverse-map refresh); the
+  # reverse map remains soft/optional per src/selection/index.ts's existing fallback, so
+  # single-pass snapshot-diffing / vendoring testpick was never needed. Code-reviewed 2026-07-23
+  # (10 patches applied, 1 pre-existing item deferred, 10 dismissed). Story file:
+  # 3-7-native-full-suite-coverage-pass.md.
   epic-3: done
   3-1-git-aware-delta-selection: done
   3-2-coverage-reverse-map-build-persist: done
@@ -108,6 +118,7 @@ development_status:
   3-4-always-run-unmeasurable-tests: done
   3-5-smart-re-run-decision-union-fallback: done
   3-6-watch-incremental-mode: done
+  3-7-native-full-suite-coverage-pass: done
   epic-3-retrospective: optional
 
   # Epic 4: Agent Workflow — Dry Run, Output & Status (Phase 1)

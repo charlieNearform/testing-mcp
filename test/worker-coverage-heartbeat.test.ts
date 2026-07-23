@@ -9,8 +9,7 @@ import { buildAndPersistCoverageMap } from "../src/worker/index.ts";
 // between these tests or contend with other test files. Created under test-fixtures/ (not
 // os.tmpdir()) purely so `require("vitest/node")` inside buildAndPersistCoverageMap resolves via
 // the normal upward node_modules walk to this repo's own install -- these tests never exercise a
-// real Vitest run (every startVitest/createVitest call is faked), so nothing else about the
-// project matters.
+// real Vitest run (every startVitest call is faked), so nothing else about the project matters.
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const tmpDirs: string[] = [];
 
@@ -25,7 +24,6 @@ afterEach(() => {
 });
 
 type FakeStartVitest = Parameters<typeof buildAndPersistCoverageMap>[5];
-type FakeCreateVitest = Parameters<typeof buildAndPersistCoverageMap>[6];
 
 const fakeVitestInstance = { close: async () => {}, config: { isolate: false } };
 
@@ -93,41 +91,6 @@ describe("coverage-measurement phase heartbeats (stall watchdog fix)", () => {
     }
   });
 
-  it("heartbeats (completed:0, total:0) while file discovery itself is slow, and the baseline heartbeat right after correctly reports the just-discovered total (not the raw files=[] length)", async () => {
-    vi.useFakeTimers();
-    const { sent, restore } = captureSends();
-    try {
-      const fakeCreateVitest: FakeCreateVitest = async () => ({
-        close: async () => {},
-        globTestSpecifications: async () => {
-          await new Promise((resolve) => setTimeout(resolve, 9000));
-          return [{ moduleId: "/proj/discovered.test.ts" }];
-        },
-      });
-      const cwd = makeCwd();
-      const promise = buildAndPersistCoverageMap(
-        cwd,
-        "proj",
-        [], // files=[] -> discovery runs
-        "run-discovery-heartbeat",
-        undefined,
-        async () => fakeVitestInstance, // baseline + per-file measurement, resolve fast
-        fakeCreateVitest,
-      );
-      await vi.advanceTimersByTimeAsync(9000);
-      await promise;
-
-      const progress = sent.filter(isPhaseProgress).filter((m) => m.runId === "run-discovery-heartbeat");
-      expect(progress.filter((m) => m.completed === 0 && m.total === 0).length).toBeGreaterThanOrEqual(2);
-      // Bad_spec fix: the baseline heartbeat must use the just-discovered real count (1), never the
-      // raw `files` parameter (always 0 in discovery mode) -- previously always read 0 here.
-      expect(progress.some((m) => m.completed === 0 && m.total === 1)).toBe(true);
-    } finally {
-      restore();
-      vi.useRealTimers();
-    }
-  });
-
   it("a heartbeat send() failure is swallowed, not thrown", async () => {
     vi.useFakeTimers();
     let sendCalls = 0;
@@ -165,7 +128,7 @@ describe("coverage-measurement phase heartbeats (stall watchdog fix)", () => {
     vi.useFakeTimers();
     const { sent, restore } = captureSends();
     try {
-      const neverResolvingCreateVitest: FakeCreateVitest = () => new Promise(() => {}); // never settles
+      const neverResolvingStartVitest: FakeStartVitest = () => new Promise(() => {}); // never settles
       const cwd = makeCwd();
       // Intentionally not awaited: this fake never resolves by design (that's what's under test),
       // so there is nothing to await and no cancellation path to invoke (matches the worker's own
@@ -174,11 +137,10 @@ describe("coverage-measurement phase heartbeats (stall watchdog fix)", () => {
       void buildAndPersistCoverageMap(
         cwd,
         "proj",
-        [],
+        ["a.test.ts"],
         "run-cap-test",
         undefined,
-        async () => fakeVitestInstance,
-        neverResolvingCreateVitest,
+        neverResolvingStartVitest,
       );
       // Default budgetMs (120_000) + interval (4000) = 124_000, floored at COVERAGE_HEARTBEAT_MAX_MS
       // (130_000) -- advance past whichever is larger.
@@ -199,16 +161,15 @@ describe("coverage-measurement phase heartbeats (stall watchdog fix)", () => {
     process.env.TEST_MCP_MEASURE_BUDGET_MS = "300000"; // well above the 130_000 default floor
     const { sent, restore } = captureSends();
     try {
-      const neverResolvingCreateVitest: FakeCreateVitest = () => new Promise(() => {});
+      const neverResolvingStartVitest: FakeStartVitest = () => new Promise(() => {});
       const cwd = makeCwd();
       void buildAndPersistCoverageMap(
         cwd,
         "proj",
-        [],
+        ["a.test.ts"],
         "run-raised-budget",
         undefined,
-        async () => fakeVitestInstance,
-        neverResolvingCreateVitest,
+        neverResolvingStartVitest,
       );
       // Well past the OLD fixed 130_000 cap, but still inside the new budget-derived one
       // (300_000 + 4000) -- heartbeats must still be arriving here.
@@ -229,36 +190,9 @@ describe("coverage-measurement phase heartbeats (stall watchdog fix)", () => {
     }
   });
 
-  it("throws immediately if files=[] (discovery will run) but only startVitestOverride is provided", async () => {
-    const cwd = makeCwd();
-    await expect(
-      buildAndPersistCoverageMap(
-        cwd,
-        "proj",
-        [], // discovery WILL run and needs createVitestOverride too
-        "run-mismatched-override-discovery",
-        undefined,
-        async () => fakeVitestInstance,
-      ),
-    ).rejects.toThrow(/createVitestOverride must also be provided/);
-  });
-
-  it("throws immediately if only createVitestOverride is provided (setup-baseline always needs startVitest)", async () => {
-    const cwd = makeCwd();
-    await expect(
-      buildAndPersistCoverageMap(
-        cwd,
-        "proj",
-        ["a.test.ts"],
-        "run-mismatched-override-baseline",
-        undefined,
-        undefined,
-        async () => ({ close: async () => {}, globTestSpecifications: async () => [] }),
-      ),
-    ).rejects.toThrow(/startVitestOverride must also be provided/);
-  });
-
-  it("does NOT throw when only startVitestOverride is provided and files is non-empty (discovery never runs, so createVitestOverride is genuinely unneeded)", async () => {
+  // The files=[] (native full-suite) case is covered by the "native full-suite coverage pass
+  // heartbeats" describe block below -- every test there also passes only startVitestOverride.
+  it("does not throw when only startVitestOverride is provided for an explicit-files (selective) call", async () => {
     vi.useFakeTimers();
     try {
       const cwd = makeCwd();
@@ -275,5 +209,125 @@ describe("coverage-measurement phase heartbeats (stall watchdog fix)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// Story 3.7: a full-suite call (`files: []` -- this also covers the "changed-only" fallback
+// strategy, which also carries `files: []`; see the story's Dev Notes) is a single native Vitest
+// pass, not per-file discovery-and-measurement. It gets its OWN heartbeat ceiling
+// (TEST_MCP_FULL_COVERAGE_BUDGET_MS / a 30-minute floor), sized for a whole-suite run rather than
+// one file, since the per-file TEST_MCP_MEASURE_BUDGET_MS-derived ceiling would cut heartbeats off
+// long before a real multi-minute full-suite pass finishes.
+describe("native full-suite coverage pass heartbeats (Story 3.7)", () => {
+  it("heartbeats (completed:0, total:0) while the native full-suite pass itself is slow, with no discovery step beforehand", async () => {
+    vi.useFakeTimers();
+    const { sent, restore } = captureSends();
+    try {
+      const fakeStartVitest: FakeStartVitest = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 9000));
+        return fakeVitestInstance;
+      };
+      const cwd = makeCwd();
+      const promise = buildAndPersistCoverageMap(
+        cwd,
+        "proj",
+        [], // files=[] -> native full-suite pass, not discovery
+        "run-native-full-heartbeat",
+        undefined,
+        fakeStartVitest,
+      );
+      await vi.advanceTimersByTimeAsync(9000);
+      await promise;
+
+      const progress = sent.filter(isPhaseProgress).filter((m) => m.runId === "run-native-full-heartbeat");
+      expect(progress.length).toBeGreaterThanOrEqual(3); // 1 immediate + >=2 interval ticks
+      expect(progress.every((m) => m.completed === 0 && m.total === 0)).toBe(true);
+    } finally {
+      restore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops heartbeating once the native pass's own (much larger) budget-aware max elapses on a never-resolving call", async () => {
+    vi.useFakeTimers();
+    const { sent, restore } = captureSends();
+    try {
+      const neverResolvingStartVitest: FakeStartVitest = () => new Promise(() => {});
+      const cwd = makeCwd();
+      void buildAndPersistCoverageMap(
+        cwd,
+        "proj",
+        [],
+        "run-native-cap-test",
+        undefined,
+        neverResolvingStartVitest,
+      );
+      // The per-file 130_000 default floor must NOT apply here -- advance past it and confirm
+      // heartbeats are still arriving, because the native pass uses its own 30-minute floor.
+      await vi.advanceTimersByTimeAsync(130_000 + 10_000);
+      const countPastFileCap = sent.filter(isPhaseProgress).length;
+      expect(countPastFileCap).toBeGreaterThan(0);
+      // Now advance past the native pass's own 30-minute floor -- heartbeats must stop.
+      await vi.advanceTimersByTimeAsync(30 * 60_000 + 10_000);
+      const countAtNativeCap = sent.filter(isPhaseProgress).length;
+      expect(countAtNativeCap).toBeGreaterThan(countPastFileCap); // kept heartbeating in between
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(sent.filter(isPhaseProgress).length).toBe(countAtNativeCap); // but no more after the cap
+    } finally {
+      restore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("the native pass's heartbeat cap rises with TEST_MCP_FULL_COVERAGE_BUDGET_MS instead of staying fixed at the 30-minute floor", async () => {
+    vi.useFakeTimers();
+    const original = process.env.TEST_MCP_FULL_COVERAGE_BUDGET_MS;
+    process.env.TEST_MCP_FULL_COVERAGE_BUDGET_MS = String(60 * 60_000); // well above the 30-min floor
+    const { sent, restore } = captureSends();
+    try {
+      const neverResolvingStartVitest: FakeStartVitest = () => new Promise(() => {});
+      const cwd = makeCwd();
+      void buildAndPersistCoverageMap(
+        cwd,
+        "proj",
+        [],
+        "run-native-raised-budget",
+        undefined,
+        neverResolvingStartVitest,
+      );
+      await vi.advanceTimersByTimeAsync(45 * 60_000); // past the 30-min floor, inside the raised 60-min cap
+      const countBeforeNewCap = sent.filter(isPhaseProgress).length;
+      expect(countBeforeNewCap).toBeGreaterThan(0);
+      await vi.advanceTimersByTimeAsync(20 * 60_000); // now past the raised cap too
+      const countAfter = sent.filter(isPhaseProgress).length;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(sent.filter(isPhaseProgress).length).toBe(countAfter);
+      expect(countAfter).toBeGreaterThan(countBeforeNewCap);
+    } finally {
+      restore();
+      vi.useRealTimers();
+      if (original === undefined) delete process.env.TEST_MCP_FULL_COVERAGE_BUDGET_MS;
+      else process.env.TEST_MCP_FULL_COVERAGE_BUDGET_MS = original;
+    }
+  });
+
+  // Story 3.7 Task 6.1/6.7: the story explicitly requires "exactly one startVitest coverage
+  // call" -- assert the literal call count, not just the observable shape of the result.
+  it("calls startVitest exactly once for a full-suite (files=[]) coverage request, never per-file", async () => {
+    let calls = 0;
+    const countingStartVitest: FakeStartVitest = async () => {
+      calls++;
+      return fakeVitestInstance;
+    };
+    const cwd = makeCwd();
+    await buildAndPersistCoverageMap(
+      cwd,
+      "proj",
+      [],
+      "run-native-call-count",
+      undefined,
+      countingStartVitest,
+    );
+    expect(calls).toBe(1);
   });
 });

@@ -38,9 +38,13 @@ async function makeProjectWithMap(): Promise<string> {
     path.join(dir, "other.test.ts"),
     `import { test, expect } from "vitest";\nimport { sub } from "./other.ts";\ntest("sub", () => expect(sub(2, 1)).toBe(1));\n`,
   );
-  // Build the coverage map, THEN commit — so later edits show as changes vs HEAD.
+  // Build the coverage map, THEN commit — so later edits show as changes vs HEAD. Explicit
+  // files: a full-suite run never builds the map (Story 3.7).
   const orch = new Orchestrator({ workerPath });
-  await orch.runTests({ projectId: "sel1", path: dir }, { coverage: true });
+  await orch.runTests(
+    { projectId: "sel1", path: dir },
+    { coverage: true, files: ["math.test.ts", "other.test.ts"] },
+  );
   execFileSync("git", ["init", "-q"], { cwd: dir });
   execFileSync("git", ["add", "-A"], { cwd: dir });
   execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir, env: GIT_ENV });
