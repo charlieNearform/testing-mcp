@@ -385,10 +385,21 @@ describe("changed-since-last-run baseline", () => {
   it("a failed run leaves the snapshot unchanged so the same delta re-runs", async () => {
     proj = makeProject(true);
     seedCoverageMap(proj, mapForProj);
+
+    const orch = new Orchestrator({ workerPath });
+    // Warm up the in-memory test-file inventory with a full run BEFORE introducing the failure.
+    // The Selection Engine's size-based full-run escalation divides the incremental selection by
+    // this project's KNOWN test-file count (Orchestrator.getTestInventoryFileCount) -- a fresh
+    // Orchestrator's inventory starts at 0 and only grows as ITS OWN runs reconcile files, so
+    // without this warm-up the first (1-file) incremental run below would leave the denominator
+    // at exactly 1, making the retry's identical 1-file selection look like "100% of the suite"
+    // and incorrectly escalate to full -- not what this test is about. coverage:false so the
+    // seeded coverage map itself is left untouched.
+    await orch.runTests({ projectId: "g", path: proj }, { mode: "full", coverage: false });
+
     // Break add() so math.test.ts (expects 3) fails on the delta-selected run.
     fs.writeFileSync(path.join(proj, "math.ts"), `export const add = (a: number, b: number) => a + b + 1;\n`);
 
-    const orch = new Orchestrator({ workerPath });
     const result = await orch.runTests({ projectId: "g", path: proj }, { mode: "incremental" });
 
     expect(result.total).toBe(1);

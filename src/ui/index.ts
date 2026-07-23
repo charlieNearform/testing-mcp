@@ -53,6 +53,8 @@ interface ProjectView {
     failed?: number;
     skipped?: number;
     updatedAt?: string;
+    strategy?: string;
+    reason?: string;
   };
   /** Present only while state === "running" (Story 8.7). */
   live?: LiveView;
@@ -118,6 +120,11 @@ export async function uiSnapshot(deps: UiDeps): Promise<{ serverTime: string; pr
           failed: r?.failed,
           skipped: r?.skipped,
           updatedAt: run.updatedAt,
+          // Live selection strategy/reason (set the moment the run starts) so the "running" history
+          // row isn't blank while the run is still in flight -- sourced live rather than only ever
+          // appearing once the run settles into a RunRecord.
+          strategy: run.strategy,
+          reason: run.reason,
         },
         ...(liveView ? { live: liveView } : {}),
       };
@@ -416,16 +423,56 @@ function passTotal(r) {
   return '<span class="' + cls + '"><b>' + (r.passed || 0) + '</b>/<b>' + executed + '</b> passed</span>' + skippedNote;
 }
 
-function card(p) {
+// INNER content only -- the outer <a class="card"> tag is now owned by the grid's persistent
+// shell (see renderList/reconcileChildren below), created once per projectId and never destroyed
+// on a re-render, so a mousedown-on-card followed by an SSE-driven repaint before pointerup no
+// longer drops the click (a browser does not synthesize "click" when the pointerdown target was
+// removed from the DOM before pointerup).
+function cardInner(p) {
   const r = p.run || {};
   const counts = (r.total != null) ? '<div class="counts">' + passTotal(r)
     + '<span class="ts">' + (p.totalTests || 0) + ' total tests</span></div>' : "";
   const summary = r.summary ? '<div class="summary ' + (r.failed ? 'fail' : '') + '">' + esc(r.summary) + '</div>' : "";
   const n = p.runCount || 0;
   const runs = '<div class="ts">' + n + ' run' + (n === 1 ? '' : 's') + ' · click for history</div>';
-  return '<a class="card" href="#/project/' + encodeURIComponent(p.projectId) + '">'
-    + '<h2>' + esc(p.projectId) + '</h2>' + projectLine(p.path)
-    + badge(r.state) + counts + summary + runs + '</a>';
+  return '<h2>' + esc(p.projectId) + '</h2>' + projectLine(p.path) + badge(r.state) + counts + summary + runs;
+}
+
+// Minimal keyed reconciliation (no virtual-DOM diffing): cache is a Map from key to {html, el} --
+// the element itself is looked up by MAP key (never by querying the DOM for it), so a key
+// containing characters that would be invalid/dangerous inside a CSS attribute-selector string
+// (e.g. a quote) can never break or mis-select anything (found via adversarial review: a raw
+// querySelector call built from string concatenation throws a SyntaxError on such a key, breaking
+// the whole render pass). A pass only writes .innerHTML to a key's node when that string actually
+// changed, creates a node (via createEl) for a brand-new key, and removes nodes for keys no
+// longer present -- an unchanged key keeps its exact node identity (and whatever listeners
+// createEl wired up at creation time) across the whole render pass. This is the actual fix for
+// dropped clicks / re-highlighted nodes on unrelated SSE pushes, not an optimization on top of one.
+function reconcileChildren(container, items, keyOf, renderHtml, cache, createEl) {
+  const seen = new Set();
+  let prevEl = null;
+  for (const item of items) {
+    const key = String(keyOf(item)); // coerced once, consistently -- keyOf need not return a string
+    seen.add(key);
+    const html = renderHtml(item);
+    let entry = cache.get(key);
+    if (!entry) {
+      entry = { html: null, el: createEl(item, key) };
+      entry.el.dataset.key = key; // debugging/inspection only -- never read back via querySelector
+      cache.set(key, entry);
+    }
+    if (entry.html !== html) {
+      entry.el.innerHTML = html; // renderHtml returns INNER content only -- the outer tag is createEl's
+      entry.html = html;
+    }
+    if (prevEl ? prevEl.nextSibling !== entry.el : container.firstChild !== entry.el) {
+      container.insertBefore(entry.el, prevEl ? prevEl.nextSibling : container.firstChild);
+    }
+    prevEl = entry.el;
+  }
+  for (const [key, entry] of [...cache]) {
+    if (!seen.has(key)) { entry.el.remove(); cache.delete(key); }
+  }
 }
 
 // Pinned live status banner for the project history view (Story 6.1, AC5) — the same state the
@@ -440,14 +487,39 @@ function statusBanner(pid) {
   return '<div class="banner">' + badge(r.state) + counts + summary + '</div>';
 }
 
+// Persistent shell for the project-cards grid (list route only) -- built once, reused across
+// every SSE-driven re-render of the list route, and released via teardownGrid() when navigating
+// away to a project/run view (mirrors ensureLogEl/placeLogEl's persistent-node lifecycle for the
+// console log panel).
+let gridEl = null;
+const gridCache = new Map();
+
+function teardownGrid() {
+  gridEl = null;
+  gridCache.clear();
+}
+
+function createCardEl(p, key) {
+  const a = document.createElement("a");
+  a.className = "card";
+  a.href = "#/project/" + encodeURIComponent(key);
+  return a;
+}
+
 function renderList() {
   closeLogStream(); // leaving any project's running view -- never leak an open follow connection
+  teardownHistoryTable(); // leaving the project route -- never leave its SSE-independent state live
   viewingLiveRunId = null;
-  document.getElementById("clock").textContent = fmtTime(snapshot.serverTime);
   const ps = snapshot.projects || [];
-  viewTop.innerHTML = ps.length
-    ? '<div class="grid">' + ps.map(card).join("") + '</div>'
-    : '<div class="empty">No projects registered.</div>';
+  if (!ps.length) {
+    teardownGrid();
+    viewTop.innerHTML = '<div class="empty">No projects registered.</div>';
+    viewBottom.innerHTML = "";
+    return;
+  }
+  if (!gridEl) { gridEl = document.createElement("div"); gridEl.className = "grid"; }
+  if (viewTop.firstChild !== gridEl) { viewTop.innerHTML = ""; viewTop.appendChild(gridEl); }
+  reconcileChildren(gridEl, ps, (p) => p.projectId, cardInner, gridCache, createCardEl);
   viewBottom.innerHTML = "";
 }
 
@@ -734,11 +806,75 @@ function wireLiveTestsPanel() {
   if (details) details.addEventListener("toggle", () => { liveTestsOpen = details.open; });
 }
 
+// Persistent shell for a project's run-history table (project-detail route only) -- the <table>
+// (thead+tbody) is built once per project id, reused across every SSE-driven re-render of that
+// SAME project's view, and released via teardownHistoryTable() when navigating to a different
+// project, to the list, or to a run-detail page (mirrors ensureLogEl/placeLogEl's lifecycle).
+let historyTableEl = null;
+let historyTbodyEl = null;
+let historyPid = null;
+const historyCache = new Map();
+
+function teardownHistoryTable() {
+  historyTableEl = null;
+  historyTbodyEl = null;
+  historyPid = null;
+  historyCache.clear();
+}
+
+function ensureHistoryTable(pid) {
+  if (historyTableEl && historyPid === pid) return historyTableEl;
+  teardownHistoryTable();
+  const table = document.createElement("table");
+  table.className = "runs";
+  const thead = document.createElement("thead");
+  thead.innerHTML = '<tr><th>time</th><th>status</th><th>strategy</th><th>pass / executed</th><th>coverage</th><th>duration</th></tr>';
+  const tbody = document.createElement("tbody");
+  table.appendChild(thead);
+  table.appendChild(tbody);
+  historyTableEl = table;
+  historyTbodyEl = tbody;
+  historyPid = pid;
+  return table;
+}
+
+// INNER <td>...</td> content for one history row -- the outer <tr> is owned by the table's
+// persistent shell (via reconcileChildren below), created once per runId with its click listener
+// wired at creation time instead of re-attached via querySelectorAll on every render.
+function historyRowInner(item) {
+  if (item.kind === "live") {
+    const r = item.run || {};
+    return '<td>' + fmtTime(item.updatedAt) + '</td>'
+      + '<td>' + badge("running") + '</td>'
+      + '<td>' + esc(r.strategy || "") + '</td>'
+      + '<td>' + (r.total != null ? passTotal(r) : "–") + '</td>'
+      + '<td>–</td>'
+      + '<td>–</td>';
+  }
+  const r = item.r;
+  return '<td>' + fmtTime(r.startedAt) + '</td>'
+    + '<td>' + badge(r.status) + '</td>'
+    + '<td>' + esc(r.strategy || "") + '</td>'
+    + '<td>' + (r.total != null ? passTotal(r) : "–") + '</td>'
+    + '<td>' + (r.coverageLines != null ? (Math.round(r.coverageLines * 10) / 10) + '%' : "–") + '</td>'
+    + '<td>' + fmtDur(r.durationMs) + '</td>';
+}
+
+function createHistoryRowEl(pid) {
+  return (item, key) => {
+    const tr = document.createElement("tr");
+    tr.className = "row";
+    tr.addEventListener("click", () => go("/project/" + encodeURIComponent(pid) + "/run/" + encodeURIComponent(key)));
+    return tr;
+  };
+}
+
 function renderProject(pid) {
   viewingLiveRunId = null;
+  teardownGrid(); // leaving the list route -- never leave the grid's SSE listeners live behind it
   const p = (snapshot.projects || []).find((x) => x.projectId === pid);
   const head = '<a class="back" href="#/">← projects</a><h2 class="mono">' + esc(pid) + '</h2>' + projectLine(p && p.path);
-  if (!p) { closeLogStream(); viewTop.innerHTML = head + '<div class="empty">Loading…</div>'; viewBottom.innerHTML = ""; return; }
+  if (!p) { closeLogStream(); teardownHistoryTable(); viewTop.innerHTML = head + '<div class="empty">Loading…</div>'; viewBottom.innerHTML = ""; return; }
   const runs = p.runs || [];
   const banner = statusBanner(pid);
   const running = p.run && p.run.state === "running";
@@ -752,34 +888,20 @@ function renderProject(pid) {
   const everRan = running || runs.length > 0;
   // Running run gets its own row at the top of the history table (newest-first) so it's clickable
   // straight to its live detail view, even though it has no RunRecord yet (it's still in flight).
-  const liveRow = (running && p.live && p.live.runId)
-    ? '<tr class="row" data-run="' + esc(p.live.runId) + '">'
-      + '<td>' + fmtTime(p.run.updatedAt) + '</td>'
-      + '<td>' + badge("running") + '</td>'
-      + '<td></td>'
-      + '<td>' + (p.run.total != null ? passTotal(p.run) : "–") + '</td>'
-      + '<td>–</td>'
-      + '<td>–</td></tr>'
-    : "";
+  const liveItem = (running && p.live && p.live.runId)
+    ? { kind: "live", runId: p.live.runId, updatedAt: p.run.updatedAt, run: p.run }
+    : null;
   viewTop.innerHTML = head + banner;
   if (everRan) placeLogEl(pid); else closeLogStream();
-  if (!runs.length && !liveRow) {
+  if (!runs.length && !liveItem) {
+    teardownHistoryTable();
     viewBottom.innerHTML = running ? "" : '<div class="empty">No runs yet — trigger one via run_tests.</div>';
     return;
   }
-  const rows = runs.map((r) =>
-    '<tr class="row" data-run="' + esc(r.runId) + '">'
-    + '<td>' + fmtTime(r.startedAt) + '</td>'
-    + '<td>' + badge(r.status) + '</td>'
-    + '<td>' + esc(r.strategy || "") + '</td>'
-    + '<td>' + (r.total != null ? passTotal(r) : "–") + '</td>'
-    + '<td>' + (r.coverageLines != null ? (Math.round(r.coverageLines * 10) / 10) + '%' : "–") + '</td>'
-    + '<td>' + fmtDur(r.durationMs) + '</td></tr>').join("");
-  viewBottom.innerHTML =
-    '<table class="runs"><thead><tr><th>time</th><th>status</th><th>strategy</th><th>pass / executed</th><th>coverage</th><th>duration</th></tr></thead><tbody>' + liveRow + rows + '</tbody></table>';
-  viewBottom.querySelectorAll("tr.row").forEach((el) => {
-    el.addEventListener("click", () => go("/project/" + encodeURIComponent(pid) + "/run/" + encodeURIComponent(el.getAttribute("data-run"))));
-  });
+  const items = (liveItem ? [liveItem] : []).concat(runs.map((r) => ({ kind: "record", runId: r.runId, r })));
+  const table = ensureHistoryTable(pid);
+  if (viewBottom.firstChild !== table) { viewBottom.innerHTML = ""; viewBottom.appendChild(table); }
+  reconcileChildren(historyTbodyEl, items, (it) => it.runId, historyRowInner, historyCache, createHistoryRowEl(pid));
 }
 
 // The console log section was originally added only to the project page, but a running test's
@@ -811,9 +933,15 @@ function renderLiveRun(pid, runId, proj, back) {
     + kv("status", badge("running"))
     + kv("pass / executed", r.total != null ? passTotal(r) : "–")
     + kv("duration", "running…") + '</div>';
+  // reason (like strategy) is live from the moment the run starts (Story: monitoring UI
+  // re-render fixes) -- shown here, next to the timestamp, matching how a completed run's detail
+  // page pairs its own startedAt with sel.reason. The history table's row stays strategy-only for
+  // both live and completed rows (a full reason sentence doesn't fit a table cell); this is where
+  // the live run's reason is actually surfaced, not left as unrendered plumbing.
   viewTop.innerHTML = back
     + '<h2 class="mono">run ' + esc(String(runId).slice(0, 8)) + '…</h2>'
-    + '<div class="ts">' + fmtTime(r.updatedAt) + ' · in progress</div>'
+    + '<div class="ts">' + fmtTime(r.updatedAt) + ' · in progress'
+    + (r.reason ? ' · ' + esc(r.reason) : '') + '</div>'
     + grid
     + phaseProgressBlock(proj.live && proj.live.phase);
   placeLogEl(pid);
@@ -822,6 +950,10 @@ function renderLiveRun(pid, runId, proj, back) {
 }
 
 async function renderRun(pid, runId) {
+  // A run-detail view (live or completed) never shows the list grid or the project's history
+  // table -- release both persistent shells regardless of which view we're coming from.
+  teardownGrid();
+  teardownHistoryTable();
   const proj = (snapshot.projects || []).find((x) => x.projectId === pid);
   const root = proj ? proj.path : "";
   const back = '<a class="back" href="#/project/' + encodeURIComponent(pid) + '">← runs</a>' + projectLine(root);
@@ -933,8 +1065,31 @@ async function renderRun(pid, runId) {
     + testsBlock;
 }
 
+// The data a given route's render actually depends on -- used by the SSE handler below to skip a
+// redundant render() entirely when a push carries nothing relevant to what's currently on screen.
+// A "project" route (project view, or either run-detail view) depends on that one project's whole
+// entry (its run/live/runs all ride along); the list route depends on the full project array.
+function relevantRouteData(p) {
+  if (p[0] === "project") {
+    const pid = decodeURIComponent(p[1]);
+    return (snapshot.projects || []).find((x) => x.projectId === pid);
+  }
+  return snapshot.projects;
+}
+
+// Last route+data render() actually ran with -- a cheap JSON-string comparison (not DOM diffing)
+// lets the SSE handler tell "nothing relevant changed" apart from "something did" without ever
+// touching viewTop/viewBottom for the former. Kept in sync at the top of render() itself, so it's
+// correct whether render() was reached via the SSE short-circuit below, a hashchange navigation,
+// or the initial page load -- a mismatch (e.g. right after navigating) is the safe default and
+// simply costs one extra render, never a missed one.
+let lastRouteKey = null;
+let lastRouteDataJSON = null;
+
 function render() {
   const p = routeParts();
+  lastRouteKey = p.join("/");
+  lastRouteDataJSON = JSON.stringify(relevantRouteData(p));
   if (p[0] === "project" && p[2] === "run") return renderRun(decodeURIComponent(p[1]), decodeURIComponent(p[3]));
   if (p[0] === "project") return renderProject(decodeURIComponent(p[1]));
   return renderList();
@@ -947,6 +1102,11 @@ function connect() {
   es.onopen = () => live.classList.add("live");
   es.onmessage = (e) => {
     try { snapshot = JSON.parse(e.data); } catch (_) { return; }
+    // Unconditional, regardless of the route short-circuit below -- the clock must keep ticking
+    // even on a push whose route-relevant data happens to be unchanged (found via adversarial
+    // review: it used to live inside renderList(), so skipping render() on such a push silently
+    // froze it even though the server kept sending a fresh serverTime on every message).
+    document.getElementById("clock").textContent = fmtTime(snapshot.serverTime);
     const p = routeParts();
     // Every route re-renders from the freshly-pushed snapshot except a run detail, which is
     // immutable once recorded (its own record never changes after the run completes) -- UNLESS
@@ -955,6 +1115,12 @@ function connect() {
     // a live run just finished still falls through to fetching its now-final RunRecord instead of
     // being stuck on the last "running…" frame.
     if (p[0] === "project" && p[2] === "run" && decodeURIComponent(p[3]) !== viewingLiveRunId) return;
+    // Route-level short-circuit: this push may be for a different project's card/row entirely (the
+    // SSE stream fans out every test-progress event, across every project, to every tab) -- when
+    // this route's own relevant data is byte-for-byte unchanged, skip render() (and therefore every
+    // DOM touch under viewTop/viewBottom) entirely.
+    const routeKey = p.join("/");
+    if (routeKey === lastRouteKey && JSON.stringify(relevantRouteData(p)) === lastRouteDataJSON) return;
     render();
   };
   es.onerror = () => { live.classList.remove("live"); };

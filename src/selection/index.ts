@@ -57,11 +57,38 @@ export interface SelectionInput {
    * (caller didn't check) is treated as "might have one" — conservative, matching prior behaviour.
    */
   dynamicImportsPresent?: boolean;
+  /**
+   * Total distinct test files in the project's known inventory (size-based full-run escalation),
+   * or 0/undefined when there is no inventory yet. Only ever consulted on the final auto-computed
+   * incremental path (never for `changed-only`, `full`, or the empty short-circuit) so a caller
+   * with no denominator, or one that already resolved a different strategy, is unaffected.
+   */
+  totalTestFileCount?: number;
 }
 
 const HIGH: Confidence = { level: "high", reasons: [] };
 function degraded(reasons: string[]): Confidence {
   return { level: "degraded", reasons };
+}
+
+/** Default fraction of the project's known test files above which an auto-computed incremental
+ *  selection escalates to a full run instead (its per-file selection overhead can otherwise make
+ *  it slower than just running everything). */
+const DEFAULT_INCREMENTAL_FULL_THRESHOLD = 0.7;
+
+/** Same env-configurable-numeric convention as `TEST_MCP_MEASURE_BUDGET_MS`/
+ *  `TEST_MCP_FULL_COVERAGE_BUDGET_MS` (src/worker/index.ts), but additionally range-checked: a
+ *  fraction must be `(0, 1]` to mean anything as "a fraction of the suite." Unlike a plain
+ *  `Number.isFinite` guard (which does NOT catch this), an accidentally-blank env value
+ *  (`Number("") === 0`, finite) would otherwise silently make EVERY incremental selection
+ *  escalate to full — inverting the whole feature rather than falling back to the default as
+ *  intended. A value `<= 0` or `> 1` is equally nonsensical (always-escalate / never-escalate)
+ *  and gets the same fallback. Found via adversarial review, not anticipated originally. */
+function getIncrementalFullThreshold(): number {
+  const raw = Number(
+    process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD ?? DEFAULT_INCREMENTAL_FULL_THRESHOLD,
+  );
+  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : DEFAULT_INCREMENTAL_FULL_THRESHOLD;
 }
 
 /** A test file by convention (path- or name-based). Matches the Coverage Engine's rule. */
@@ -71,7 +98,7 @@ export function isTestFile(rel: string): boolean {
 
 export class SelectionEngine {
   static plan(input: SelectionInput): SelectionPlan {
-    const { changedFiles, addedFiles, map, strict, dynamicImportsPresent } = input;
+    const { changedFiles, addedFiles, map, strict, dynamicImportsPresent, totalTestFileCount } = input;
     const mightMissDynamicImport = dynamicImportsPresent !== false;
 
     // Can't tell what changed (e.g. not a git repo) -> full suite, which IS complete -> high.
@@ -179,6 +206,27 @@ export class SelectionEngine {
     // `since: "last-run"` request back out to "everything uncommitted since HEAD" for no benefit —
     // a fully-mapped, re-measured selection is already provably complete (Story 6.8 AC1).
     const union = unmappedSourceSeen;
+    // Size-based full-run escalation: only reachable from this auto-computed path (never from
+    // `changed-only`/`full`/the empty short-circuit above, nor from the explicit `files:[...]`
+    // caller in resolveSelection, which never calls plan() at all). A zero/undefined denominator
+    // (no inventory yet) must never divide-by-zero into a false "full" — skip the check entirely.
+    if (totalTestFileCount) {
+      const fraction = selected.size / totalTestFileCount;
+      if (fraction > getIncrementalFullThreshold()) {
+        // Clamped to 100 -- `selected.size` can exceed `totalTestFileCount` (a just-added test
+        // file the inventory hasn't reconciled yet is still a real, valid selection target), and
+        // an uncapped percentage would read as a nonsensical "150% of the suite." The raw
+        // numerator/denominator are still reported alongside it, so nothing is hidden.
+        const pct = Math.min(100, Math.round(fraction * 100));
+        return {
+          strategy: "full",
+          // A full run IS complete regardless of why it was chosen -> high, same as any other
+          // full-suite decision above.
+          reason: `incremental selection would run ${pct}% of the suite (${selected.size}/${totalTestFileCount} test files); running full for speed`,
+          confidence: HIGH,
+        };
+      }
+    }
     return {
       strategy: "incremental",
       reason: !union

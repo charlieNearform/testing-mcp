@@ -60,6 +60,11 @@ export interface RunStatus {
   updatedAt?: string;
   /** The run this status reflects (Story 8.4) — set when a run starts, kept through settle. */
   runId?: string;
+  /** The resolved selection strategy/reason for this run, set the moment it starts (mirrors the
+   *  completed result's `selection.strategy`/`.reason`) so the monitoring UI's live row isn't
+   *  blank while the run is still in flight. */
+  strategy?: string;
+  reason?: string;
 }
 
 /** A single test's live status while its run is in flight (Story 8.5). */
@@ -476,6 +481,7 @@ export class Orchestrator {
         map,
         strict: opts.strict,
         dynamicImportsPresent,
+        totalTestFileCount: this.getTestInventoryFileCount(project.projectId),
       });
       if (plan.strategy === "full") {
         return { files: [], changed: false, strategy: "full", reason: plan.reason, empty: false, deltaDriven: true, pendingSnapshot, confidence: plan.confidence };
@@ -546,6 +552,8 @@ export class Orchestrator {
         progress: undefined,
         lastError: undefined,
         runId,
+        strategy: sel.strategy,
+        reason: sel.reason,
       });
 
       // Bounded, transient live view (Story 8.5) -- created up front so a hang before the worker
@@ -972,6 +980,12 @@ export class Orchestrator {
     let count = 0;
     for (const names of inv.values()) count += names.size;
     return count;
+  }
+
+  /** Number of distinct test FILES in the project's inventory, 0 if none cached yet — the
+   *  denominator for the Selection Engine's size-based full-run escalation. */
+  getTestInventoryFileCount(projectId: string): number {
+    return this.testInventory.get(projectId)?.size ?? 0;
   }
 
   /**

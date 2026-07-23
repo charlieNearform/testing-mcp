@@ -1,5 +1,11 @@
 # Deferred Work Ledger
 
+## Deferred from: spec-ui-rerender-and-selection-threshold (2026-07-24)
+
+- source_spec: `spec-ui-rerender-and-selection-threshold.md`
+  summary: The Selection Engine's size-based full-run escalation divides by `Orchestrator.getTestInventoryFileCount(projectId)` — an IN-MEMORY count that starts at 0 for a fresh `Orchestrator` instance (e.g. right after a daemon (re)start, before `loadTestInventory` has rehydrated it, or simply before a project's inventory has seen every one of its test files at least once) and only grows as runs reconcile files. Until it's warmed up, an early incremental selection can look like it covers a much larger fraction of the "known" suite than it really does relative to the project's TRUE total, causing the escalation to fire more eagerly than the spec's own example ("312/366 test files") implies for a mature project.
+  evidence: Found while implementing the escalation — two pre-existing test fixtures (`test/git-selection.test.ts`, `test/selection-integration.test.ts`) hit exactly this cold-start case and had to be fixed (inventory warmed via an extra run / an explicit `loadTestInventory` call) to keep exercising their original, unrelated assertions. Never unsafe (escalating to `"full"` is always complete, architecture invariant 5) — the residual risk is purely "escalates more than intended until the inventory is warm," which self-heals but could surprise a newly-registered project's first several runs. Consider seeding the daemon's `loadTestInventory` rehydration (already called at startup per-project) more eagerly, or basing the denominator on a cheap discovery pass instead of the reconciled-from-runs inventory, as a follow-up.
+
 ## Deferred from: code review of story-3-7-native-full-suite-coverage-pass (2026-07-23)
 
 - source_spec: `3-7-native-full-suite-coverage-pass.md`

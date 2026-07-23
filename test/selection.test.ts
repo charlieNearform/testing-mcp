@@ -169,6 +169,171 @@ describe("SelectionEngine.plan", () => {
   });
 });
 
+describe("SelectionEngine.plan size-based full-run escalation", () => {
+  it("never escalates when there is no test-file inventory yet (0 denominator)", () => {
+    // 3 selected tests would be well over threshold against any small positive denominator, but
+    // there's no inventory to divide by yet -- must never divide-by-zero into a false "full".
+    const plan = SelectionEngine.plan({
+      changedFiles: ["a.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts", "b.test.ts", "c.test.ts"] }),
+      totalTestFileCount: 0,
+    });
+    expect(plan).toMatchObject({ strategy: "incremental" });
+    if (plan.strategy === "incremental") expect(plan.testFiles).toEqual(["a.test.ts", "b.test.ts", "c.test.ts"]);
+  });
+
+  it("also never escalates when totalTestFileCount is simply absent (same as 0)", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["a.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts", "b.test.ts", "c.test.ts"] }),
+    });
+    expect(plan).toMatchObject({ strategy: "incremental" });
+  });
+
+  it("escalates to a full run when the selection exceeds the default 70% threshold", () => {
+    // 3 of 4 known test files selected -> 75%, over the 70% default -> escalate.
+    const plan = SelectionEngine.plan({
+      changedFiles: ["a.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts", "b.test.ts", "c.test.ts"] }),
+      totalTestFileCount: 4,
+    });
+    expect(plan).toMatchObject({
+      strategy: "full",
+      confidence: { level: "high", reasons: [] }, // a full run IS complete regardless of why chosen
+    });
+    expect(plan.reason).toContain("75%");
+    expect(plan.reason).toContain("3/4 test files");
+  });
+
+  it("does NOT escalate exactly at the threshold boundary (70% is not > 70%)", () => {
+    // 7 of 10 known test files selected -> exactly 70%, not over the default threshold.
+    const plan = SelectionEngine.plan({
+      changedFiles: ["a.ts"],
+      map: mapWith({
+        "a.ts": ["t1.test.ts", "t2.test.ts", "t3.test.ts", "t4.test.ts", "t5.test.ts", "t6.test.ts", "t7.test.ts"],
+      }),
+      totalTestFileCount: 10,
+    });
+    expect(plan).toMatchObject({ strategy: "incremental" });
+    if (plan.strategy === "incremental") expect(plan.testFiles).toHaveLength(7);
+  });
+
+  it("respects TEST_MCP_INCREMENTAL_FULL_THRESHOLD when set", () => {
+    const prior = process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD;
+    process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD = "0.5";
+    try {
+      // 3 of 4 -> 75%, over the lowered 50% threshold -> escalate (would NOT escalate at the
+      // default 70% threshold used by the sibling test above with the same map).
+      const plan = SelectionEngine.plan({
+        changedFiles: ["a.ts"],
+        map: mapWith({ "a.ts": ["a.test.ts", "b.test.ts", "c.test.ts"] }),
+        totalTestFileCount: 4,
+      });
+      expect(plan).toMatchObject({ strategy: "full" });
+    } finally {
+      if (prior === undefined) delete process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD;
+      else process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD = prior;
+    }
+  });
+
+  // Explicit `files: [...]` requests never reach this check at all -- resolveSelection's explicit
+  // branch (src/orchestrator/index.ts) returns before ever calling SelectionEngine.plan(), so
+  // there's no plan()-level input that represents "explicit files" directly. What IS assertable
+  // here is the other half of the same guarantee the spec requires: the escalation is wired into
+  // ONLY the final auto-computed incremental return, so a plan() branch that resolves without
+  // reaching it (like "only test files changed", below) ignores totalTestFileCount even when a
+  // naive fraction would be far over threshold -- structurally the same bypass explicit files get.
+  it("does not escalate the 'only test files changed' branch even when it would be over threshold", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["a.test.ts", "b.test.ts"],
+      map: mapWith({}),
+      // If checked here, 2/1 would be 200% -- nowhere near escalatable; it must not be checked at all.
+      totalTestFileCount: 1,
+    });
+    expect(plan).toMatchObject({ strategy: "incremental", reason: "only test files changed" });
+    if (plan.strategy === "incremental") expect(plan.testFiles).toEqual(["a.test.ts", "b.test.ts"]);
+  });
+
+  // `strict`/`changed-only` both resolve to their OWN branch before the size check is ever
+  // reached (the check only lives in the final auto-computed incremental return) -- verified
+  // directly, not just inferred from "the code only has one call site."
+  it("does not escalate the 'strict, no map' branch even when it would be over threshold", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["a.ts"],
+      map: null,
+      strict: true,
+      totalTestFileCount: 1,
+    });
+    expect(plan).toMatchObject({ strategy: "full", reason: "source changed; no coverage map (strict)" });
+  });
+
+  it("does not escalate the 'changed-only, no map' branch even when it would be over threshold", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["a.ts"],
+      map: null,
+      totalTestFileCount: 1,
+    });
+    expect(plan).toMatchObject({ strategy: "changed-only" });
+  });
+
+  // Found via adversarial review: Number("") is 0 (finite), so a naive Number.isFinite guard does
+  // NOT catch an accidentally-blank env value -- it would silently make the threshold 0, escalating
+  // every incremental selection instead of falling back to the default as intended.
+  it("falls back to the default threshold when the env override is blank", () => {
+    const prior = process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD;
+    process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD = "";
+    try {
+      // 1 of 4 -> 25%, well under the default 70% -- if the blank string had silently become 0,
+      // this would escalate; it must not.
+      const plan = SelectionEngine.plan({
+        changedFiles: ["a.ts"],
+        map: mapWith({ "a.ts": ["a.test.ts"] }),
+        totalTestFileCount: 4,
+      });
+      expect(plan).toMatchObject({ strategy: "incremental" });
+    } finally {
+      if (prior === undefined) delete process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD;
+      else process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD = prior;
+    }
+  });
+
+  it("falls back to the default threshold when the env override is out of (0, 1] range", () => {
+    const prior = process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD;
+    try {
+      for (const bad of ["0", "-0.5", "1.5"]) {
+        process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD = bad;
+        // Same 25%-of-4 case as above -- under the real default (0.7) regardless of `bad`'s
+        // nonsensical value (always-escalate at 0/negative, never-escalate at >1 would both be
+        // wrong to observe here if the guard failed).
+        const plan = SelectionEngine.plan({
+          changedFiles: ["a.ts"],
+          map: mapWith({ "a.ts": ["a.test.ts"] }),
+          totalTestFileCount: 4,
+        });
+        expect(plan).toMatchObject({ strategy: "incremental" });
+      }
+    } finally {
+      if (prior === undefined) delete process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD;
+      else process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD = prior;
+    }
+  });
+
+  // Found via adversarial review: `selected.size` can exceed `totalTestFileCount` (a just-added
+  // test file the inventory hasn't reconciled yet is still a valid selection target) -- the
+  // reported percentage must be capped, not read as a nonsensical "150% of the suite."
+  it("caps the reported percentage at 100% when the selection exceeds the known total", () => {
+    const plan = SelectionEngine.plan({
+      changedFiles: ["a.ts"],
+      map: mapWith({ "a.ts": ["a.test.ts", "b.test.ts", "c.test.ts", "d.test.ts", "e.test.ts", "f.test.ts"] }),
+      totalTestFileCount: 4, // 6 selected > 4 known -> would be 150% uncapped
+    });
+    expect(plan).toMatchObject({ strategy: "full" });
+    expect(plan.reason).toContain("100%");
+    expect(plan.reason).toContain("6/4 test files");
+    expect(plan.reason).not.toContain("150%");
+  });
+});
+
 describe("SelectionEngine.plan confidence (Story 6.8)", () => {
   it("is high when all changed sources are mapped", () => {
     const plan = SelectionEngine.plan({
