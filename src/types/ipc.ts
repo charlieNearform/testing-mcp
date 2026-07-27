@@ -1,9 +1,6 @@
 import { z } from "zod";
 import { TestResult, FailureDetail } from "./contracts.js";
 
-// Placeholder in Story 1.0 — real shape defined with the Coverage Engine (Epic 2).
-export type CoverageDelta = Record<string, unknown>;
-
 export type ToWorker =
   | {
       type: "run";
@@ -11,8 +8,13 @@ export type ToWorker =
       projectId: string;
       files: string[];
       coverage: boolean;
-      allTestsRun: boolean;
-      changed: boolean;
+      /**
+       * Present + non-empty (Story 3.8): a related-based incremental selection -- fed straight
+       * into Vitest's `related` config field (the orchestrator's since-last-run snapshot delta),
+       * which resolves affected tests via the static import graph and skips Vitest's own git
+       * lookup entirely. Absent means a full suite or an explicit `files` selection.
+       */
+      relatedFiles?: string[];
     }
   | { type: "cancel"; runId: string }
   | { type: "shutdown" };
@@ -35,17 +37,9 @@ export type FromWorker =
       status: "passed" | "failed" | "skipped";
     }
   | {
-      type: "phase-progress";
-      runId: string;
-      phase: "coverage";
-      completed: number;
-      total: number;
-    }
-  | {
       type: "result";
       runId: string;
       result: TestResult;
-      coverageDelta?: CoverageDelta;
       failureDetails?: FailureDetail[];
     }
   | { type: "error"; runId: string; message: string; stack?: string };
@@ -99,8 +93,7 @@ const ToWorkerSchema = z.discriminatedUnion("type", [
     projectId: z.string(),
     files: z.array(z.string()),
     coverage: z.boolean(),
-    allTestsRun: z.boolean(),
-    changed: z.boolean(),
+    relatedFiles: z.array(z.string()).optional(),
   }),
   z.object({ type: z.literal("cancel"), runId: z.string() }),
   z.object({ type: z.literal("shutdown") }),
@@ -133,17 +126,9 @@ const FromWorkerSchema = z.discriminatedUnion("type", [
     status: z.enum(["passed", "failed", "skipped"]),
   }),
   z.object({
-    type: z.literal("phase-progress"),
-    runId: z.string(),
-    phase: z.literal("coverage"),
-    completed: z.number(),
-    total: z.number(),
-  }),
-  z.object({
     type: z.literal("result"),
     runId: z.string(),
     result: resultShape,
-    coverageDelta: z.record(z.string(), z.unknown()).optional(),
     failureDetails: z.array(z.object({ id: z.string() }).passthrough()).optional(),
   }),
   z.object({

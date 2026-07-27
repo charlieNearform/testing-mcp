@@ -2,26 +2,16 @@ import { afterEach, describe, it, expect } from "vitest";
 import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Orchestrator } from "../src/orchestrator/index.ts";
-import { loadCoverageMap, coverageMapPath } from "../src/coverage/index.ts";
 
-// Story 3.7: a full-suite coverage run is a single native Vitest pass (the equivalent of
-// `vitest run --coverage`), not one process per test file, and never builds/refreshes the
-// reverse coverage map.
+// Story 3.7 introduced the single native Vitest coverage pass; Story 3.8 made it the ONLY
+// coverage mechanism left (unified into the SAME pass that produces real test results, and
+// full-suite-only -- the reverse coverage map this file used to also assert on is deleted).
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const workerPath = path.join(repoRoot, "dist", "worker", "index.js");
 const repoNodeModules = path.join(repoRoot, "node_modules");
-
-const GIT_ENV = {
-  ...process.env,
-  GIT_AUTHOR_NAME: "t",
-  GIT_AUTHOR_EMAIL: "t@example.com",
-  GIT_COMMITTER_NAME: "t",
-  GIT_COMMITTER_EMAIL: "t@example.com",
-};
 
 let proj: string;
 
@@ -52,24 +42,26 @@ afterEach(() => {
   if (proj) fs.rmSync(proj, { recursive: true, force: true });
 });
 
-describe("native full-suite coverage pass (Story 3.7)", () => {
-  it("reports sane whole-project percentages from one native pass and never writes a coverage-map file", async () => {
+describe("native full-suite coverage pass (Story 3.7, unified single-pass in Story 3.8)", () => {
+  it("reports sane whole-project percentages from one native pass; no coverage-map file ever exists", async () => {
     proj = makeProject();
     const orch = new Orchestrator({ workerPath });
 
     const result = await orch.runTests({ projectId: "native1", path: proj }, { coverage: true });
 
     expect(result.coverage).toBeDefined();
-    expect(result.coverage!.combined).toBeUndefined();
     expect(result.coverage!.confidence?.level).toBe("high");
     expect(result.coverage!.total.lines).toBeGreaterThan(0);
     expect(result.coverage!.total.lines).toBeLessThanOrEqual(100);
     expect(result.coverage!.files.some((f) => f.file.includes("math.ts"))).toBe(true);
     expect(result.coverage!.files.some((f) => f.file.includes("other.ts"))).toBe(true);
-    expect(result.coverage!.files.every((f) => f.fresh === true)).toBe(true);
-    expect(result.coverage!.files.every((f) => f.stale === undefined)).toBe(true);
+    // The retired combined-coverage shape's fresh/stale/combined flags no longer exist at all
+    // (Story 3.8 Task 5.3) -- every file in a single-pass report is definitionally fresh.
+    expect(result.coverage!.files.every((f) => !("fresh" in f) && !("stale" in f))).toBe(true);
+    expect("combined" in result.coverage!).toBe(false);
 
-    expect(loadCoverageMap(proj)).toBeNull();
+    // No reverse coverage map module exists anymore -- nothing could have written one.
+    expect(fs.existsSync(path.join(proj, ".test-mcp", "coverage-map.json"))).toBe(false);
   }, 120_000);
 
   it("computes thresholdsMet manually against real percentages, without relying on Vitest's own threshold gate", async () => {
@@ -92,43 +84,16 @@ describe("native full-suite coverage pass (Story 3.7)", () => {
     expect(result.coverage!.thresholdsMet).toBe(false);
   }, 120_000);
 
-  it("a changed-only run (no map yet) with coverage explicitly forced to true also takes the native pass, not per-file discovery", async () => {
-    proj = makeProject();
-    execFileSync("git", ["init", "-q"], { cwd: proj });
-    execFileSync("git", ["add", "-A"], { cwd: proj });
-    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: proj, env: GIT_ENV });
-    fs.appendFileSync(path.join(proj, "math.ts"), `// touched\n`);
-
-    const orch = new Orchestrator({ workerPath });
-    const result = await orch.runTests(
-      { projectId: "native3", path: proj },
-      { mode: "incremental", coverage: true },
-    );
-
-    // No map exists yet -> the changed-only fallback strategy (files: [], resolved via Vitest's
-    // own static --changed graph), which the worker treats identically to a true full-suite run
-    // for coverage purposes (Story 3.7 Dev Notes) -- native pass, no map ever written.
-    expect(result.selection.strategy).toBe("incremental");
-    expect(result.coverage).toBeDefined();
-    expect(result.coverage!.combined).toBeUndefined();
-    expect(loadCoverageMap(proj)).toBeNull();
-  }, 120_000);
-
-  it("leaves an already-existing coverage map file byte-for-byte unchanged after a full-suite coverage run", async () => {
+  it("produces both real test results AND coverage from the SAME single pass (exactly one Vitest invocation)", async () => {
     proj = makeProject();
     const orch = new Orchestrator({ workerPath });
 
-    // Seed a real map via an explicit-files run (the only path that builds one -- Story 3.7).
-    await orch.runTests(
-      { projectId: "native4", path: proj },
-      { coverage: true, files: ["math.test.ts", "other.test.ts"] },
-    );
-    const before = fs.readFileSync(coverageMapPath(proj), "utf8");
+    const result = await orch.runTests({ projectId: "native5", path: proj }, { coverage: true });
 
-    const result = await orch.runTests({ projectId: "native4", path: proj }, { coverage: true });
+    // Real results (not a synthetic/empty shape) came out of the SAME call that produced coverage.
+    expect(result.total).toBe(2);
+    expect(result.selection.strategy).toBe("full");
+    expect(result.tests?.length).toBe(2);
     expect(result.coverage).toBeDefined();
-
-    const after = fs.readFileSync(coverageMapPath(proj), "utf8");
-    expect(after).toBe(before);
   }, 120_000);
 });

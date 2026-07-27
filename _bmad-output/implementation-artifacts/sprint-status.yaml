@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-13
-last_updated: 2026-07-23
+last_updated: 2026-07-27
 project: test-server-mcp
 project_key: NOKEY
 tracking_system: file-system
@@ -101,16 +101,36 @@ development_status:
   epic-2-retrospective: optional
 
   # Epic 3: Intelligent Test Selection (Phase 1)
-  # Reopened 2026-07-22, re-closed 2026-07-23: 3-2 shipped with naive per-test-file coverage
-  # measurement instead of the architecture's own "mandatory" single-pass snapshot-diff design
-  # (docs/architecture.md Open Risk #1; deferred-work.md recorded this as an "approved trade-off"
-  # at the time). Confirmed on a real project to cause ~8x slowdown and daemon crashes, negating
-  # the tool's purpose for larger suites. 3-7 resolved this differently: full-suite coverage
-  # becomes a single native Vitest pass (no per-file attribution, no reverse-map refresh); the
-  # reverse map remains soft/optional per src/selection/index.ts's existing fallback, so
-  # single-pass snapshot-diffing / vendoring testpick was never needed. Code-reviewed 2026-07-23
-  # (10 patches applied, 1 pre-existing item deferred, 10 dismissed). Story file:
-  # 3-7-native-full-suite-coverage-pass.md.
+  # Reopened 2026-07-22, re-closed 2026-07-23, reopened again 2026-07-24: 3-2 shipped with naive
+  # per-test-file coverage measurement instead of the architecture's own "mandatory" single-pass
+  # snapshot-diff design (docs/architecture.md Open Risk #1; deferred-work.md recorded this as an
+  # "approved trade-off" at the time). Confirmed on a real project to cause ~8x slowdown and daemon
+  # crashes, negating the tool's purpose for larger suites. 3-7 resolved the FULL-SUITE case
+  # differently: a single native Vitest pass (no per-file attribution, no reverse-map refresh).
+  # 3-7 shipped 2026-07-23, code-reviewed same day (10 patches, 1 deferred, 10 dismissed) — but its
+  # own INCREMENTAL path still fell through to the old per-file measurement loop whenever a caller
+  # explicitly requested coverage there (1 real-results pass + N separate per-file passes — still a
+  # multi-pass violation, just narrower than before). A real production run on 2026-07-24 exposed
+  # this plus a silent-degrade diagnostics gap in 3-7's own new code. Investigating the fix
+  # (generalizing 3-7's single-pass-with-optional-coverage mechanism to ANY file set, not just
+  # full-suite) surfaced that a single Vitest pass can produce an aggregate coverage PERCENTAGE for
+  # any file set, but can never produce PER-TEST ATTRIBUTION (which test covers which source) --
+  # that fundamentally requires per-file measurement, which is now categorically forbidden (every
+  # run, of any strategy, must be exactly one Vitest pass). Confirmed with the user 2026-07-24: this
+  # retires the reverse coverage map ENTIRELY, not just for full-suite -- 3-2/3-3/3-4 and half of
+  # 3-5 (the "union with coverage map" half) become dead design, superseded, not merely deferred.
+  # 3-8 (to be authored via bmad-create-story) implements the unified single-pass mechanism (works
+  # identically for full or incremental, coverage on/off per flag) and removes the now-dead
+  # per-file measurement / reverse-map machinery. Selection permanently relies on the static
+  # --changed import graph (3-1) alone going forward; SelectionEngine.plan's map-consuming
+  # branches and Story 3.5's map-union half become unreachable dead code to remove alongside it.
+  # Re-closed 2026-07-27: 3-8 implemented (net -2033 LOC — retired the reverse coverage map,
+  # per-file measurement, setup-baseline subtraction, unmeasurable-tracking, combined-coverage
+  # union; unified single-pass via Vitest `related`), code-reviewed same day (3 adversarial layers
+  # on Opus, implementer was Sonnet). Review found 1 HIGH (coverage-tail watchdog heartbeat gap —
+  # exactly the large-project scenario the epic exists for), 3 MEDIUM, 4 LOW; all 8 patched +
+  # tests, 1 decision resolved (keep size-escalation heuristic as-is), the rest dismissed/deferred.
+  # typecheck/build clean, 291/291 tests pass.
   epic-3: done
   3-1-git-aware-delta-selection: done
   3-2-coverage-reverse-map-build-persist: done
@@ -119,6 +139,7 @@ development_status:
   3-5-smart-re-run-decision-union-fallback: done
   3-6-watch-incremental-mode: done
   3-7-native-full-suite-coverage-pass: done
+  3-8-unified-single-pass-coverage-map-retirement: done
   epic-3-retrospective: optional
 
   # Epic 4: Agent Workflow — Dry Run, Output & Status (Phase 1)

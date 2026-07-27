@@ -1,15 +1,16 @@
 import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import type { TestResult, FailureDetail, TestPlan } from "../types/contracts.js";
 import { parseFromWorker, type ToWorker, type FromWorker } from "../types/ipc.js";
-import { loadCoverageMap } from "../coverage/index.js";
 import {
   SelectionEngine,
   getChangedFiles,
   hasDynamicImportSyntax,
+  isTestFile,
   type Confidence,
 } from "../selection/index.js";
 import {
@@ -51,6 +52,21 @@ export class PlanError extends Error {
   }
 }
 
+/**
+ * Error thrown when `coverage: true` is requested on a resolved selection that is not a
+ * genuine full-suite run (Story 3.8 AC2) -- coverage is full-suite-only now (one Vitest pass
+ * either way makes it uniformly cheap there), so an incremental/selective request asking for it
+ * is a caller mistake that must be surfaced, never silently downgraded to no-coverage (CLAUDE.md:
+ * fail loud and specific). Mirrors WorkerError/PlanError's shape.
+ */
+export class SelectionError extends Error {
+  readonly code = "ValidationError" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "SelectionError";
+  }
+}
+
 /** Pollable run state for a project (Story 4.2). */
 export interface RunStatus {
   state: "idle" | "running" | "complete" | "error";
@@ -81,13 +97,6 @@ export interface LiveLogLine {
   at: string;
 }
 
-/** Coverage-phase heartbeat surfaced identically to test-level progress (AD-20/AD-21). */
-export interface LivePhase {
-  phase: "coverage";
-  completed: number;
-  total: number;
-}
-
 /** Bounded, transient, in-flight-only view of one project's current/most-recent run (Story 8.5). */
 interface LiveRunState {
   runId: string;
@@ -99,7 +108,6 @@ interface LiveRunState {
   log: LiveLogLine[];
   stdoutResidual: string;
   stderrResidual: string;
-  phase?: LivePhase;
 }
 
 const MAX_LIVE_TEST_ENTRIES = 2000;
@@ -138,7 +146,12 @@ export interface RunRecord {
 /** Concrete, resolved execution parameters plus human-facing selection info. */
 interface ResolvedSelection {
   files: string[];
-  changed: boolean;
+  /**
+   * Present + non-empty (Story 3.8): a related-based incremental selection, fed straight into
+   * Vitest's `related` config field by the worker. Undefined means a full suite or an explicit
+   * `files` selection.
+   */
+  relatedFiles?: string[];
   strategy: "full" | "incremental";
   reason: string;
   /** Nothing to run (e.g. incremental with no changes) — do not dispatch a worker. */
@@ -162,7 +175,7 @@ interface ResolvedSelection {
 interface StoredPlan {
   projectId: string;
   files: string[];
-  changed: boolean;
+  relatedFiles?: string[];
   empty: boolean;
   expiresAtMs: number;
   confidence: Confidence;
@@ -254,21 +267,15 @@ export class Orchestrator {
       files?: string[];
       mode?: string;
       /**
-       * Explicit override. When omitted on a FULL-SUITE run, defaults to whether the project
-       * already has a coverage map: "opt out" (pass `false`) once coverage has been enabled for
-       * a project, "opt in" (off) until it has — a project that has never proven coverage works
-       * there isn't forced into an unmeasured attempt on every run. On an incremental/selective
-       * run, omitted always means `false` regardless of whether a map exists (Story 3.7 AC4) —
-       * a full-suite run's coverage is now one cheap native Vitest pass, so auto-enabling it
-       * there costs little; auto-enabling it on a fast, in-loop selective run would silently
-       * re-trigger the (still real, if bounded) per-file measurement cost that story is meant to
-       * avoid during iterative development.
+       * Explicit override. Omitted on a genuine full-suite run defaults to `true` unconditionally
+       * (Story 3.8 AC3) -- coverage is now one uniformly cheap native Vitest pass either way, so
+       * there is no map-exists gate left to check. Omitted on any other resolved strategy
+       * (incremental/selective) defaults to `false`; explicitly passing `true` there throws
+       * `SelectionError` (AC2) -- coverage is full-suite-only, never silently downgraded.
        */
       coverage?: boolean;
       /** Incremental baseline: "last-run" (default, hash-diff vs snapshot) or "head" (git HEAD). */
       since?: "last-run" | "head";
-      /** Opt-out (Story 6.8): force full on any unmapped-source uncertainty (old behaviour). */
-      strict?: boolean;
       onProgress?: ProgressFn;
     } = {},
   ): Promise<TestResult> {
@@ -289,15 +296,22 @@ export class Orchestrator {
       mode?: string;
       coverage?: boolean;
       since?: "last-run" | "head";
-      strict?: boolean;
       onProgress?: ProgressFn;
     } = {},
   ): { runId: string; result: Promise<TestResult> } {
     const runId = randomUUID();
     const sel = this.resolveSelection(project, opts);
-    // The map-exists auto-default only applies to a genuine full-suite run (Story 3.7 AC4) --
-    // any other resolved strategy (incremental/changed-only) defaults to `false` when omitted.
-    const coverage = opts.coverage ?? (sel.strategy === "full" && loadCoverageMap(project.path) !== null);
+    // Full always defaults coverage on, unconditionally (Story 3.8 AC3) -- no more map-exists
+    // gate; a single Vitest pass measures coverage cheaply either way. Any other resolved
+    // strategy defaults to `false` when omitted.
+    const coverage = opts.coverage ?? sel.strategy === "full";
+    if (opts.coverage === true && sel.strategy !== "full") {
+      // AC2: coverage is full-suite-only -- a caller who explicitly asked for it on an
+      // incremental/selective run must be told, never silently downgraded to no-coverage.
+      throw new SelectionError(
+        `coverage is only available on a full-suite run (this request resolved to "${sel.strategy}": ${sel.reason})`,
+      );
+    }
     const result = this.enqueue(project, sel, coverage, runId, opts.onProgress);
     return { runId, result };
   }
@@ -313,18 +327,26 @@ export class Orchestrator {
   /** Compute a plan without executing (Story 4.1 dry-run). */
   plan(
     project: ProjectRef,
-    opts: { files?: string[]; mode?: string; since?: "last-run" | "head"; strict?: boolean },
+    opts: { files?: string[]; mode?: string; since?: "last-run" | "head"; coverage?: boolean },
   ): TestPlan {
     this.sweepExpiredPlans();
     const started = Date.now();
     const sel = this.resolveSelection(project, opts);
+    if (opts.coverage === true && sel.strategy !== "full") {
+      // Mirror startRun's AC2 constraint on the dry-run path (Patch I): a dry run must preview the
+      // SAME error the real run would throw -- coverage is full-suite-only -- rather than falsely
+      // previewing success for a request the real run would reject.
+      throw new SelectionError(
+        `coverage is only available on a full-suite run (this request resolved to "${sel.strategy}": ${sel.reason})`,
+      );
+    }
     const latencyMs = Date.now() - started;
     const planId = randomUUID();
     const expiresAtMs = Date.now() + this.planTtlMs;
     this.plans.set(planId, {
       projectId: project.projectId,
       files: sel.files,
-      changed: sel.changed,
+      relatedFiles: sel.relatedFiles,
       empty: sel.empty,
       expiresAtMs,
       confidence: sel.confidence,
@@ -376,12 +398,12 @@ export class Orchestrator {
       project,
       {
         files: stored.files,
-        changed: stored.changed,
+        relatedFiles: stored.relatedFiles,
         empty: stored.empty,
-        // A changed-only plan has empty `files` but still runs incrementally (git --changed),
-        // so derive from `changed` too — not `files.length` alone — or the result would be
-        // mislabelled "full" while running a bounded set.
-        strategy: stored.changed || stored.files.length ? "incremental" : "full",
+        // A related-based plan has empty `files` but still runs incrementally, so derive from
+        // `relatedFiles` too — not `files.length` alone — or the result would be mislabelled
+        // "full" while running a bounded set.
+        strategy: stored.relatedFiles?.length || stored.files.length ? "incremental" : "full",
         reason: "committed plan",
         // A committed plan replays a frozen selection; conservatively it does not advance the
         // last-run snapshot (never under-selects — the snapshot just stays on its prior baseline).
@@ -448,10 +470,11 @@ export class Orchestrator {
     return run;
   }
 
-  /** Resolve a request into concrete {files, changed} via the Selection Engine (Story 3.5). */
+  /** Resolve a request into concrete {files, relatedFiles} via the Selection Engine (Story 3.5,
+   *  simplified in Story 3.8 -- there is no more map/static-graph split to resolve between). */
   private resolveSelection(
     project: ProjectRef,
-    opts: { files?: string[]; mode?: string; since?: "last-run" | "head"; strict?: boolean },
+    opts: { files?: string[]; mode?: string; since?: "last-run" | "head" },
   ): ResolvedSelection {
     const explicit = opts.files ?? [];
     if (opts.mode === "incremental" && explicit.length === 0) {
@@ -471,32 +494,51 @@ export class Orchestrator {
         changed = delta.changed ?? getChangedFiles(project.path);
         pendingSnapshot = delta.pending;
       }
-      const map = loadCoverageMap(project.path);
-      // Only worth checking when there's a map to combine it with — a NEW-source caveat is
-      // otherwise unreachable (no map -> "changed-only" short-circuits before that branch).
-      const dynamicImportsPresent = map ? hasDynamicImportSyntax(project.path) : false;
+      // A changed path that is no longer on disk is a DELETION (getChangedFiles/selectionDelta
+      // both surface these). `related`'s static graph can no longer see the tests that imported
+      // it -- they're broken by the deletion but would be silently skipped if another, still-
+      // present change kept the run "incremental" -- so escalate to the full suite (invariant 5:
+      // the safe option when a change can break importers we can't trace). The old reverse map
+      // caught this via `map.map[deletedSrc].tests`; single-pass has no such lookup.
+      const deleted = (changed?.files ?? []).filter(
+        (f) => !fs.existsSync(path.resolve(project.path, f)),
+      );
+      if (deleted.length > 0) {
+        return {
+          files: [],
+          relatedFiles: undefined,
+          strategy: "full",
+          reason: `changed path no longer exists on disk (deleted): ${deleted.join(", ")}; running full suite`,
+          empty: false,
+          deltaDriven: true,
+          pendingSnapshot,
+          confidence: { level: "high", reasons: [] },
+        };
+      }
+      // Lazy dynamic-import scan: `hasDynamicImportSyntax` is a project-wide `git grep`, so only
+      // run it when a source file actually changed -- the only case `plan()` consumes it. A
+      // no-change or test-only delta discards the result, so passing `false` there is safe (plan()
+      // never reaches the dynamic-import caveat on those paths) and skips the scan entirely on the
+      // latency-sensitive incremental path.
+      const sourceChanged = (changed?.files ?? []).some((f) => !isTestFile(f));
+      const dynamicImportsPresent = sourceChanged ? hasDynamicImportSyntax(project.path) : false;
       const plan = SelectionEngine.plan({
         changedFiles: changed?.files ?? null,
         addedFiles: changed?.added,
-        map,
-        strict: opts.strict,
         dynamicImportsPresent,
         totalTestFileCount: this.getTestInventoryFileCount(project.projectId),
       });
       if (plan.strategy === "full") {
-        return { files: [], changed: false, strategy: "full", reason: plan.reason, empty: false, deltaDriven: true, pendingSnapshot, confidence: plan.confidence };
+        return { files: [], relatedFiles: undefined, strategy: "full", reason: plan.reason, empty: false, deltaDriven: true, pendingSnapshot, confidence: plan.confidence };
       }
-      if (plan.strategy === "changed-only") {
-        // worker runs `--changed` with a full-suite fallback (Story 3.1)
-        return { files: [], changed: true, strategy: "incremental", reason: plan.reason, empty: false, deltaDriven: true, pendingSnapshot, confidence: plan.confidence };
-      }
-      // Nothing to run and no static-graph union requested -> short-circuit (empty filter would be a full run).
-      if (plan.testFiles.length === 0 && !plan.union) {
-        return { files: [], changed: false, strategy: "incremental", reason: plan.reason, empty: true, deltaDriven: true, pendingSnapshot, confidence: plan.confidence };
+      // Nothing changed -> short-circuit (an empty `related` list would resolve to "everything",
+      // not "nothing" -- Vitest's own semantics, so this must never fall through to the worker).
+      if (plan.relatedFiles.length === 0) {
+        return { files: [], relatedFiles: undefined, strategy: "incremental", reason: plan.reason, empty: true, deltaDriven: true, pendingSnapshot, confidence: plan.confidence };
       }
       return {
-        files: plan.testFiles,
-        changed: plan.union,
+        files: [],
+        relatedFiles: plan.relatedFiles,
         strategy: "incremental",
         reason: plan.reason,
         empty: false,
@@ -508,7 +550,7 @@ export class Orchestrator {
     if (explicit.length > 0) {
       return {
         files: explicit,
-        changed: false,
+        relatedFiles: undefined,
         strategy: "incremental",
         reason: "explicit file selection",
         empty: false,
@@ -517,7 +559,7 @@ export class Orchestrator {
         confidence: { level: "high", reasons: [] },
       };
     }
-    return { files: [], changed: false, strategy: "full", reason: "full suite", empty: false, deltaDriven: false, confidence: { level: "high", reasons: [] } };
+    return { files: [], relatedFiles: undefined, strategy: "full", reason: "full suite", empty: false, deltaDriven: false, confidence: { level: "high", reasons: [] } };
   }
 
   private async execute(
@@ -543,7 +585,7 @@ export class Orchestrator {
     runId: string,
     onProgress?: ProgressFn,
   ): Promise<TestResult> {
-    const { files, changed } = sel;
+    const { files, relatedFiles } = sel;
     return new Promise<TestResult>((resolve, reject) => {
       const startedAt = new Date().toISOString();
       const startMs = Date.now();
@@ -593,9 +635,6 @@ export class Orchestrator {
       };
       if (process.env.TMPDIR) workerEnv.TMPDIR = process.env.TMPDIR;
       if (process.env.LANG) workerEnv.LANG = process.env.LANG;
-      if (process.env.TEST_MCP_MEASURE_BUDGET_MS) {
-        workerEnv.TEST_MCP_MEASURE_BUDGET_MS = process.env.TEST_MCP_MEASURE_BUDGET_MS;
-      }
       const child = fork(this.workerPath, [], {
         cwd: project.path, // worker resolves the project's OWN vitest from here
         execArgv: [], // do not inherit vitest/ts loaders from the parent process
@@ -752,8 +791,7 @@ export class Orchestrator {
             projectId: project.projectId,
             files,
             coverage,
-            allTestsRun: files.length === 0,
-            changed,
+            relatedFiles,
           };
           if (!child.send(runMsg)) {
             finish(() => failRun(new WorkerError("IPC send failed")));
@@ -774,11 +812,6 @@ export class Orchestrator {
         } else if (msg.type === "case-result" && msg.runId === runId) {
           upsertLiveTest(msg.file, msg.name, msg.status);
           touchLiveProgress();
-        } else if (msg.type === "phase-progress" && msg.runId === runId) {
-          // Coverage-measurement heartbeat (AD-20) -- surfaced identically to test-level progress
-          // (AD-21), not merely an internal watchdog-reset signal.
-          live.phase = { phase: msg.phase, completed: msg.completed, total: msg.total };
-          touchLiveProgress();
         } else if (msg.type === "result" && msg.runId === runId) {
           if (!msg.result) {
             finish(() => failRun(new WorkerError("worker returned no result")));
@@ -789,10 +822,11 @@ export class Orchestrator {
             this.lastFailures.set(project.projectId, map);
             const result = msg.result;
             // Surface the orchestrator's specific decision reason over the worker's generic
-            // labels ("full suite"/"explicit file selection"). Exception: the git `--changed`
-            // execution-time fallback — the decision was incremental but the worker ran the
-            // full suite because no test was affected; there the worker's outcome is the
-            // truthful description, so preserve it. `selection.files` is always what ran.
+            // labels ("full suite"/"explicit file selection"). Exception: the related-selection
+            // execution-time fallback (AC1's sole exception) — the decision was incremental but
+            // the worker ran the full suite because `related` matched no test files; there the
+            // worker's outcome is the truthful description, so preserve it. `selection.files` is
+            // always what ran.
             const executionFallback =
               result.selection.strategy === "full" && sel.strategy === "incremental";
             if (!executionFallback) {
@@ -800,8 +834,8 @@ export class Orchestrator {
               result.selection.strategy = sel.strategy;
             }
             // Attach the selection confidence (Story 6.8). A full run — planned OR reached via the
-            // worker's `--changed`→full execution fallback — actually ran everything, so it is
-            // complete: force `high` in that case regardless of the plan's (now moot) verdict.
+            // related-selection-matched-nothing execution fallback — actually ran everything, so
+            // it is complete: force `high` in that case regardless of the plan's (now moot) verdict.
             result.confidence = executionFallback ? { level: "high", reasons: [] } : sel.confidence;
             // Advance the last-run snapshot only after a successful delta-driven run (Story 6.7):
             // a failing run leaves it untouched so its changed files stay in the next delta.
@@ -906,7 +940,6 @@ export class Orchestrator {
         tests: LiveTestEntry[];
         testsTruncated: boolean;
         log: LiveLogLine[];
-        phase?: LivePhase;
         lastProgressAt: number;
       }
     | undefined {
@@ -918,7 +951,6 @@ export class Orchestrator {
       tests: live.testOrder.map((k) => live.tests.get(k)!),
       testsTruncated: live.testsTruncated,
       log: live.log,
-      phase: live.phase,
       lastProgressAt: live.lastProgressAt,
     };
   }

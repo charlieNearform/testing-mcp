@@ -12,7 +12,9 @@ const fixture = path.join(repoRoot, "test-fixtures", "sample-project");
 describe("Orchestrator.runTests (project-local worker)", () => {
   it("runs the project's own vitest and returns structured results with overhead metadata", async () => {
     const orch = new Orchestrator({ workerPath });
-    const result = await orch.runTests({ projectId: "fixture", path: fixture });
+    // Story 3.8 AC3: a full-suite run defaults coverage to true unconditionally now -- explicitly
+    // opt out here so this test still exercises the plain (no coverage report) shape below.
+    const result = await orch.runTests({ projectId: "fixture", path: fixture, coverage: false });
     expect(result.total).toBe(2);
     expect(result.passed).toBe(1);
     expect(result.failed).toBe(1);

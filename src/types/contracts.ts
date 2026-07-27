@@ -53,21 +53,18 @@ export interface TestResult {
   /**
    * Coverage report for a `coverage: true` run — overall + per-file percentages
    * (statements/branches/functions/lines). Absent on plain runs (coverage is only measured when
-   * requested) and when no coverage provider is present. Populated by one of two paths:
-   * - **Full-suite run (Story 3.7):** a single native Vitest coverage pass over the whole suite
-   *   (the equivalent of `vitest run --coverage`) — always fresh, always `confidence: "high"`,
-   *   `combined` omitted (this is a fresh single measurement, not a union of historic ones).
-   * - **Incremental/selective run (Story 6.10):** the COMBINED (whole-project) picture — the
-   *   union of every test file's latest measurement, so a selective run still reports
-   *   whole-project coverage without re-running everything. `combined: true` marks this case;
-   *   each file carries `fresh` (re-measured this run) / `stale` (source changed since measured);
-   *   `confidence` is `degraded` when a changed source is unmeasured (Story 6.8), so "100%" is
-   *   only asserted at `high` confidence.
+   * requested) and when no coverage provider is present.
+   *
+   * Full-suite only, one shape (Story 3.8 — the incremental/selective combined-coverage path,
+   * Story 6.10, was retired): a single native Vitest coverage pass over the whole suite (the
+   * equivalent of `vitest run --coverage`), produced in the SAME pass that ran the tests — always
+   * `confidence: "high"`. Every file in the report was freshly measured THIS run, so there is no
+   * staleness concept and nothing to union with a prior measurement (unlike the retired
+   * per-test-file combined report) — `combined`/`fresh`/`stale` no longer exist on this shape.
    */
   coverage?: {
     total: CoveragePct;
-    files: Array<{ file: string; fresh?: boolean; stale?: boolean } & CoveragePct>;
-    combined?: boolean;
+    files: Array<{ file: string } & CoveragePct>;
     confidence?: Confidence;
     /**
      * The project's own configured global Vitest coverage % thresholds (Story 6.3 AC4) — test-mcp
@@ -75,9 +72,9 @@ export interface TestResult {
      */
     thresholds?: Partial<CoveragePct>;
     /**
-     * Whether the combined coverage meets every configured threshold (Story 6.3 AC4). Only asserted
-     * (true/false) when `confidence` is `high`; `undefined` on a `degraded` report means "numbers may
-     * be stale — run a full coverage pass to confirm the gate" rather than a false verdict.
+     * Whether the coverage meets every configured threshold (Story 6.3 AC4). Always asserted
+     * (true/false) when `thresholds` is present — a full-suite run is always `confidence: "high"`,
+     * so there is no "numbers may be stale" case left to leave this undefined for.
      */
     thresholdsMet?: boolean;
   };

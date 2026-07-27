@@ -20,12 +20,19 @@ These must hold across every component and story:
 4. **Every project-scoped tool call carries a `projectId`.** Unknown `projectId` → error.
 5. **Correctness over cleverness, with an explicit confidence channel.** Prefer the tightest
    *safe* selection and **report confidence**. When impact is genuinely unbounded (build/test
-   config changed, a setup-baseline module changed, an unmeasurable test is implicated, or git
-   is unavailable) → run the **full suite**. When selection is bounded but not provably complete
-   (e.g. a modified source unknown to the map) → run the tight set and mark the result
-   **degraded confidence** with reasons, so the caller runs a full pass before relying on it.
-   Never silently skip *without signalling*.
+   config changed, or `related`'s static import graph resolves to zero test files despite a
+   real change) → run the **full suite** (this is the ONLY scenario that ever runs more than
+   one Vitest pass for a single request — Story 3.8 AC1). When selection is bounded but not
+   provably complete (e.g. a new source reachable only via a dynamic import the static graph
+   can't see) → run the tight set and mark the result **degraded confidence** with reasons, so
+   the caller runs a full pass before relying on it. Never silently skip *without signalling*.
 6. **Schemas are versioned.** Every persisted JSON file carries `schemaVersion`.
+7. **Exactly one Vitest pass per request, coverage full-suite-only (Story 3.8).** Every
+   `run_tests` request — full or incremental — executes exactly one Vitest invocation
+   (invariant 5's fallback is the sole exception). A single pass can report an aggregate
+   coverage percentage but never per-test attribution, so coverage measurement is available
+   only on a genuine full-suite run; an incremental/selective request with `coverage: true`
+   is rejected with a structured error, never silently downgraded.
 
 ## Component Overview
 
@@ -40,15 +47,15 @@ These must hold across every component and story:
                          │         │                                    │
                          │  ┌──────▼────────┐   ┌────────────────────┐ │
                          │  │ Orchestrator  │──▶│ Selection Engine   │ │
-                         │  │ (per-project  │   │ (git delta ∪ cov)  │ │
-                         │  │  worker pool) │   └─────────┬──────────┘ │
-                         │  └──────┬────────┘             │            │
+                         │  │ (per-project  │   │ (changed-file delta│ │
+                         │  │  worker pool) │   │  → Vitest `related`)│ │
+                         │  └──────┬────────┘   └─────────┬──────────┘ │
                          └─────────┼───────────────────────┼──────────┘
                                    │ fork + IPC            │ reads/writes
                           ┌────────▼─────────┐    ┌─────────▼──────────┐
                           │ Worker (per proj)│    │ <git-root>/        │
                           │ cwd=projectRoot  │    │   .test-mcp/       │
-                          │ project vitest   │    │  (coverage map,    │
+                          │ project vitest   │    │  (last-run snapshot,│
                           │ createVitest()   │    │   history, config) │
                           └──────────────────┘    └────────────────────┘
 ```
@@ -64,11 +71,13 @@ These must hold across every component and story:
   configPath, status); persisted in the central dir; rehydrated on daemon start.
 - **Orchestrator** — owns the per-project **worker pool**, run queue, cancellation,
   concurrency caps, and idle reaping.
-- **Selection Engine** — decides which test files to run (git-delta ∪ coverage-map),
-  builds dry-run plans.
-- **Coverage Engine** — builds/updates the source→test reverse map from runtime V8
-  coverage (runs inside the worker; persisted per project).
-- **Worker** — per-project subprocess that resolves and drives the project's own Vitest.
+- **Selection Engine** — decides which changed files to hand to Vitest's `related` config
+  field for an incremental request (Story 3.8 — retired the reverse coverage map and the
+  git-delta/map union it used to compute; a single Vitest pass now resolves affected tests
+  via its own static import graph), builds dry-run plans.
+- **Worker** — per-project subprocess that resolves and drives the project's own Vitest;
+  also measures coverage (full-suite-only, in the SAME pass as the real test results —
+  Story 3.8) when requested.
 
 ## Process & Deployment Topology
 
@@ -135,24 +144,12 @@ All files are JSON with a `schemaVersion`. Locations per invariant 3.
 }
 ```
 
-**Coverage map** (repo, `<git-root>/.test-mcp/coverage-map.json`, schemaVersion 3)
-```jsonc
-{
-  "schemaVersion": 3,
-  "projectId": "a1b2c3…",           // keyed by project so a copied map is unambiguous
-  "updatedAt": "2026-07-10T12:00:00Z",
-  "map": {
-    "src/foo.ts": { "tests": ["test/foo.test.ts"], "lastMeasured": "2026-07-10T12:00:00Z" }
-  },
-  "fullSuiteTriggers": ["src/i18n.ts"], // setup-baseline modules: a change here runs everything
-  "alwaysRun": ["test/heavy.test.tsx"]  // unmeasurable tests: always selected on a relevant change
-}
-```
-
-> **Combined coverage (Story 6.10):** the map also persists **per-test-file coverage data**
-> (not just the reverse mapping), so combined project coverage = union of each test file's
-> latest measurement. A file's coverage is invalidated when its source changes (line shifts)
-> and refreshed when re-measured; changed-but-unmeasured files flag degraded confidence.
+> **Coverage map — retired (Story 3.8).** `<git-root>/.test-mcp/coverage-map.json` (and its
+> sibling per-test-file combined-coverage data file, Story 6.10) no longer exist. A single
+> Vitest pass can report an aggregate coverage percentage but never per-test attribution
+> (which test covers which source) — that required measuring test files separately, which
+> "exactly one Vitest pass, every run" (invariant 7) now forbids. Coverage is full-suite-only,
+> produced by the SAME pass that runs the tests (see "Coverage Map Build" below, retitled).
 
 **Last-run snapshot** (repo, `<git-root>/.test-mcp/last-run-snapshot.json`, git-ignored) —
 `{ schemaVersion, takenAt, files: { <relpath>: <sha256> } }`. The default incremental baseline:
@@ -188,9 +185,9 @@ Input schemas are Zod; `outputSchema` gives structured results. Summary contract
 | `register_project` | `{ path }` | `{ projectId, path, status }` |
 | `list_projects` | `{}` | `{ projects: [{ projectId, path, status }] }` |
 | `unregister_project` | `{ projectId, purge? }` | `{ projectId, removed: true }` |
-| `run_tests` | `{ projectId, mode?, coverage?, since?, files?, suite?, dryRun?, planId?, <opt-out flags> }` | `TestResult` \| `TestPlan` |
+| `run_tests` | `{ projectId, mode?, coverage?, since?, files?, suite?, dryRun?, planId? }` | `TestResult` \| `TestPlan` |
 | `get_test_status` | `{ projectId }` | `{ state, progress?, lastResult?, lastError?, updatedAt?, watch? }` |
-| `start_watch` | `{ projectId, fastMode? }` | `WatchStatus` |
+| `start_watch` | `{ projectId }` | `WatchStatus` |
 | `stop_watch` | `{ projectId }` | `{ stopped }` |
 | `get_failure_details` | `{ projectId, failureId }` | `{ name, file, message, stack, expected?, actual?, diff? }` |
 
@@ -201,10 +198,14 @@ interface TestResult {
   failures: Array<{ id: string; name: string; file: string; message: string }>; // details via get_failure_details
   selection: { strategy: "full" | "incremental"; reason: string; files: string[] };
   confidence?: { level: "high" | "degraded"; reasons: string[] }; // degraded ⇒ run a full pass before relying on completeness
+  // Full-suite only (Story 3.8) — one native Vitest pass, produced in the SAME pass as the
+  // results above. Absent on an incremental/selective run; `coverage: true` there is rejected
+  // with a ValidationError instead (never silently downgraded).
+  coverage?: { total: CoveragePct; files: Array<{ file: string } & CoveragePct>; confidence?: Confidence;
+    thresholds?: Partial<CoveragePct>; thresholdsMet?: boolean };
   metadata?: { wallClockMs: number; testExecMs: number; overheadMs: number; isolate: boolean };
 }
 // `since?: "last-run" | "head"` selects the incremental baseline (default "last-run").
-// Opt-out flags disable the new defaults (ignore-filter, since-last-run, confidence gating).
 
 interface TestPlan {   // returned when dryRun=true
   planId: string; projectId: string; strategy: "full" | "incremental";
@@ -221,41 +222,46 @@ interface TestPlan {   // returned when dryRun=true
 vitest/vite config, records in registry.
 
 **Run (incremental)**: `run_tests({ projectId, mode: "incremental" })` →
-Orchestrator ensures a warm worker for the project → Selection Engine computes the file
-set (see below) → worker runs them via the project's Vitest → results persisted to history;
-coverage map updated for measured files → `TestResult` returned.
+Orchestrator ensures a warm worker for the project → Selection Engine computes the changed-file
+list to feed Vitest's `related` config field (see below) → worker runs ONE Vitest pass (real
+results; coverage never requested here, see invariant 7) → results persisted to history →
+`TestResult` returned.
 
 **Dry-run → commit**: `run_tests({ projectId, dryRun: true })` → Selection Engine returns a
 `TestPlan` with a cached `planId` → agent inspects → `run_tests({ projectId, planId })`
 executes exactly that plan (re-derives if the plan expired).
 
-**Selection algorithm** (Selection Engine, invariant 5):
+**Selection algorithm** (Selection Engine, invariant 5, simplified/unified in Story 3.8):
 0. **Filter** provably test-irrelevant paths from the changed set — non-code files
    (docs/markdown, VCS/editor/agent dotfiles) and any patterns in the project
    `.test-mcp-ignore` (gitignore-style). These never drive selection.
 1. **Changed set** = files changed vs the **last-run snapshot** (default; content-hash) or vs
    git HEAD (`since: "head"`), including **added / modified / deleted**.
-2. `A` = Vitest `--changed` static-graph selection (HEAD baseline).
-3. `B` = coverage-map reverse lookup for changed source files, **after excluding
-   setup-baseline modules** (see Coverage Engine). A changed setup-baseline module (e.g.
-   `i18n.ts`, an `observability` module) is a **full-suite trigger**, not a per-test edge.
+2. **Only test files changed** → feed them into `related` directly (AC1): provably complete,
+   no source-side dependency-graph uncertainty possible.
+3. **Any changed source** → feed the WHOLE changed-file set (sources + tests) into Vitest's
+   `related` config field — an explicit file list resolved through Vitest's own static import
+   graph, confirmed live to skip Vitest's own git lookup entirely (see the `related` mechanism
+   note below). This is the SAME single Vitest pass that then runs the resolved tests, never a
+   second one.
 4. **Unbounded → full suite:** build/test config change (`package.json`, lockfiles,
-   `*.config.*`, `tsconfig*.json`, `vitest.setup.*`), setup-baseline change, unmeasurable
-   test, or no git/static graph. **A new/untracked source unknown to the map is bounded by
-   `A`** (its new test + existing static importers), *not* a full trigger. A **modified**
-   source unknown to the map → select best-effort and mark **degraded confidence**.
-5. Otherwise run `B` alone when every changed source is mapped — that selection is already
-   provably complete, and `A` is HEAD-scoped (Story 6.7), so folding it in would silently widen
-   a `since: "last-run"` request back out to "everything uncommitted since HEAD" for no benefit.
-   Run `A ∪ B` (plus tests importing any deleted file) only when some changed source is
-   genuinely unmapped — there `A` is the sole signal, not a redundant safety net. Attach a
-   **confidence** verdict (`high` | `degraded` + reasons) to the result either way; `degraded`
-   tells the caller to run a full pass before relying on completeness.
+   `*.config.*`, `tsconfig*.json`, `vitest.setup.*`), no git/static graph, the changed-file
+   list's size relative to the project's known test-file count exceeds a threshold (size-based
+   full-run escalation), or `related` resolves to zero test files despite a real, non-empty
+   changed input (the ONLY scenario that runs Vitest twice for one request — AC1's sole
+   exception).
+5. **Confidence:** high by default; **degraded** only for a NEW (untracked) source that might be
+   reachable solely through a dynamic `import()`/`require(...)` the static graph can't see
+   (AC6) — the one residual blind spot once there's no runtime-measured map to fall back on. A
+   MODIFIED source has no analogous gap; `related`'s static graph resolves it directly.
 
-> Validated by the coverage-map spike (`docs/coverage-spike-findings.md`) against the
-> real target repo: without setup-baseline exclusion, editing a common lib re-runs the
-> *entire* suite; with it, incremental selection drops to ~6% (unit) / ~18% (integration)
-> of the suite.
+> **The `related` mechanism (Story 3.8, verified live):** Vitest's `UserConfig.related` field,
+> when set, makes Vitest skip its own git-based `changed: true` lookup entirely and resolve
+> dependents via the static import graph against exactly the given file list — unlike
+> `changed: true`, which does its own git diff and has no memory of what a prior test-mcp run
+> already validated (confirmed live to re-select an already-validated file the moment a second,
+> unrelated file is edited without committing either). `related` is fed from the orchestrator's
+> existing since-last-run snapshot delta (unchanged mechanism, Story 6.7).
 
 ## Concurrency & Lifecycle
 
@@ -278,7 +284,7 @@ executes exactly that plan (re-derives if the plan expired).
 ```typescript
 // daemon → worker
 type ToWorker =
-  | { type: "run"; runId: string; projectId: string; files: string[]; coverage: boolean; allTestsRun: boolean; changed: boolean }
+  | { type: "run"; runId: string; projectId: string; files: string[]; coverage: boolean; relatedFiles?: string[] }
   | { type: "cancel"; runId: string }   // defined but not yet handled by the worker
   | { type: "shutdown" };
 
@@ -286,9 +292,15 @@ type ToWorker =
 type FromWorker =
   | { type: "ready" }
   | { type: "progress"; runId: string; completed: number; total: number }
-  | { type: "result"; runId: string; result: TestResult; coverageDelta?: CoverageDelta; failureDetails?: FailureDetail[] }
+  | { type: "result"; runId: string; result: TestResult; failureDetails?: FailureDetail[] }
   | { type: "error"; runId: string; message: string; stack?: string };
 ```
+
+`relatedFiles` (Story 3.8): present + non-empty means a related-based incremental selection,
+fed straight into Vitest's `related` config field; absent means a full suite or an explicit
+`files` selection. There is no more `"phase-progress"` message — the unified single pass
+reports through the ordinary `progress`/`case-start`/`case-result` messages like any other
+run, so there is no separate blind coverage phase left to heartbeat.
 
 Both ends validate the received message with Zod at the process boundary (`parseToWorker` /
 `parseFromWorker`) and reject malformed messages rather than acting on garbage fields.
@@ -296,45 +308,40 @@ Both ends validate the received message with Zod at the process boundary (`parse
 `progress` messages map to MCP `notifications/progress` (with a `progressToken`) on the
 originating tool call. The final `result` is the authoritative `tools/call` response.
 
-## Coverage Map Build (primary technical risk — spike VALIDATED)
+## Coverage Map Build (retired — Story 3.8)
 
-Per `docs/patterns.md` (Coverage-to-Test Mapping): run test files with V8 precise
-coverage, attributing execution → source→test-file map. Granularity is **test-file level**.
+**Retired (Story 3.8).** This section described a source→test-file reverse map built by
+measuring V8 coverage per test file. That entire mechanism — the map itself, per-file
+measurement, setup-baseline subtraction, unmeasurable-tests tracking, and the per-test
+combined-coverage union/staleness machinery (Story 6.10) — is deleted, not merely superseded:
 
-> **Implementation note (current):** the engine measures **per test file** (each in its own
-> Vitest run) and tracks freshness with a `lastMeasured` timestamp per entry; it re-measures
-> the explicit set of target files it is given (an incremental/selective run — cheap at that
-> scale). **A full-suite run never uses this per-file path at all** (Story 3.7): it runs one
-> native Vitest coverage pass over the whole suite instead — the equivalent of
-> `vitest run --coverage` — and does not build or refresh the reverse map. The map is
-> therefore populated exclusively by incremental/selective runs; a project that only ever runs
-> full-suite (gate) + no-coverage-iterative cycles never builds one at all, by deliberate
-> design — see "Single-pass, not per-file" below for why this replaces rather than implements
-> the originally-planned single-pass snapshot-diff approach.
-
-Validated by the spike (`docs/coverage-spike-findings.md`) on the real target repo. Three
-mandatory refinements came out of it:
-
-1. **Subtract the setup baseline.** `setupFiles` (e.g. `vitest.setup.ts`) run before every
-   test, so their transitive imports are attributed to *every* test file (~8–9 modules on
-   the target). Measure a setup-only baseline (coverage of a no-op test) once and subtract
-   it from each test's attribution; the subtracted modules become full-suite triggers.
-   Without this the map is nearly useless (a common-lib edit selects the whole suite).
-2. **Single-pass, not per-file — resolved differently than originally planned (Story 3.7).**
-   Naive per-file measurement was ~6× a single combined run on the target (77s vs 13s for 22
-   files) and, at real full-suite scale (286 files), cost 6-8x a plain run and crashed the
-   daemon outright. The original plan was to vendor `testpick`'s (MIT) single-pass serial
-   snapshot-diff attribution technique to make per-file measurement itself cheaper. Story 3.7
-   instead never performs per-file attribution for a full-suite run at all — the reverse map's
-   attribution precision only matters for the incremental/selective path (Story selection
-   engine falls back gracefully to the static import graph when the map is absent/stale for a
-   source), so a full-suite run only needs a whole-project **percentage**, which Vitest's own
-   native combined pass already produces with zero per-file overhead. `testpick` was never
-   vendored; this is resolved, not deferred.
-3. **Unmeasurable tests are always-run.** Some heavy tests (e.g. AG-Grid-mounting
-   `CalendarPage.test.tsx`) exceed the measurement budget under coverage and yield no data.
-   Any test the engine cannot measure (timeout/crash/no coverage) is recorded as
-   "unknown deps" and **always selected** — never silently dropped.
+- **Why:** investigating incremental's remaining double-Vitest-pass violation (a
+  `coverage: true` incremental request still did `1 + N` invocations — a real-results pass
+  plus one per selected file) surfaced that a single Vitest pass can produce an aggregate
+  coverage **percentage** for any file set, but never **per-test attribution** — that requires
+  measuring test files separately, which "exactly one Vitest pass, every run, no exceptions"
+  (invariant 7) now forbids outright. So this wasn't just a double-pass fix; it retired
+  per-test attribution entirely, confirmed against a real AI-agent workflow trace (fast
+  incremental loop with no coverage, coverage only on a terminal full-suite gate — no real
+  usage pattern needs incremental coverage).
+- **What replaced it:** the Selection Engine no longer needs the map at all — an incremental
+  request's changed-file list is fed directly into Vitest's own `related` config field (see
+  "Selection algorithm" above and the `related` mechanism note), which resolves affected
+  tests via the static import graph in the SAME pass that runs them. Coverage is measured
+  only on a genuine full-suite run, in that SAME single pass (no more two-phase
+  results-then-coverage design) — see `src/worker/index.ts`'s `runWithCoverage`.
+- **What survives unchanged:** the setup-baseline concern itself is a non-issue without
+  custom logic — a live experiment during this story's investigation confirmed Vitest's own
+  dependency graph already resolves a `setupFiles` entry's dependents correctly when passed to
+  `related` (a 2-test-file fixture where only `vitest.config.ts`'s `setupFiles`, not a direct
+  import, connected them selected BOTH test files, not zero). The since-last-run snapshot
+  mechanism (Story 6.7) and the size-based full-run escalation (this cycle) are both
+  orthogonal to the map and unchanged.
+- **Epic 7 alignment:** `epics.md`'s Runner Plugin API stories (7.1, 7.3, 7.6 — not yet
+  implemented) have been annotated to expect an explicit file list (mirroring `related`, not a
+  git ref) and a `capabilities.coverage: "summary"` shape, so that epic's eventual extraction
+  lifts this story's `related`-based resolution and unified coverage mechanism with minimal
+  reshaping.
 
 ## Error Taxonomy
 
@@ -344,7 +351,8 @@ Tool errors return structured MCP error responses (never crash the daemon):
 - `InvalidConfig` — no resolvable vitest/vite config at registration.
 - `WorkerFailure` — worker crashed/failed to start (includes cause).
 - `PlanExpired` — `planId` no longer cached (client should re-plan).
-- `ValidationError` — schema validation of tool input failed.
+- `ValidationError` — schema validation of tool input failed, or (Story 3.8 AC2) `run_tests`
+  was called with `coverage: true` on a request that didn't resolve to a genuine full-suite run.
 - `DaemonUnavailable` — CLI-side: cannot reach/boot the daemon.
 - `NotImplemented` — a tool was invoked before its backing subsystem was wired in
   (internal guard; not expected in a fully-initialized daemon).
@@ -360,23 +368,26 @@ Tool errors return structured MCP error responses (never crash the daemon):
 
 ## Open Risks
 
-1. ~~**Coverage-map accuracy/perf**~~ — **Resolved for the case that actually caused the
-   reported crash (Story 3.7, 2026-07-23): full-suite scale.** Full-suite coverage no longer
-   performs per-file attribution at all (one native Vitest pass instead); the reverse map is
-   built exclusively by incremental/selective runs, where per-file measurement is cheap
-   (bounded by the touched-file count, normally small). Single-pass snapshot-diffing /
-   vendoring `testpick` is no longer needed for the full-suite case — that gap is closed by a
-   different mechanism. **Residual scope, not closed:** the incremental/selective path's
-   per-test-file measurement mechanism itself is unchanged — a future change that drives many
-   files through that path at once (e.g. a broad refactor touching hundreds of test files in
-   one incremental call) would still pay the same per-file cost this risk originally named;
-   it just isn't the scenario that caused the reported crash. Setup-baseline detection
-   (Story 3.3) continues to apply to the incremental/selective path unchanged.
-2. **Heavy/unmeasurable tests** — coverage instrumentation can push heavy tests past their
-   budget (observed on the target's AG-Grid suite). Handled by always-run fallback, but it
-   erodes the incremental benefit for suites with many such tests; measurement budget is
-   configurable.
+1. ~~**Coverage-map accuracy/perf**~~ — **Closed, not merely resolved (Story 3.8, 2026-07-27).**
+   Story 3.7 resolved this risk for the full-suite case (one native Vitest pass instead of
+   per-file attribution) but explicitly left it "residual, not closed" for the
+   incremental/selective path's per-test-file measurement mechanism. Story 3.8 closes that
+   residual scope by deleting the mechanism entirely: there is no more reverse coverage map,
+   no more per-file measurement, and no more incremental/selective coverage at all (coverage is
+   full-suite-only, AC2). A future broad refactor touching many files at once now costs exactly
+   what its `related`-resolved test selection costs to run — never an added per-file
+   measurement pass — because there is no such pass left to pay for.
+2. ~~**Heavy/unmeasurable tests**~~ — **Moot (Story 3.8).** This risk was specifically about
+   coverage instrumentation pushing heavy tests past a per-file measurement budget; with no
+   more per-file measurement anywhere, there is no budget to exceed. A heavy test still runs
+   (and is measured for coverage) normally as part of whichever single Vitest pass includes it.
 3. **Watch-mode memory** under many concurrent projects — bounded by the pool cap + idle TTL;
    revisit limits after real usage.
 4. **Vitest advanced-API drift across 3.x/4.x** — pin the version; worker abstracts the
    differences (`runTestFiles` 4.1+ vs `runTestSpecifications` 3.x). Target repo is 4.1.9.
+5. **`related`'s own blind spots beyond dynamic imports** — Story 3.8's live experiments
+   confirmed `related` correctly resolves direct static imports and `setupFiles` entries, and
+   correctly falls back to full on a genuine orphan. Anything else Vitest's static import-graph
+   analysis itself might miss (e.g. non-standard module resolution, unusual bundler-specific
+   syntax) is now this system's only remaining selection blind spot, since there is no more
+   runtime-measured map to catch what the static graph can't see.

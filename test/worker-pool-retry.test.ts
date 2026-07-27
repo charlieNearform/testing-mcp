@@ -56,7 +56,7 @@ describe("runVitest pool-start retry (real project reported: [vitest-pool] Faile
     // 1 initial attempt + 2 retries = 3 total; failing twice still lands on the 3rd (last allowed).
     const { result } = await runVitest(
       fixture,
-      { files: [], changed: false },
+      { files: [] },
       "run-retry-success",
       undefined,
       5000,
@@ -70,7 +70,7 @@ describe("runVitest pool-start retry (real project reported: [vitest-pool] Faile
     await expect(
       runVitest(
         fixture,
-        { files: [], changed: false },
+        { files: [] },
         "run-retry-exhausted",
         undefined,
         5000,
@@ -86,7 +86,7 @@ describe("runVitest pool-start retry (real project reported: [vitest-pool] Faile
       throw new Error("some unrelated real failure");
     };
     await expect(
-      runVitest(fixture, { files: [], changed: false }, "run-no-retry", undefined, 5000, alwaysThrowsOther),
+      runVitest(fixture, { files: [] }, "run-no-retry", undefined, 5000, alwaysThrowsOther),
     ).rejects.toThrow("some unrelated real failure");
     expect(calls).toBe(1); // no retry attempted
   }, 10_000);
@@ -103,7 +103,7 @@ describe("runVitest pool-start retry (real project reported: [vitest-pool] Faile
       return realStartVitest(mode, filters, { ...options, root: fixture });
     };
     const { sent } = await withCapturedSends(
-      () => runVitest(fixture, { files: [], changed: false }, "run-heartbeat-live", undefined, 5000, slowThenSucceed),
+      () => runVitest(fixture, { files: [] }, "run-heartbeat-live", undefined, 5000, slowThenSucceed),
       5000, // keep capturing past one more heartbeat interval after it resolves
     );
     const configMessages = configMessagesFor(sent, "run-heartbeat-live");
@@ -129,7 +129,7 @@ describe("runVitest pool-start retry (real project reported: [vitest-pool] Faile
     const { sent } = await withCapturedSends(() =>
       runVitest(
         fixture,
-        { files: [], changed: false },
+        { files: [] },
         "run-heartbeat-unknown-timeout",
         undefined,
         undefined, // testTimeoutMs unknown
@@ -159,7 +159,7 @@ describe("runVitest pool-start retry (real project reported: [vitest-pool] Faile
     };
     await runVitest(
       fixture,
-      { files: [], changed: false },
+      { files: [] },
       "run-fresh-state",
       (completed, total) => progressCalls.push({ completed, total }),
       5000,

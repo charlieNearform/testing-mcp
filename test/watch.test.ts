@@ -22,7 +22,7 @@ const GIT_ENV = {
 let proj: string;
 let manager: WatchManager | undefined;
 
-async function makeProjectWithMap(): Promise<string> {
+async function makeProject(): Promise<string> {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-watch-")));
   fs.symlinkSync(repoNodeModules, path.join(dir, "node_modules"), "dir");
   fs.writeFileSync(
@@ -39,11 +39,8 @@ async function makeProjectWithMap(): Promise<string> {
     path.join(dir, "other.test.ts"),
     `import { test, expect } from "vitest";\nimport { sub } from "./other.ts";\ntest("sub", () => expect(sub(2, 1)).toBe(1));\n`,
   );
-  // Explicit files -- a full-suite run never builds the map (Story 3.7).
-  await new Orchestrator({ workerPath }).runTests(
-    { projectId: "w1", path: dir },
-    { coverage: true, files: ["math.test.ts", "other.test.ts"] },
-  );
+  // Warm the test-file inventory with a plain full run (no coverage map to seed anymore, Story 3.8).
+  await new Orchestrator({ workerPath }).runTests({ projectId: "w1", path: dir }, { coverage: false });
   execFileSync("git", ["init", "-q"], { cwd: dir });
   execFileSync("git", ["add", "-A"], { cwd: dir });
   execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir, env: GIT_ENV });
@@ -70,14 +67,15 @@ afterEach(() => {
 
 describe("WatchManager", () => {
   it("re-runs affected tests when a source file changes, cached for polling", async () => {
-    proj = await makeProjectWithMap();
+    proj = await makeProject();
     const orch = new Orchestrator({ workerPath });
     manager = new WatchManager(orch);
 
-    manager.start({ projectId: "w1", path: proj }, { fastMode: true });
+    // AC7: no more fastMode -- start() never requests coverage.
+    manager.start({ projectId: "w1", path: proj });
     expect(manager.status("w1").watching).toBe(true);
 
-    // Change a source the map attributes to math.test.ts.
+    // Change a source `related` resolves to math.test.ts.
     fs.appendFileSync(path.join(proj, "math.ts"), `// touched\n`);
 
     // This test forks a real project-local Vitest worker; under the full suite's parallel load

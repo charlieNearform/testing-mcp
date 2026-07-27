@@ -17,7 +17,6 @@ export interface WatchStatus {
   watching: boolean;
   state: WatchState;
   runsCompleted: number;
-  fastMode?: boolean;
   lastError?: string;
   lastResult?: TestResult;
 }
@@ -29,8 +28,6 @@ interface Session {
   /** A change arrived while a run was in flight — run once more when it settles. */
   pending: boolean;
   debounce?: NodeJS.Timeout;
-  /** When false, runs collect coverage alongside tests (refreshing the map). */
-  fastMode: boolean;
   lastResult?: TestResult;
   lastError?: string;
 }
@@ -40,10 +37,13 @@ const IGNORED_DIRS = new Set(["node_modules", ".git", ".test-mcp", "dist", "cove
 const DEBOUNCE_MS = 300;
 
 /**
- * Whether a changed path should be ignored by the watcher. Besides the ignored
- * directories, this filters transient files the coverage build writes into the project
- * root (e.g. `__test-mcp-baseline__.test.ts`): without this, a coverage-enabled watch run
- * writes+deletes that file, the watcher sees it, and the run re-triggers itself forever.
+ * Whether a changed path should be ignored by the watcher. Besides the ignored directories,
+ * this filters any transient `__test-mcp-`-prefixed file test-mcp itself might write into the
+ * project root (historically `__test-mcp-baseline__.test.ts`, from the now-retired per-file
+ * coverage-map build, Story 3.8) -- without this, such a file's own write+delete would be seen
+ * by the watcher and re-trigger the run forever. Kept as a general safety net even though watch
+ * mode never requests coverage anymore (AC7): a future test-mcp-authored transient file would
+ * hit the exact same self-loop otherwise.
  */
 export function isIgnoredWatchPath(filename: string): boolean {
   const segments = filename.split(path.sep);
@@ -61,8 +61,9 @@ export class WatchManager {
     return this.sessions.has(projectId);
   }
 
-  /** Start watching a project (idempotent). `fastMode` (default true) skips coverage for speed. */
-  start(project: ProjectRef, opts: { fastMode?: boolean } = {}): WatchStatus {
+  /** Start watching a project (idempotent). A watch-triggered run always runs incremental,
+   *  never coverage (AC7) -- there is nothing left to opt in/out of. */
+  start(project: ProjectRef): WatchStatus {
     const existing = this.sessions.get(project.projectId);
     if (existing) return this.status(project.projectId);
 
@@ -75,7 +76,6 @@ export class WatchManager {
       state: "idle",
       runsCompleted: 0,
       pending: false,
-      fastMode: opts.fastMode !== false,
     });
     return this.status(project.projectId);
   }
@@ -97,7 +97,6 @@ export class WatchManager {
       watching: true,
       state: s.state,
       runsCompleted: s.runsCompleted,
-      fastMode: s.fastMode,
       lastError: s.lastError,
       lastResult: s.lastResult,
     };
@@ -128,8 +127,13 @@ export class WatchManager {
   private runOnce(project: ProjectRef, s: Session): void {
     s.state = "running";
     s.pending = false;
+    // Never coverage (AC7): a watch-triggered run is always incremental, and coverage is now
+    // full-suite-only (Story 3.8 AC2). Pass `coverage: false` EXPLICITLY, not by omission: a
+    // watch run that resolves to a full suite (size escalation, or a non-git project falling back
+    // to full) would otherwise pick up the orchestrator's `coverage ?? strategy === "full"`
+    // default and start measuring coverage -- exactly the incremental-loop cost AC7 forbids.
     this.orchestrator
-      .runTests(project, { mode: "incremental", coverage: !s.fastMode })
+      .runTests(project, { mode: "incremental", coverage: false })
       .then((result) => {
         s.lastResult = result;
         s.lastError = undefined;

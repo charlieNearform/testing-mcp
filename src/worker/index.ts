@@ -4,28 +4,37 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import libCoverage from "istanbul-lib-coverage";
 import type { TestResult, FailureDetail, CoveragePct } from "../types/contracts.js";
-import { parseToWorker, type ToWorker, type FromWorker, type CoverageDelta } from "../types/ipc.js";
-import {
-  buildCoverageMap,
-  extractCoveredSources,
-  loadCoverageMap,
-  saveCoverageMap,
-  isTestFile,
-  type FileMeasurement,
-} from "../coverage/index.js";
-import {
-  loadCoverageData,
-  saveCoverageData,
-  updateCoverageData,
-  combineCoverage,
-  coveredSourceFiles,
-  coverageDataPath,
-  parseGlobalThresholds,
-  meetsThresholds,
-  type IstanbulCoverageData,
-  type TestCoverage,
-} from "../coverage/combined.js";
-import { computeHashes } from "../snapshot/index.js";
+import { parseToWorker, type ToWorker, type FromWorker } from "../types/ipc.js";
+import { isTestFile } from "../selection/index.js";
+
+/**
+ * Extract the project's GLOBAL numeric-% coverage thresholds from a Vitest `coverage.thresholds`
+ * config (Story 6.3 AC4). Handles the plain metric form (`{ lines: 90, ... }`) and the `100: true`
+ * shorthand ("require 100% everywhere"). Per-glob thresholds, `perFile`, `autoUpdate`, and negative
+ * (absolute-count) thresholds are intentionally NOT surfaced — we report only what we can compare to
+ * the reported percentages, rather than invent a verdict. Returns null when there's no global % form.
+ * Relocated from the now-deleted `src/coverage/combined.ts` (Story 3.8 Task 5.2) -- this worker is
+ * the only remaining consumer.
+ */
+export function parseGlobalThresholds(raw: unknown): Partial<CoveragePct> | null {
+  if (!raw || typeof raw !== "object") return null;
+  const t = raw as Record<string, unknown>;
+  if (t["100"] === true) return { statements: 100, branches: 100, functions: 100, lines: 100 };
+  const out: Partial<CoveragePct> = {};
+  for (const m of ["statements", "branches", "functions", "lines"] as const) {
+    const v = t[m];
+    // Positive 0–100 is a percentage target; a negative value is a max-uncovered-count (skipped).
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100) out[m] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** True when `total` meets every configured threshold. Relocated alongside `parseGlobalThresholds`. */
+export function meetsThresholds(total: CoveragePct, thresholds: Partial<CoveragePct>): boolean {
+  return (["statements", "branches", "functions", "lines"] as const).every(
+    (m) => thresholds[m] === undefined || total[m] >= (thresholds[m] as number),
+  );
+}
 
 // TEMPORARY diagnostic instrumentation (not a permanent feature) for investigating a real-project
 // OOM crash during coverage-enabled runs: heap climbs to the default ~4GB ceiling over a long run
@@ -138,6 +147,18 @@ const POOL_START_RETRY_DELAY_MS = 1000;
 const POOL_START_HEARTBEAT_INTERVAL_MS = 4000;
 const POOL_START_HEARTBEAT_MAX_MS = 130_000;
 
+// Coverage generation has its OWN heartbeat window, separate from pool-start (see
+// `withCoverageTailHeartbeat`): after the last test module ends, Vitest still collects V8
+// coverage, remaps it to istanbul, and writes coverage-final.json before startVitest resolves --
+// a silent tail with no test-progress signal that can exceed the watchdog's ~10s default on a
+// large project (this story's exact "large project + coverage" symptom). The cap is far larger
+// than the pool-start one -- 30 minutes, matching the retired NATIVE_COVERAGE_HEARTBEAT_FLOOR_MS
+// intent -- because coverage of a big suite legitimately takes far longer than a worker-start
+// wait, yet it's STILL capped so a genuinely wedged coverage generation eventually falls through
+// to the orchestrator's stall detection rather than heartbeating forever.
+const COVERAGE_TAIL_HEARTBEAT_INTERVAL_MS = 4000;
+const COVERAGE_TAIL_HEARTBEAT_MAX_MS = 1_800_000;
+
 /** Classify by message only, never by error type -- Vitest throws a plain Error here, and this
  *  must never widen to "retry any startVitest failure" (a real test/config error must fail fast).
  *  `[\s\S]` (not `.`) so an embedded newline in the message still matches. */
@@ -189,61 +210,36 @@ async function withPoolStartHeartbeat<T>(
   }
 }
 
-// The per-file coverage-measurement pass (buildAndPersistCoverageMap below) runs each test file
-// individually with a SILENT reporter and can legitimately take well over a minute per file; the
-// orchestrator's stall watchdog is tuned for per-test timing (testTimeout + staleTestGraceMs,
-// often ~10-35s) and is only reset by a phase-progress message sent AFTER a file finishes -- so a
-// single slow file used to get the whole worker killed mid-measurement. Same shape of problem as
-// the pool-start wait above; same fix. Kept as a separate constant/function pair rather than
-// generalizing withPoolStartHeartbeat -- the two heartbeat different IPC message shapes (config
-// vs phase-progress), and one shared abstraction would cost more clarity than it saves.
-const COVERAGE_HEARTBEAT_INTERVAL_MS = 4000;
-// A FLOOR, not the sole ceiling -- buildAndPersistCoverageMap derives the actual per-call cap from
-// this and the operator-configurable TEST_MCP_MEASURE_BUDGET_MS (see its own comment). A fixed
-// value here alone would silently cap coverage measurement below whatever budget an operator
-// configures, walking right back into the stall this whole fix exists to prevent.
-const COVERAGE_HEARTBEAT_MAX_MS = 130_000;
-
 /**
- * Run `attempt` with a `phase-progress` heartbeat firing on an interval while it's pending, so
- * the orchestrator's stall watchdog sees signs of life during a slow-but-legitimate coverage
- * discovery/baseline/per-file measurement. `completed`/`total` are the CURRENT counts, unchanged
- * by the heartbeat itself -- it only re-signals "still on it," never fakes progress ahead of the
- * real completion message sent by the caller once `attempt` resolves. Stops within one interval
- * tick after `maxMs` elapses (checked inside the interval callback, not a separate hard deadline)
- * so a genuinely wedged `attempt` (a different, real bug) still falls through to the orchestrator's
- * normal stall detection instead of being heartbeated forever -- measureSetupBaseline and the
- * native full-suite `startVitest` call have no timeout of their own today, so without this cap
- * heartbeating would mask a real hang in either. `maxMs` is a parameter (not a fixed constant) so callers can pass a
- * budget-aware value instead of one disconnected from how long the operation is actually allowed
- * to legitimately run.
+ * Run `attempt` (a coverage-enabled `runOnce`) with a `config` heartbeat firing on an interval
+ * while it's pending, so the orchestrator's stall watchdog isn't tripped during the SILENT tail
+ * after the last test module ends -- V8 coverage collection, istanbul remapping, and the
+ * coverage-final.json write all happen with no test-progress signal (see the constants above).
+ * Mirrors `withPoolStartHeartbeat`, but with no immediate fire: real test progress already arms
+ * the watchdog throughout the test phase, so only the post-test tail needs covering, and the
+ * interval (well under the watchdog's threshold) picks it up within one tick of the final module.
+ * The `send` is guarded so a torn-down IPC channel can never crash the worker.
  */
-async function withCoverageHeartbeat<T>(
+export async function withCoverageTailHeartbeat<T>(
   runId: string,
-  completed: number,
-  total: number,
-  maxMs: number,
+  testTimeoutMs: number | undefined,
   attempt: () => Promise<T>,
 ): Promise<T> {
   const sendHeartbeat = (): void => {
     try {
-      send({ type: "phase-progress", runId, phase: "coverage", completed, total });
+      send({ type: "config", runId, ...(testTimeoutMs !== undefined ? { testTimeoutMs } : {}) });
     } catch {
       // never let a heartbeat failure (e.g. a torn-down IPC channel) crash the worker
     }
   };
-  // Fire one immediately -- the orchestrator's provisional pre-worker-message watchdog phase uses
-  // staleTestGraceMs alone (default 5000ms); waiting for the first interval tick could burn most
-  // of that margin before any signal arrives.
-  sendHeartbeat();
   const heartbeatStart = Date.now();
   const timer = setInterval(() => {
-    if (Date.now() - heartbeatStart > maxMs) {
+    if (Date.now() - heartbeatStart > COVERAGE_TAIL_HEARTBEAT_MAX_MS) {
       clearInterval(timer);
       return;
     }
     sendHeartbeat();
-  }, COVERAGE_HEARTBEAT_INTERVAL_MS);
+  }, COVERAGE_TAIL_HEARTBEAT_INTERVAL_MS);
   try {
     return await attempt();
   } finally {
@@ -542,7 +538,7 @@ export function mapFailureDetails(
 /** Resolve the PROJECT's Vitest and run it, honouring git-delta selection with a safe fallback. */
 export async function runVitest(
   cwd: string,
-  opts: { files: string[]; changed: boolean },
+  opts: { files: string[]; relatedFiles?: string[] },
   runId: string,
   onProgress?: (completed: number, total: number) => void,
   /** The project's resolved Vitest testTimeout (Story 8.2's readResolvedRunConfig), threaded down
@@ -568,73 +564,52 @@ export async function runVitest(
     failureDetails: mapFailureDetails(r.modules, r.unhandled),
   });
 
-  // Union (Story 3.5): an explicit coverage-map selection PLUS the git static-graph (--changed),
-  // merged so we run everything either signal deems affected.
-  if (opts.changed && opts.files.length > 0) {
-    const primary = await runOnce(startVitest, opts.files, {}, runId, onProgress, testTimeoutMs);
-    let staticRun: RunOnceResult | null = null;
+  // Related-based incremental selection (Story 3.8, AC1/AC4): feed Vitest's own `related` config
+  // field the orchestrator's since-last-run delta so it resolves affected tests via the static
+  // import graph, completely skipping Vitest's own git lookup (Dev Notes: "the `related`
+  // mechanism"). This is the SAME path for a source change and a test-only change alike -- there
+  // is no more separate map-lookup-vs-static-graph split to choose between.
+  if (opts.relatedFiles && opts.relatedFiles.length > 0) {
+    const relatedAbsolute = opts.relatedFiles.map((f) => path.resolve(cwd, f));
+    let inc: RunOnceResult | undefined;
     try {
-      staticRun = await runOnce(startVitest, [], { changed: true }, runId, undefined, testTimeoutMs);
+      inc = await runOnce(
+        startVitest,
+        [],
+        { related: relatedAbsolute },
+        runId,
+        onProgress,
+        testTimeoutMs,
+      );
     } catch {
-      // Not a git repo / --changed unusable -> union is just the coverage-map selection.
-      staticRun = null;
+      // A deleted/non-existent path in `related` resolves to zero matches (safe) rather than
+      // throwing, but any exotic internal Vitest error must degrade to the full suite, never fail
+      // the run (invariant 5) -- mirrors the old `--changed` branch's try/catch. Falls through to
+      // the same full-suite fallback the zero-match path uses below.
+      inc = undefined;
     }
-    const byId = new Map<string, VTestModule>();
-    for (const m of [...primary.modules, ...(staticRun?.modules ?? [])]) {
-      if (!byId.has(m.moduleId)) byId.set(m.moduleId, m);
-    }
-    const mergedModules = [...byId.values()];
-    // Both signals selected zero test files for a change we were told exists -> never silently
-    // report "0 passed" (a silent skip). Fall back to the full suite, matching the lone `--changed`
-    // branch below (Story 6.8; closes the 6.6 union-branch gap).
-    if (mergedModules.length === 0) {
-      const full = await runOnce(startVitest, [], {}, runId, onProgress, testTimeoutMs);
-      return build(full, {
-        strategy: "full",
-        reason: "incremental selection matched no test files; ran full suite",
+    if (inc && inc.modules.length > 0) {
+      return build(inc, {
+        strategy: "incremental",
+        reason: "related-based selection (Vitest static import graph)",
       });
     }
-    const mergedUnhandled = [...primary.unhandled, ...(staticRun?.unhandled ?? [])];
-    const wall = primary.wallClockMs + (staticRun?.wallClockMs ?? 0);
-    return {
-      result: mapModulesToResult(
-        mergedModules,
-        mergedUnhandled,
-        wall,
-        { strategy: "incremental", reason: "coverage-map selection unioned with git static-graph" },
-        primary.isolate,
-      ),
-      failureDetails: mapFailureDetails(mergedModules, mergedUnhandled),
-    };
-  }
-
-  // Incremental (git-aware) selection — only when the caller did not pin explicit files.
-  if (opts.changed && opts.files.length === 0) {
-    try {
-      const inc = await runOnce(startVitest, [], { changed: true }, runId, onProgress, testTimeoutMs);
-      if (inc.modules.length > 0) {
-        return build(inc, {
-          strategy: "incremental",
-          reason: "git delta via vitest --changed (static import graph)",
-        });
-      }
-      // No affected test files -> fall through to a full run (never a silent skip).
-    } catch {
-      // Not a git repo / --changed unusable -> fall through to a full run.
-    }
+    // `related` resolved to zero actual test files despite non-empty changed input (e.g. a
+    // genuine orphan source nothing statically depends on), or the related pass threw -> never
+    // silently report "0 passed": fall back to the full suite as a second Vitest pass.
     const full = await runOnce(startVitest, [], {}, runId, onProgress, testTimeoutMs);
     return build(full, {
       strategy: "full",
-      reason: "incremental found no affected tests (unmapped change or non-git); ran full suite",
+      reason: "incremental selection matched no test files; ran full suite",
     });
   }
 
   // Full run, or an explicit file selection.
   const run = await runOnce(startVitest, opts.files, {}, runId, onProgress, testTimeoutMs);
   if (opts.files.length > 0 && run.modules.length === 0) {
-    // A selection that resolves to zero actual test files (e.g. a stale coverage-map entry
-    // naming a file that no longer exists) must never silently report "0 passed" — escalate to
-    // the full suite (mirrors the union branch's identical safety net above).
+    // A selection that resolves to zero actual test files (e.g. a stale/renamed explicit file
+    // name) must never silently report "0 passed" — escalate to the full suite (mirrors the
+    // related-based branch's identical safety net above).
     const full = await runOnce(startVitest, [], {}, runId, onProgress, testTimeoutMs);
     return build(full, {
       strategy: "full",
@@ -645,65 +620,6 @@ export async function runVitest(
     strategy: opts.files.length ? "incremental" : "full",
     reason: opts.files.length ? "explicit file selection" : "full suite",
   });
-}
-
-/** Measure the source files reached purely by setupFiles (a no-op test triggers only setup). */
-async function measureSetupBaseline(
-  startVitest: VitestNode["startVitest"],
-  projectRoot: string,
-): Promise<string[]> {
-  const baselineTest = path.join(projectRoot, "__test-mcp-baseline__.test.ts");
-  fs.writeFileSync(baselineTest, `import { test } from "vitest";\ntest("baseline", () => {});\n`);
-  try {
-    const { sources, measured } = await measureCoverage(startVitest, projectRoot, baselineTest);
-    return measured ? sources : [];
-  } finally {
-    fs.rmSync(baselineTest, { force: true });
-  }
-}
-
-/** Measure one test file's coverage by running the project's Vitest with V8 coverage. */
-async function measureCoverage(
-  startVitest: VitestNode["startVitest"],
-  projectRoot: string,
-  absTestFile: string,
-): Promise<FileMeasurement> {
-  const reportsDir = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-cov-"));
-  try {
-    const vitest = await startVitest("test", [absTestFile], {
-      watch: false,
-      // Keep reporters quiet; we only care about the coverage output on disk.
-      reporters: [{}],
-      coverage: {
-        enabled: true,
-        provider: "v8",
-        all: false,
-        reporter: ["json"],
-        reportsDirectory: reportsDir,
-        // A single-file run trips project coverage thresholds; never fail the build on them.
-        thresholds: undefined,
-      },
-    });
-    if (!vitest) return { sources: [], measured: false };
-    try {
-      const covFile = path.join(reportsDir, "coverage-final.json");
-      if (!fs.existsSync(covFile)) return { sources: [], measured: false };
-      const json = JSON.parse(fs.readFileSync(covFile, "utf8")) as Record<
-        string,
-        { s?: Record<string, number> }
-      >;
-      // Return the raw istanbul-shaped data too (Story 6.10) for the combined-coverage merge.
-      return {
-        sources: extractCoveredSources(json, projectRoot, absTestFile),
-        measured: true,
-        data: json as Record<string, unknown>,
-      };
-    } finally {
-      await vitest.close();
-    }
-  } finally {
-    fs.rmSync(reportsDir, { recursive: true, force: true });
-  }
 }
 
 /**
@@ -731,242 +647,12 @@ async function readResolvedRunConfig(
   }
 }
 
-/** Resolve `p`, or `fallback` if it doesn't settle within `ms`. The abandoned promise is left to
- *  settle on its own (its own finally cleans up); we never hang the whole build on one file. */
-function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(fallback), ms);
-    p.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      () => {
-        clearTimeout(timer);
-        resolve(fallback);
-      },
-    );
-  });
-}
-
-/**
- * Build/update and persist the reverse coverage map for an INCREMENTAL/SELECTIVE run (`files` is
- * the explicit, non-empty list to re-measure), and refresh the per-test coverage data behind the
- * combined report (Story 6.10) for those files. Returns the map summary plus the COMBINED
- * whole-project coverage (union of each test file's latest measurement) — derived from the SAME
- * per-file measurement runs, so no extra suite execution.
- *
- * A FULL-SUITE call (`files.length === 0` — this also covers the "changed-only" fallback
- * strategy, which also carries `files: []`; see Story 3.7 Dev Notes for why both get identical
- * treatment) never reaches this per-file path at all: THIS FUNCTION routes it to
- * `buildNativeFullSuiteCoverage` instead (Story 3.7, see the branch at the top of the function
- * body) — one native Vitest coverage pass over the whole suite, not one process per test file.
- * The reverse map is therefore never built/refreshed by a full-suite run, by deliberate design
- * (`src/selection/index.ts`'s `SelectionEngine.plan` already degrades gracefully to the static
- * import graph when the map is absent/stale for a source, so this is a safe, accepted tradeoff,
- * not a correctness regression).
- */
-export async function buildAndPersistCoverageMap(
-  cwd: string,
-  projectId: string,
-  files: string[],
-  runId: string,
-  thresholds: unknown,
-  /** Test-only seam: inject a fake `startVitest` to exercise the coverage-phase heartbeat logic
-   *  deterministically (e.g. a slow or never-resolving fake), without needing to shadow the real
-   *  `vitest` package's module exports. Never set in production. */
-  startVitestOverride?: VitestNode["startVitest"],
-): Promise<{ delta: CoverageDelta; coverage?: TestResult["coverage"] }> {
-  const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
-  const resolved = projectRequire("vitest/node") as VitestNode;
-  const startVitest = startVitestOverride ?? resolved.startVitest;
-
-  logMemory(cwd, "coverage-phase-start", { filesRequested: files.length });
-
-  if (files.length === 0) {
-    return buildNativeFullSuiteCoverage(cwd, runId, thresholds, startVitest);
-  }
-
-  const budgetMs = Number(process.env.TEST_MCP_MEASURE_BUDGET_MS ?? 120_000);
-  // A floor, not a fixed ceiling -- if an operator raises TEST_MCP_MEASURE_BUDGET_MS to legitimately
-  // tolerate slower per-file measurement, the heartbeat's own safety margin must rise with it, or
-  // heartbeating would cut off before the file's own configured allowance is reached, silently
-  // reproducing the exact stall this fix exists to prevent (bad_spec fix -- see Spec Change Log).
-  const heartbeatMaxMs = Math.max(COVERAGE_HEARTBEAT_MAX_MS, budgetMs + COVERAGE_HEARTBEAT_INTERVAL_MS);
-
-  const targetTestFiles = files.map((f) => path.resolve(cwd, f));
-
-  logMemory(cwd, "after-discovery", { targetTestFiles: targetTestFiles.length });
-
-  const baseline = await withCoverageHeartbeat(runId, 0, targetTestFiles.length, heartbeatMaxMs, () =>
-    measureSetupBaseline(startVitest, cwd),
-  );
-
-  logMemory(cwd, "after-baseline", { baselineSources: baseline.length });
-
-  // Capture each measured test file's raw coverage data + the sources it touched as we go.
-  const rawData: Record<string, IstanbulCoverageData> = {};
-  const perTestSources: Record<string, string[]> = {};
-  const freshSources = new Set<string>();
-  let coverageFilesDone = 0;
-  const { file, summary } = await buildCoverageMap({
-    projectRoot: cwd,
-    projectId,
-    targetTestFiles,
-    existing: loadCoverageMap(cwd),
-    measure: async (abs) => {
-      const m = await withCoverageHeartbeat(
-        runId,
-        coverageFilesDone,
-        targetTestFiles.length,
-        heartbeatMaxMs,
-        () =>
-          withTimeout(measureCoverage(startVitest, cwd, abs), budgetMs, {
-            sources: [],
-            measured: false,
-          }),
-      );
-      if (m.measured && m.data) {
-        const testRel = path.relative(cwd, abs);
-        rawData[testRel] = m.data as IstanbulCoverageData;
-        // Every project source in the data, INCLUDING zero-hit ones, so a loaded-but-unexecuted
-        // file still gets a measurement hash (else it would look permanently stale — review F2).
-        const sources = coveredSourceFiles(m.data as IstanbulCoverageData, cwd);
-        perTestSources[testRel] = sources;
-        for (const s of sources) freshSources.add(s);
-      }
-      // Required (Story 8.2/AD-20), not optional: this phase runs a SILENT reporter (measureCoverage
-      // passes `reporters: [{}]`) and otherwise emits zero progress signals for its entire duration.
-      // The withCoverageHeartbeat wrap above now covers the IN-PROGRESS gap; this remains the
-      // authoritative "file N of M actually done" signal once measurement settles. Guarded like
-      // every heartbeat send() above -- found via this fix's own tests: previously, a torn-down
-      // IPC channel here threw uncaught, which handleRun's caller turns into ANOTHER send() (the
-      // error-result path) that would also throw on the same dead channel, surfacing as an
-      // unhandled rejection instead of the worker just quietly losing this one signal.
-      coverageFilesDone += 1;
-      try {
-        send({
-          type: "phase-progress",
-          runId,
-          phase: "coverage",
-          completed: coverageFilesDone,
-          total: targetTestFiles.length,
-        });
-      } catch {
-        // never let a progress-signal failure crash the worker
-      }
-      // Every 25 files (not every file -- Object.keys()/JSON.stringify() on a large rawData is
-      // itself non-trivial work, and this is diagnostic-only). Tests whether memory grows roughly
-      // linearly with files measured -- if it does, rawData (all of this run's raw per-file
-      // coverage JSON, held simultaneously until persistAndCombine at the very end) is a prime
-      // suspect for the OOM.
-      if (coverageFilesDone % 25 === 0 || coverageFilesDone === targetTestFiles.length) {
-        logMemory(cwd, "coverage-file-measured", {
-          filesDone: coverageFilesDone,
-          filesTotal: targetTestFiles.length,
-          rawDataEntries: Object.keys(rawData).length,
-          rawDataApproxBytes: Buffer.byteLength(JSON.stringify(rawData)),
-        });
-      }
-      return m;
-    },
-    baseline,
-  });
-  saveCoverageMap(cwd, file);
-
-  logMemory(cwd, "before-persist-and-combine", { rawDataEntries: Object.keys(rawData).length });
-  const coverage = persistAndCombine(cwd, projectId, rawData, perTestSources, freshSources, thresholds);
-  logMemory(cwd, "after-persist-and-combine");
-  return { delta: { ...summary }, coverage };
-}
-
-// Operator-configurable ceiling for how long the native full-suite coverage pass's heartbeat
-// keeps signaling life (Story 3.7) -- mirrors TEST_MCP_MEASURE_BUDGET_MS's floor/override shape,
-// but sized for a WHOLE-SUITE run rather than one file: a single file's 120s-ish budget would cut
-// heartbeats off long before a real multi-minute full-suite pass finishes, handing the run to the
-// orchestrator's normal stall watchdog while it's still legitimately working. Once this elapses,
-// heartbeats stop and the orchestrator's own stall detection takes over -- a genuinely wedged pass
-// still surfaces, it just isn't heartbeated forever (same philosophy as COVERAGE_HEARTBEAT_MAX_MS).
-const NATIVE_COVERAGE_HEARTBEAT_FLOOR_MS = 30 * 60_000;
-
-/**
- * Full-suite coverage measurement (Story 3.7): ONE native Vitest pass over the whole suite with
- * `coverage.enabled: true` (the equivalent of `vitest run --coverage`), instead of one process per
- * test file. Never touches the reverse coverage map (`buildCoverageMap`/`saveCoverageMap`) -- that
- * stays exclusively the incremental/selective path's job (see `buildAndPersistCoverageMap`'s own
- * doc comment). `delta` is always `{}` here (no per-test attribution to report).
- */
-async function buildNativeFullSuiteCoverage(
-  cwd: string,
-  runId: string,
-  thresholds: unknown,
-  startVitest: VitestNode["startVitest"],
-): Promise<{ delta: CoverageDelta; coverage?: TestResult["coverage"] }> {
-  // Number(...) on a garbage/empty env value is NaN; Math.max(floor, NaN) is ALSO NaN (NaN
-  // poisons the comparison), which would silently disable the heartbeat cap forever rather than
-  // fall back to the floor -- guard explicitly rather than trust the operator-supplied string.
-  const rawFullCoverageBudget = Number(process.env.TEST_MCP_FULL_COVERAGE_BUDGET_MS ?? 0);
-  const heartbeatMaxMs = Math.max(
-    NATIVE_COVERAGE_HEARTBEAT_FLOOR_MS,
-    Number.isFinite(rawFullCoverageBudget) ? rawFullCoverageBudget : 0,
-  );
-  const reportsDir = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-cov-full-"));
-  try {
-    const vitest = await withCoverageHeartbeat(runId, 0, 0, heartbeatMaxMs, () =>
-      startVitest("test", [], {
-        watch: false,
-        // Keep reporters quiet; we only care about the coverage output on disk (same as the
-        // per-file path's measureCoverage).
-        reporters: [{}],
-        coverage: {
-          enabled: true,
-          // Forced, same as measureCoverage's existing per-file override -- not a new deviation
-          // from "inherit the project's config" (AC5); this codebase has always forced v8
-          // regardless of what a project's own vitest.config names, since buildNativeCoverageReport
-          // (below) parses the v8/istanbul-shaped coverage-final.json output directly.
-          provider: "v8",
-          // Same denominator scope as the existing per-file path (measureCoverage) and the
-          // combined-report path (persistAndCombine/combineCoverage): only files at least one
-          // test actually touched. Confirmed empirically that `all: true` alone does not include
-          // never-imported files for the v8 provider without ALSO configuring an explicit
-          // `coverage.include` glob (which would mean overriding the project's own include/exclude
-          // choice to get it, undesirable per AC5) -- pursuing whole-project-including-dead-code
-          // completeness would be a NEW, stricter guarantee this codebase's coverage % has never
-          // made anywhere else, not something Story 3.7 was asked to add. Matching the existing
-          // definition keeps this pass's numbers consistent with every other coverage report.
-          all: false,
-          reporter: ["json"],
-          reportsDirectory: reportsDir,
-          // Never let Vitest's own threshold gate run/exit on this pass -- thresholdsMet is
-          // computed manually below via meetsThresholds(), exactly like the combined-report path
-          // (src/coverage/combined.ts) already does, so a failing threshold can never reproduce
-          // the crash this story exists to fix. `include`/`exclude` are deliberately NOT set here
-          // -- they inherit from the project's own vitest.config coverage settings.
-          thresholds: undefined,
-        },
-      }),
-    );
-    if (!vitest) return { delta: {}, coverage: undefined };
-    try {
-      const covFile = path.join(reportsDir, "coverage-final.json");
-      if (!fs.existsSync(covFile)) return { delta: {}, coverage: undefined };
-      // A truncated/corrupt coverage-final.json (killed mid-write, disk full -- exactly the kind
-      // of failure this story exists to survive) must degrade to "no coverage this run," never
-      // throw out of the coverage phase and take the whole run down with it.
-      let json: Record<string, unknown>;
-      try {
-        json = JSON.parse(fs.readFileSync(covFile, "utf8")) as Record<string, unknown>;
-      } catch {
-        return { delta: {}, coverage: undefined };
-      }
-      return { delta: {}, coverage: buildNativeCoverageReport(json, cwd, thresholds) };
-    } finally {
-      await vitest.close();
-    }
-  } finally {
-    fs.rmSync(reportsDir, { recursive: true, force: true });
-  }
-}
+// Story 3.8 retired the old two-phase design ("run once for results, then run again per test
+// file to build a source->test reverse map") entirely. Coverage is now produced by ONE unified
+// Vitest pass that measures results AND coverage in the SAME invocation -- see `runWithCoverage`
+// below. There is no more separate coverage phase, no more reverse map, no more per-file
+// measurement, and (per AC2) no more incremental/selective coverage at all -- coverage is
+// full-suite-only now.
 
 /** Coerce an istanbul pct (0-100) to a finite number; a non-numeric sentinel becomes 0. */
 function pct(v: unknown): number {
@@ -974,18 +660,19 @@ function pct(v: unknown): number {
 }
 
 /**
- * Convert a single native full-suite `coverage-final.json` directly into `TestResult["coverage"]`
- * (Story 3.7) -- every file was freshly measured in this exact pass, so there is no staleness
- * concept and no per-test union to perform (contrast with `persistAndCombine`'s Story 6.10
- * union-of-historic-per-file-measurements case, which this is NOT).
+ * Convert a single (full-suite or, defensively, explicit-file) `coverage-final.json` directly
+ * into `TestResult["coverage"]` (Story 3.7, shape simplified further in Story 3.8) -- every file
+ * was freshly measured in this exact pass, so there is no staleness concept and no per-test union
+ * to perform; the retired combined-coverage report (Story 6.10) used to carry `fresh`/`stale`
+ * flags for exactly that union case, which no longer exists.
  */
 function buildNativeCoverageReport(
   json: Record<string, unknown>,
   projectRoot: string,
   rawThresholds: unknown,
-): TestResult["coverage"] {
+): NonNullable<TestResult["coverage"]> {
   const map = libCoverage.createCoverageMap(json as libCoverage.CoverageMapData);
-  const files: Array<{ file: string; fresh: true } & CoveragePct> = [];
+  const files: Array<{ file: string } & CoveragePct> = [];
   const total = libCoverage.createCoverageSummary();
   for (const abs of map.files()) {
     const rel = path.relative(projectRoot, abs);
@@ -1005,7 +692,6 @@ function buildNativeCoverageReport(
       branches: pct(summary.data.branches.pct),
       functions: pct(summary.data.functions.pct),
       lines: pct(summary.data.lines.pct),
-      fresh: true,
     });
   }
   files.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
@@ -1029,83 +715,109 @@ function buildNativeCoverageReport(
 }
 
 /**
- * Refresh the persisted per-test coverage data with this run's measurements, then merge every test
- * file's latest coverage into the combined whole-project report (Story 6.10). Best-effort: any
- * failure returns `undefined` (logged) so a coverage-report problem never fails the run.
+ * Unified single-pass coverage measurement (Story 3.8): the SAME Vitest invocation that produces
+ * real test results also measures coverage (`coverage.enabled: true` merged into `runOnce`'s
+ * `extraOptions` -- already-proven shallow-merge support, Story 3.7's `buildNativeFullSuiteCoverage`
+ * used the same shape for a standalone call; here it's the SAME call that also produces results,
+ * not a second one). Only ever called for a genuine full-suite request -- `msg.coverage` is only
+ * ever true when the orchestrator has already validated `sel.strategy === "full"` (Task 3.2's
+ * `SelectionError` check) -- so `filters` here is always `[]` in production; it is threaded
+ * through anyway so this function's own contract doesn't silently assume that rather than stating
+ * it. Logs at entry and at each silent-degrade branch (missing file, corrupt JSON) -- Story 3.7
+ * shipped its equivalent with zero diagnostic logging, which is exactly what caused this story's
+ * second reported symptom (a real run's coverage report went silently missing with no trace in
+ * `debug-memory.log`); this does not repeat that gap.
  */
-function persistAndCombine(
+async function runWithCoverage(
   cwd: string,
-  projectId: string,
-  rawData: Record<string, IstanbulCoverageData>,
-  perTestSources: Record<string, string[]>,
-  freshSources: ReadonlySet<string>,
+  filters: string[],
+  runId: string,
   thresholds: unknown,
-): TestResult["coverage"] | undefined {
+  onProgress: (completed: number, total: number) => void,
+  testTimeoutMs: number | undefined,
+  startVitest: VitestNode["startVitest"],
+): Promise<{ result: TestResult; failureDetails: FailureDetail[] }> {
+  const reportsDir = fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-cov-"));
+  logMemory(cwd, "unified-coverage-start", { filters: filters.length });
   try {
-    const now = new Date().toISOString();
-    // Hash the sources measured this run once; record per-test which version each test saw, so a
-    // later edit (or two tests that measured different versions) surfaces as stale (review F1).
-    const freshHashes = computeHashes(cwd, [...freshSources]);
-    const measured: Record<string, TestCoverage> = {};
-    for (const [testRel, data] of Object.entries(rawData)) {
-      const sourceHashes: Record<string, string> = {};
-      for (const s of perTestSources[testRel] ?? []) {
-        if (freshHashes[s] !== undefined) sourceHashes[s] = freshHashes[s];
-      }
-      measured[testRel] = { measuredAt: now, sourceHashes, data };
-    }
-    const existsTest = (testRel: string): boolean => fs.existsSync(path.join(cwd, testRel));
-    let dataFileBytesOnDisk: number | undefined;
-    try {
-      dataFileBytesOnDisk = fs.statSync(coverageDataPath(cwd)).size;
-    } catch {
-      // no existing file yet -- fine, just means this is the first coverage-enabled run
-    }
-    logMemory(cwd, "persist-before-load", { measuredThisRun: Object.keys(measured).length, dataFileBytesOnDisk });
-    const loaded = loadCoverageData(cwd);
-    logMemory(cwd, "persist-after-load", { existingTestsTracked: loaded ? Object.keys(loaded.tests).length : 0 });
-    const updated = updateCoverageData(loaded, projectId, now, measured, existsTest);
-    logMemory(cwd, "persist-after-update", { totalTestsTracked: Object.keys(updated.tests).length });
-    saveCoverageData(cwd, updated);
-    logMemory(cwd, "persist-after-save");
-    // Current hashes of every source any surviving test measured — to detect stale (changed) sources.
-    const allSources = new Set<string>();
-    for (const tc of Object.values(updated.tests)) {
-      for (const s of Object.keys(tc.sourceHashes)) allSources.add(s);
-    }
-    const currentHashes = computeHashes(cwd, [...allSources]);
-    logMemory(cwd, "persist-after-hashes", { sourcesHashed: allSources.size });
-    const result = combineCoverage(updated, cwd, currentHashes, freshSources, thresholds) ?? undefined;
-    logMemory(cwd, "persist-after-combine");
-    return result;
-  } catch (err) {
-    process.stderr.write(
-      `[test-mcp] combined coverage unavailable this run: ${
-        err instanceof Error ? err.message : String(err)
-      }\n`,
+    // Wrap the coverage pass in the tail heartbeat: redundant during the test phase (real
+    // progress already arms the watchdog there) but essential during the silent coverage
+    // generation that follows the last test module.
+    const r = await withCoverageTailHeartbeat(runId, testTimeoutMs, () =>
+      runOnce(
+        startVitest,
+        filters,
+        {
+          coverage: {
+            enabled: true,
+            // Forced, matching this codebase's long-standing choice (Story 3.7) regardless of what
+            // a project's own vitest.config names -- buildNativeCoverageReport below parses the
+            // v8/istanbul-shaped coverage-final.json output directly.
+            provider: "v8",
+            // Only files at least one test actually touched (not every file in the project) --
+            // matches every other coverage report this codebase has ever produced; broadening this
+            // would be a new, stricter guarantee this story was never asked to add.
+            all: false,
+            reporter: ["json"],
+            reportsDirectory: reportsDir,
+            // Never let Vitest's own threshold gate run/exit on this pass -- thresholdsMet is
+            // computed manually below via meetsThresholds(), so a failing threshold can never
+            // abort the run.
+            thresholds: undefined,
+          },
+        },
+        runId,
+        onProgress,
+        testTimeoutMs,
+      ),
     );
-    return undefined;
+    const selection: { strategy: "full" | "incremental"; reason: string } = filters.length
+      ? { strategy: "incremental", reason: "explicit file selection" }
+      : { strategy: "full", reason: "full suite" };
+    const built = {
+      result: mapModulesToResult(r.modules, r.unhandled, r.wallClockMs, selection, r.isolate),
+      failureDetails: mapFailureDetails(r.modules, r.unhandled),
+    };
+    const covFile = path.join(reportsDir, "coverage-final.json");
+    if (!fs.existsSync(covFile)) {
+      logMemory(cwd, "unified-coverage-missing-file", { reportsDir });
+      return built;
+    }
+    let json: Record<string, unknown>;
+    try {
+      json = JSON.parse(fs.readFileSync(covFile, "utf8")) as Record<string, unknown>;
+    } catch (err) {
+      // A truncated/corrupt coverage-final.json (killed mid-write, disk full) must degrade to "no
+      // coverage this run," never throw and take the whole (already-successful) run result down.
+      logMemory(cwd, "unified-coverage-corrupt-json", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return built;
+    }
+    const coverage = buildNativeCoverageReport(json, cwd, thresholds);
+    logMemory(cwd, "unified-coverage-done", { files: coverage.files.length });
+    return { ...built, result: { ...built.result, coverage } };
+  } finally {
+    fs.rmSync(reportsDir, { recursive: true, force: true });
   }
 }
 
-/** Run tests, and (when requested) build/persist the coverage map + combined report on the results. */
+/** Run tests, measuring coverage in the same pass when requested (Story 3.8: exactly one Vitest
+ *  invocation either way -- never a separate results-then-coverage two-phase run). */
 async function handleRun(
   msg: Extract<ToWorker, { type: "run" }>,
-): Promise<{ result: TestResult; failureDetails: FailureDetail[]; coverageDelta?: CoverageDelta }> {
+): Promise<{ result: TestResult; failureDetails: FailureDetail[] }> {
   const cwd = process.cwd();
   // Unconditional (fires regardless of msg.coverage) -- confirms this worker is actually running
   // the instrumented build, and whether coverage was even requested for this run, before anything
-  // else can go wrong. All the OTHER logMemory calls only fire once buildAndPersistCoverageMap is
-  // reached (msg.coverage truthy); if that log line never shows up in debug-memory.log, this one
-  // tells us whether that's because coverage wasn't enabled for this run at all, or because
-  // something upstream of this point never even got this far.
+  // else can go wrong.
   logMemory(cwd, "handle-run-start", {
     coverageRequested: !!msg.coverage,
     filesRequested: msg.files.length,
     workerPid: process.pid,
   });
   const projectRequire = createRequire(path.join(cwd, "__test-mcp-resolve__.js"));
-  const { createVitest } = projectRequire("vitest/node") as VitestNode;
+  const { createVitest, startVitest } = projectRequire("vitest/node") as VitestNode;
 
   // Read resolved config BEFORE the real run so the orchestrator's stall watchdog (Story 8.5)
   // can be armed with the project's actual testTimeout from the start, not just its fallback.
@@ -1114,26 +826,16 @@ async function handleRun(
     send({ type: "config", runId: msg.runId, testTimeoutMs });
   }
 
-  const base = await runVitest(
-    cwd,
-    { files: msg.files, changed: msg.changed },
-    msg.runId,
-    (completed, total) => send({ type: "progress", runId: msg.runId, completed, total }),
-    testTimeoutMs,
-  );
-  if (!msg.coverage) return base;
-  const { delta, coverage } = await buildAndPersistCoverageMap(
-    cwd,
-    msg.projectId,
-    msg.files,
-    msg.runId,
-    coverageThresholds,
-  );
-  return {
-    ...base,
-    coverageDelta: delta,
-    result: coverage ? { ...base.result, coverage } : base.result,
-  };
+  const onProgress = (completed: number, total: number): void =>
+    send({ type: "progress", runId: msg.runId, completed, total });
+
+  if (msg.coverage) {
+    // Only ever true for a genuine full-suite request (validated at the orchestrator, Task 3.2)
+    // -- the SAME single Vitest pass that produces real results also measures coverage; there is
+    // no more separate coverage phase to run afterward (AC1: exactly one Vitest invocation).
+    return runWithCoverage(cwd, msg.files, msg.runId, coverageThresholds, onProgress, testTimeoutMs, startVitest);
+  }
+  return runVitest(cwd, { files: msg.files, relatedFiles: msg.relatedFiles }, msg.runId, onProgress, testTimeoutMs);
 }
 
 function send(msg: FromWorker): void {
@@ -1156,8 +858,8 @@ if (process.send) {
     }
     if (msg.type === "run") {
       handleRun(msg)
-        .then(({ result, failureDetails, coverageDelta }) =>
-          send({ type: "result", runId: msg.runId, result, failureDetails, coverageDelta }),
+        .then(({ result, failureDetails }) =>
+          send({ type: "result", runId: msg.runId, result, failureDetails }),
         )
         .catch((err: unknown) =>
           send({

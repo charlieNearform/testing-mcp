@@ -25,10 +25,6 @@ interface LiveView {
   testsTruncated: boolean;
   testsShown: number;
   logTail: Array<{ stream: string; text: string; at: string }>;
-  /** Coverage-measurement heartbeat (AD-20/AD-21) -- the ONLY progress signal during that phase:
-   *  it uses a silent reporter, so the console log and per-test list both go quiet, which reads as
-   *  a hang on a large project without this surfaced somewhere explicit. */
-  phase?: { phase: "coverage"; completed: number; total: number };
 }
 
 const MAX_SNAPSHOT_TESTS = 200;
@@ -101,7 +97,6 @@ export async function uiSnapshot(deps: UiDeps): Promise<{ serverTime: string; pr
         testsTruncated: live.testsTruncated,
         testsShown: Math.min(live.tests.length, MAX_SNAPSHOT_TESTS),
         logTail: live.log.slice(-MAX_SNAPSHOT_LOG_LINES),
-        ...(live.phase ? { phase: live.phase } : {}),
       };
       return {
         projectId: p.projectId,
@@ -343,10 +338,6 @@ const UI_HTML = `<!doctype html>
   table.runs td { padding:8px 10px; border-bottom:1px solid var(--border); }
   table.runs tr.row:hover { background:var(--card); cursor:pointer; }
   .detail-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; margin:14px 0; }
-  .phase-progress { margin:14px 0; }
-  .phase-progress .label { display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin-bottom:4px; }
-  .phase-progress .bar { height:8px; border-radius:4px; background:var(--card); border:1px solid var(--border); overflow:hidden; }
-  .phase-progress .fill { height:100%; background:var(--run); transition:width .2s ease; }
   .kv { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
   .kv .k { color:var(--muted); font-size:11px; } .kv .v { font-size:15px; margin-top:2px; }
   .section-title { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; margin:22px 0 8px; }
@@ -909,24 +900,10 @@ function renderProject(pid) {
 // "running" row renderProject() now prepends to the history table. That row's runId matches
 // live.runId exactly while the run is in flight, which is how this is told apart from a normal
 // completed-run lookup below. The live per-test status list lives here too -- it's about this one
-// running job, not the project's history (which is what renderProject shows).
-// The coverage-measurement phase uses a silent reporter (AD-20) -- no console output, and the
-// per-test list stops updating too (it's per-FILE, not per-case, during this phase) -- so without
-// this, a large project's coverage pass reads as a hang even though heartbeats are keeping it
-// alive underneath. phase.total is 0 during baseline measurement (brief) AND for the entire
-// duration of a full-suite native coverage pass (Story 3.7 -- no per-file count exists there);
-// show an indeterminate state rather than a misleading "0 / 0" either way. "in progress" (not
-// "starting") since this can legitimately persist for minutes on a full-suite pass, not just
-// the brief window before the first file-count is known.
-function phaseProgressBlock(phase) {
-  if (!phase) return "";
-  const known = phase.total > 0;
-  const pct = known ? Math.min(100, Math.round((phase.completed / phase.total) * 100)) : 6;
-  return '<div class="phase-progress"><div class="label"><span>Measuring coverage</span><span>'
-    + (known ? phase.completed + ' / ' + phase.total + ' files' : 'in progress…')
-    + '</span></div><div class="bar"><div class="fill" style="width:' + pct + '%"></div></div></div>';
-}
-
+// running job, not the project's history (which is what renderProject shows). A full-suite
+// coverage-enabled run's progress already shows via the live-tests list below like any other run
+// (Story 3.8 unified it into the same real per-test reporter) -- there is no more separate blind
+// coverage phase needing its own progress bar here.
 function renderLiveRun(pid, runId, proj, back) {
   const r = proj.run || {};
   const grid = '<div class="detail-grid">'
@@ -942,8 +919,7 @@ function renderLiveRun(pid, runId, proj, back) {
     + '<h2 class="mono">run ' + esc(String(runId).slice(0, 8)) + '…</h2>'
     + '<div class="ts">' + fmtTime(r.updatedAt) + ' · in progress'
     + (r.reason ? ' · ' + esc(r.reason) : '') + '</div>'
-    + grid
-    + phaseProgressBlock(proj.live && proj.live.phase);
+    + grid;
   placeLogEl(pid);
   viewBottom.innerHTML = liveTestsBlock(proj.live, proj.path, liveTestsOpen);
   wireLiveTestsPanel();

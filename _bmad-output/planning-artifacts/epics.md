@@ -404,7 +404,17 @@ So that a source edit resolves to the tests that exercise it.
 **When** the run completes
 **Then** only those files are re-measured and the map is updated incrementally.
 
+> **Superseded 2026-07-24 (Story 3.8):** the reverse map is retired entirely, not just for
+> full-suite. A single Vitest pass can produce an aggregate coverage percentage for any file set,
+> but never per-test attribution (which test covers which source) — that requires per-file
+> measurement, now categorically forbidden (every run is exactly one Vitest pass, full or
+> incremental). This AC's map-persists-and-updates-incrementally behavior is dead design.
+
 ### Story 3.3: Setup-Baseline Subtraction
+
+> **Superseded 2026-07-24 (Story 3.8):** exists only to correct per-test attribution in the
+> reverse map; with the map retired entirely (see Story 3.2's annotation above), there is nothing
+> left to correct. This story's mechanism is dead design in full.
 
 As an AI agent,
 I want setup-file pollution removed from the map,
@@ -421,6 +431,12 @@ So that common modules don't make every source look globally depended-on.
 **Then** it is treated as a full-suite trigger, not a per-test edge.
 
 ### Story 3.4: Always-Run Unmeasurable Tests
+
+> **Superseded 2026-07-24 (Story 3.8):** "unmeasurable" and "unknown deps" are reverse-map
+> attribution concepts; with the map retired entirely (Story 3.2's annotation), there's no map
+> entry to mark and no per-test measurement that can fail. A test that can't be selected via the
+> static import graph already falls back to the full suite (Story 3.1's existing safety net) —
+> this story's mechanism is dead design in full.
 
 As an AI agent,
 I want unmeasurable tests never silently dropped,
@@ -448,9 +464,17 @@ So that I re-run the minimum safe set.
 **When** selection runs
 **Then** dependent tests re-run based on the union of coverage-map and static-graph selection.
 
+> **Superseded 2026-07-24 (Story 3.8):** with no coverage map ever buildable (Story 3.2's
+> annotation), there is no second signal to union — selection is the static-graph result alone.
+> `SelectionEngine.plan`'s map-consuming branches become unreachable dead code to remove.
+
 **Given** a changed file unknown to the map
 **When** requested
 **Then** the system conservatively runs the full suite rather than risk a missed failure.
+
+> **Unaffected by Story 3.8** — this AC's conservative-fallback behavior is exactly what governs
+> every changed file now (no map to be "known to" at all), just via `SelectionEngine.plan`'s
+> no-map branch rather than an unmapped-within-a-map branch.
 
 ### Story 3.6: Watch / Incremental Mode
 
@@ -468,9 +492,17 @@ So that iterative development stays fast.
 **When** the change occurs
 **Then** the system determines dependent tests via the reverse map and re-runs them.
 
+> **Superseded 2026-07-24 (Story 3.8):** no reverse map exists to consult; dependent tests are
+> determined via the static `--changed` graph alone (Story 3.1's mechanism), same as any other
+> incremental run.
+
 **Given** a fast-mode toggle is disabled
 **When** a run occurs
 **Then** coverage collection runs alongside tests.
+
+> **Superseded 2026-07-24 (Story 3.8):** `fastMode` has nothing left to toggle — incremental
+> (which is what watch mode always runs under the hood) no longer accepts coverage at all, ever.
+> `start_watch`'s `fastMode` option becomes dead surface to remove, not just default differently.
 
 **Given** an incremental single-file change in watch mode (NFR1 — interactive latency)
 **When** affected tests re-run
@@ -497,9 +529,57 @@ crashed the daemon on a real project).
 **When** the coverage phase runs
 **Then** behavior is unchanged: the existing per-file measurement path keeps the reverse map fresh for the touched files.
 
+> **Superseded 2026-07-24 (Story 3.8):** confirmed with the user this AC's own assumption — that
+> incremental+coverage stays cheap because selections are small — doesn't hold as an absolute
+> rule ("two passes is forbidden... single pass, always, no exceptions"). Per-file measurement is
+> now categorically removed rather than merely bounded; incremental never accepts `coverage: true`
+> again, full stop. Confirmed via a real AI-agent workflow trace (fast incremental loop, coverage
+> only on the terminal full-suite gate) that no real usage pattern needs it.
+
 **Given** a project with a persisted coverage map and a caller that omits `coverage`
 **When** the run is incremental/selective
 **Then** coverage defaults to `false` (explicit opt-in only); on a full-suite run it still defaults to `true` when a map exists.
+
+> **Superseded 2026-07-24 (Story 3.8):** "explicit opt-in" is moot — incremental has no coverage
+> opt-in anymore at all. Full-suite's default no longer needs the map-exists gate either (coverage
+> is uniformly cheap now, regardless of map state, because there is no map): defaults to `true`
+> unconditionally unless explicitly set to `false`.
+
+### Story 3.8: Unified Single-Pass Coverage, Reverse-Map Retirement
+
+Added 2026-07-24 (epic reopened a third time) — confirmed with the user this session via a
+concrete AI-agent workflow trace (fast incremental loop with no coverage, terminal full-suite
+pass gated on coverage) that no real usage pattern needs coverage on an incremental run. See
+Story 3.7's own superseded annotations above for exactly what this retires and why.
+
+As an AI agent,
+I want every `run_tests` request — full or incremental — to execute as exactly one Vitest pass,
+with coverage measurement available only on a full-suite run,
+So that incremental iteration never pays a coverage-measurement cost (the actual thing causing
+unnecessary slowdowns during fast development loops), and a full-suite coverage gate costs the
+same as running the suite once.
+
+**Acceptance Criteria:**
+
+**Given** any `run_tests` request, full or incremental
+**When** it executes
+**Then** exactly one Vitest invocation runs — never more — regardless of whether coverage is requested.
+
+**Given** an incremental/selective run
+**When** `coverage: true` is requested (explicitly or via any default)
+**Then** the request is rejected or the flag is ignored (coverage is never measured on this path) — resolved during story creation which behavior is correct.
+
+**Given** a full-suite run
+**When** `coverage` is omitted
+**Then** it defaults to `true` unconditionally (no map-exists gate — coverage is uniformly cheap now).
+
+**Given** the reverse coverage map, per-file measurement (`buildCoverageMap`/`measureCoverage`), setup-baseline subtraction, unmeasurable-tests tracking, and the per-test combined-coverage union/staleness machinery
+**When** this story ships
+**Then** all of it is deleted as dead code, not merely left unused — including `SelectionEngine.plan`'s map-consuming branches and `start_watch`'s now-meaningless `fastMode` option.
+
+**Given** selection with no reverse map available, ever
+**When** a source file changes
+**Then** the static `--changed` import graph (Story 3.1) alone determines affected tests, with the existing full-suite fallback for anything it can't resolve (unchanged, already the "no map" behavior).
 
 ## Epic 4: Agent Workflow — Dry Run, Output & Status (Phase 1)
 
@@ -860,6 +940,12 @@ So that Vitest becomes the first of several possible runners instead of a hardco
 **When** the extraction is complete
 **Then** all of it moves into `src/runners/vitest/` behind the `RunnerPlugin` interface (AD-12), and `worker/index.ts` no longer calls `projectRequire("vitest/node")` itself — it dispatches through the plugin.
 
+> **Update 2026-07-24 (Story 3.8):** `discoverTestFiles` was already deleted in Story 3.7;
+> `measureCoverage` (and the whole per-file measurement/reverse-map path) is deleted by Story
+> 3.8. By the time 7.1 is implemented, extract instead: the single-pass `runOnce`-family
+> mechanism (works for any file set, coverage on/off), and the `related`-based affected-tests
+> resolution (see the new AC below) — not the functions named here, which won't exist.
+
 **Given** the existing test suite (all `test/*.test.ts` files covering worker/coverage/selection behavior)
 **When** it runs against the extracted code
 **Then** it passes unmodified — same options, same reporter callbacks, same `coverage-final.json` handling, no behavior or output change (AD-13's acceptance bar).
@@ -867,6 +953,17 @@ So that Vitest becomes the first of several possible runners instead of a hardco
 **Given** a plugin call (`run`/`listTestFiles`/`affectedTests`/`readCoverageThresholds`)
 **When** it is invoked
 **Then** it receives the suite's `configPath` explicitly (not cwd-based auto-discovery) — even though only one suite/config exists until Story 7.2 lands.
+
+> **Note 2026-07-24 (Story 3.8):** confirmed the Vitest plugin's `affectedTests` should be
+> implemented via `related: string[]` (a real, typed `startVitest`/`createVitest` config field,
+> verified live — not exposed on the CLI in this version, but honored programmatically). Passing
+> an explicit file list here skips Vitest's own git lookup entirely and resolves dependents via
+> the static import graph against exactly those files — critically, this is what makes "only
+> re-run what's changed since the last successful run" (not "since git HEAD") actually correct
+> for an agent iterating across many uncommitted edits. `affectedTests(files: string[])`'s input
+> should be the caller's own precise changed-file list (already computed via
+> `src/snapshot/index.ts`'s existing since-last-run delta), not a git ref for the plugin to diff
+> against itself.
 
 > Architecture: AD-12, AD-13 (`architecture-epic-7-runner-plugin-api-2026-07-16/ARCHITECTURE-SPINE.md`). Ships before multi-suite registration (7.2) — a single implicit suite is threaded through in the interim.
 
@@ -908,6 +1005,13 @@ So that one suite's changed-file or coverage data is never attributed to a diffe
 **When** a run is planned or coverage is measured for one suite
 **Then** `SelectionEngine.plan`, `CoverageMapFile`, `CoverageDataFile`, and `CombinedCoverage` are all keyed by `(projectId, suiteName)` and never merged across suites.
 
+> **Superseded 2026-07-24 (Story 3.8):** `CoverageMapFile`/`CoverageDataFile`/`CombinedCoverage`
+> are deleted entirely — no per-test attribution or per-test union exists to scope. What DOES
+> need per-suite scoping once suites exist: `SelectionEngine.plan`'s input (each suite's own
+> since-last-run snapshot delta) and the single-pass coverage report Story 3.8 introduces
+> (`TestResult["coverage"]`, full-suite-only, aggregate percentage) — keyed by
+> `(projectId, suiteName)` same as this AC intended, just against the post-3.8 shapes.
+
 **Given** a suite whose bound plugin declares `capabilities.coverage === "none"`
 **When** its combined coverage report is produced
 **Then** `Confidence` reports the new `"unavailable"` level (extending the existing `high`/`degraded` union) and `thresholdsMet` stays `undefined` — never a false threshold verdict, using the same gating pattern already proven for the `degraded` case.
@@ -915,6 +1019,13 @@ So that one suite's changed-file or coverage data is never attributed to a diffe
 **Given** a suite whose plugin reports `"summary"` or `"line-hit"` coverage
 **When** it is measured
 **Then** existing high/degraded confidence behavior (Story 6.8/6.10) is unchanged for that suite.
+
+> **Note 2026-07-24 (Story 3.8):** the post-3.8 Vitest plugin reports `capabilities.coverage:
+> "summary"` — one native pass yields a whole-project aggregate percentage, never per-test
+> line-hit attribution (that capability tier no longer exists for any plugin, Vitest included).
+> `high` confidence for this suite means "the full-suite pass that produced this number ran
+> cleanly," not "every changed source was re-measured" (Story 6.8's original framing) — there's
+> no per-test measurement left to be stale.
 
 > Architecture: AD-15 (selection/coverage/confidence portion). Depends on Story 7.2 (suites must exist to scope by).
 
@@ -973,6 +1084,18 @@ So that the abstraction — not just Vitest's occupancy of it — is proven soun
 **Given** a changed-file set
 **When** `affectedTests`/`changedFileDetection` is exercised
 **Then** it uses Jest's real `--onlyChanged`/`-o` or `--changedSince <ref>` flags — not a fabricated flag.
+
+> **Flag for reconsideration 2026-07-24 (Story 3.8):** `--onlyChanged`/`--changedSince <ref>` are
+> git-based (Jest does its own diff), the same shape as Vitest's `changed`, which Story 3.8 found
+> and fixed a real precision bug in: git-based diffing has no memory of what a PRIOR test-mcp run
+> already validated, so an agent iterating across many uncommitted edits gets stale/over-broad
+> re-selection (proven live against Vitest's `changed`, not theoretical). The fix there was
+> `related: string[]` — an explicit, orchestrator-supplied file list, no git involved. Jest has
+> an analogous flag, `--findRelatedTests <paths...>`, that this AC should very likely use instead
+> for the SAME reason, so both plugins honor `affectedTests`'s contract identically (explicit
+> since-last-run file list in, no git lookup inside the plugin). Confirm Jest's
+> `--findRelatedTests` resolves transitively through its own module graph (matching Vitest's
+> `related` behavior, verified live) before committing to this AC's current wording.
 
 **Given** Jest's `coverageReporters` output (`coverage-final.json`)
 **When** coverage is requested and can be parsed with the already-pinned `istanbul-lib-coverage`

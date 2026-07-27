@@ -1,36 +1,33 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { CoverageMapFile } from "../coverage/index.js";
 import type { Confidence } from "../types/contracts.js";
 
 export type { Confidence };
 
 /**
- * Selection Engine (Story 3.5) — decides the minimum SAFE set of test files to run
- * for an incremental request, combining two complementary signals:
+ * Selection Engine (Story 3.5, simplified/unified in Story 3.8) — decides the minimum SAFE set
+ * of changed files to hand to Vitest's `related` config field for an incremental request.
  *
- *   - the coverage reverse-map (runtime: which tests executed a source), and
- *   - git static-graph selection (Vitest `--changed`; catches statically-imported
- *     tests the runtime map hasn't exercised yet).
+ * Story 3.8 retired the reverse coverage map entirely: a single Vitest pass can report an
+ * aggregate coverage percentage, but never per-test attribution (which test covers which
+ * source) — that requires measuring test files separately, which is exactly what "exactly one
+ * Vitest pass, every run" forbids. `related` (an explicit file list resolved through Vitest's
+ * own static import graph, confirmed live to skip Vitest's own git lookup entirely) replaces
+ * both the old map-based lookup and the old git `--changed` fallback with ONE mechanism.
  *
- * The guiding rule is correctness over cleverness (architecture invariant 5): when
- * we cannot be sure, we run more, never fewer. A change we can't map conservatively
- * triggers the full suite; unmeasurable tests always run on a relevant change.
- *
- * `plan` is pure (takes the changed-file list + loaded map) so it is unit-testable;
- * `getChangedFiles` does the git I/O.
+ * The guiding rule is still correctness over cleverness (architecture invariant 5): when we
+ * cannot be sure, we run more, never fewer. `plan` is pure (takes the changed-file list) so it
+ * is unit-testable; `getChangedFiles` does the git I/O.
  */
 
 export type SelectionPlan =
   | { strategy: "full"; reason: string; confidence: Confidence }
-  /** No map yet: defer to the worker's git `--changed` pass (Story 3.1). */
-  | { strategy: "changed-only"; reason: string; confidence: Confidence }
   | {
       strategy: "incremental";
       reason: string;
-      testFiles: string[];
-      union: boolean;
+      /** Fed verbatim into Vitest's `related` config field (Story 3.8); empty means nothing to run. */
+      relatedFiles: string[];
       confidence: Confidence;
     };
 
@@ -38,30 +35,25 @@ export interface SelectionInput {
   /** Repo-relative changed files (working tree vs HEAD, incl. untracked); null if undeterminable. */
   changedFiles: string[] | null;
   /**
-   * Repo-relative NEW (untracked) subset of `changedFiles` (Story 6.6). A new source unknown
-   * to the map has no prior runtime dependents, so the git static-graph union (`--changed`)
-   * bounds it — flagged `degraded` (Story 6.8) rather than forcing a full suite.
+   * Repo-relative NEW (untracked) subset of `changedFiles` (Story 6.6). Retained for callers,
+   * but no longer part of the confidence decision: a MODIFIED source reached only via a dynamic
+   * import is exactly as invisible to `related`'s static graph as a brand-new one, so AC6's
+   * caveat is keyed off `dynamicImportsPresent` alone, not new-vs-modified.
    */
   addedFiles?: string[];
-  /** The project's coverage map, or null if none has been built. */
-  map: CoverageMapFile | null;
   /**
-   * Opt-out (Story 6.8, AC5): restore the old force-full-on-uncertainty behaviour. When true, a
-   * source unknown to the map forces the full suite instead of a bounded+degraded incremental run.
-   */
-  strict?: boolean;
-  /**
-   * Whether the project has any dynamic-import syntax at all (`hasDynamicImportSyntax`). A NEW
-   * unmapped source is only a static-graph blind spot if something reaches it via a dynamic
-   * import; when the project has none anywhere, that specific caveat doesn't apply. Undefined
-   * (caller didn't check) is treated as "might have one" — conservative, matching prior behaviour.
+   * Whether the project has any dynamic-import syntax at all (`hasDynamicImportSyntax`). A
+   * changed source (new OR modified) is only a static-graph blind spot (AC6) if something reaches
+   * it via a dynamic import that `related`'s static graph can't see; when the project has none
+   * anywhere, that specific caveat doesn't apply. Undefined (caller didn't check) is treated as
+   * "might have one" — conservative, matching prior behaviour.
    */
   dynamicImportsPresent?: boolean;
   /**
    * Total distinct test files in the project's known inventory (size-based full-run escalation),
    * or 0/undefined when there is no inventory yet. Only ever consulted on the final auto-computed
-   * incremental path (never for `changed-only`, `full`, or the empty short-circuit) so a caller
-   * with no denominator, or one that already resolved a different strategy, is unaffected.
+   * incremental path (never for `full` or the empty short-circuit) so a caller with no
+   * denominator, or one that already resolved a different strategy, is unaffected.
    */
   totalTestFileCount?: number;
 }
@@ -76,14 +68,13 @@ function degraded(reasons: string[]): Confidence {
  *  it slower than just running everything). */
 const DEFAULT_INCREMENTAL_FULL_THRESHOLD = 0.7;
 
-/** Same env-configurable-numeric convention as `TEST_MCP_MEASURE_BUDGET_MS`/
- *  `TEST_MCP_FULL_COVERAGE_BUDGET_MS` (src/worker/index.ts), but additionally range-checked: a
- *  fraction must be `(0, 1]` to mean anything as "a fraction of the suite." Unlike a plain
- *  `Number.isFinite` guard (which does NOT catch this), an accidentally-blank env value
- *  (`Number("") === 0`, finite) would otherwise silently make EVERY incremental selection
- *  escalate to full — inverting the whole feature rather than falling back to the default as
- *  intended. A value `<= 0` or `> 1` is equally nonsensical (always-escalate / never-escalate)
- *  and gets the same fallback. Found via adversarial review, not anticipated originally. */
+/** Env-configurable numeric override, range-checked: a fraction must be `(0, 1]` to mean
+ *  anything as "a fraction of the suite." Unlike a plain `Number.isFinite` guard (which does
+ *  NOT catch this), an accidentally-blank env value (`Number("") === 0`, finite) would otherwise
+ *  silently make EVERY incremental selection escalate to full — inverting the whole feature
+ *  rather than falling back to the default as intended. A value `<= 0` or `> 1` is equally
+ *  nonsensical (always-escalate / never-escalate) and gets the same fallback. Found via
+ *  adversarial review, not anticipated originally. */
 function getIncrementalFullThreshold(): number {
   const raw = Number(
     process.env.TEST_MCP_INCREMENTAL_FULL_THRESHOLD ?? DEFAULT_INCREMENTAL_FULL_THRESHOLD,
@@ -91,14 +82,18 @@ function getIncrementalFullThreshold(): number {
   return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : DEFAULT_INCREMENTAL_FULL_THRESHOLD;
 }
 
-/** A test file by convention (path- or name-based). Matches the Coverage Engine's rule. */
+/** A test file by convention (path- or name-based). The single canonical rule for this repo —
+ *  the worker's native-coverage report builder imports this copy rather than duplicating it. */
 export function isTestFile(rel: string): boolean {
-  return /\.(test|spec)\.[cm]?[jt]sx?$/.test(rel) || rel.split("/").includes("__tests__");
+  // Split on BOTH separators: the worker's coverage-report builder passes paths through
+  // `path.relative`, which yields backslashes on Windows, so a `\`-only split would miss a
+  // `__tests__` segment there.
+  return /\.(test|spec)\.[cm]?[jt]sx?$/.test(rel) || rel.split(/[\\/]/).includes("__tests__");
 }
 
 export class SelectionEngine {
   static plan(input: SelectionInput): SelectionPlan {
-    const { changedFiles, addedFiles, map, strict, dynamicImportsPresent, totalTestFileCount } = input;
+    const { changedFiles, dynamicImportsPresent, totalTestFileCount } = input;
     const mightMissDynamicImport = dynamicImportsPresent !== false;
 
     // Can't tell what changed (e.g. not a git repo) -> full suite, which IS complete -> high.
@@ -113,130 +108,66 @@ export class SelectionEngine {
       return {
         strategy: "incremental",
         reason: "no changes detected",
-        testFiles: [],
-        union: false,
+        relatedFiles: [],
         confidence: HIGH,
       };
     }
 
-    const changedTests = changedFiles.filter(isTestFile);
     const changedSources = changedFiles.filter((f) => !isTestFile(f));
 
-    // Only test files changed -> run exactly those (AC1): provably complete.
+    // Only test files changed -> `related` matches each test file to itself (AC1): provably
+    // complete, no source-side dependency-graph uncertainty possible.
     if (changedSources.length === 0) {
       return {
         strategy: "incremental",
         reason: "only test files changed",
-        testFiles: unique(changedTests),
-        union: false,
+        relatedFiles: unique(changedFiles),
         confidence: HIGH,
       };
     }
 
-    // Source files changed but no map yet. `strict` (AC5) wants force-full on ANY unmapped-source
-    // uncertainty — and "no map at all" is the maximal such case — so honour it here too. Otherwise
-    // defer to the git static-graph pass (Story 3.1); we can't confirm the static graph catches
-    // every dependent (dynamic imports are invisible), so the run is degraded.
-    if (!map) {
-      if (strict) {
-        return {
-          strategy: "full",
-          reason: "source changed; no coverage map (strict)",
-          confidence: HIGH,
-        };
-      }
-      return {
-        strategy: "changed-only",
-        reason: "source changed; no coverage map yet — using git static-graph",
-        confidence: degraded(["no coverage map yet — relying on the git static import graph"]),
-      };
-    }
-
-    // Source files changed WITH a map -> map selection, unioned with the static graph at run time
-    // ONLY when some changed source is unmapped (the map has nothing to say about it, so the
-    // static graph is the sole signal — not a redundant safety net).
-    const selected = new Set<string>(changedTests);
-    const reasons: string[] = [];
-    let unmappedSourceSeen = false;
-    for (const src of changedSources) {
-      if (map.fullSuiteTriggers.includes(src)) {
-        // A full run IS complete -> high, regardless of any other changed file.
-        return {
-          strategy: "full",
-          reason: `changed file is a full-suite trigger: ${src}`,
-          confidence: HIGH,
-        };
-      }
-      const entry = map.map[src];
-      if (!entry) {
-        unmappedSourceSeen = true;
-        // Unknown to the map. `strict` (AC5) restores the old force-full behaviour. Otherwise the
-        // `union: true` git static-graph pass (`--changed`) bounds it — a NEW source has no prior
-        // runtime dependents (Story 6.6); a MODIFIED/DELETED one is softened from full to bounded
-        // (Story 6.8). Either way we can't prove the static graph caught every dependent (dynamic
-        // imports are invisible), so we flag the run degraded and name the file.
-        if (strict) {
-          return {
-            strategy: "full",
-            reason: `changed source unknown to coverage map: ${src} (strict)`,
-            confidence: HIGH,
-          };
-        }
-        if (addedFiles?.includes(src)) {
-          // A brand-new file has no prior runtime dependents (Story 6.6); the --changed union
-          // only misses it if something reaches it via a dynamic import the static graph can't
-          // see. When the project has no dynamic-import syntax anywhere (checked by the caller),
-          // that risk doesn't exist, so this source is fully covered — nothing to flag.
-          if (mightMissDynamicImport) {
-            reasons.push(`new source bounded by the git static graph (dynamic imports may be missed): ${src}`);
-          }
-        } else {
-          reasons.push(`modified or deleted source not in the coverage map, bounded by the git static graph: ${src}`);
-        }
-        continue;
-      }
-      for (const t of entry.tests) selected.add(t);
-    }
-    // Unmeasurable tests always run on a relevant (source) change (Story 3.4). They are force-run,
-    // so they do not reduce confidence — running them all IS complete coverage for them.
-    for (const t of map.alwaysRun) selected.add(t);
-
-    // That static-graph pass is always HEAD-scoped (Story 6.7's static-graph-interplay note), so
-    // running it when every changed source is already mapped would silently widen a
-    // `since: "last-run"` request back out to "everything uncommitted since HEAD" for no benefit —
-    // a fully-mapped, re-measured selection is already provably complete (Story 6.8 AC1).
-    const union = unmappedSourceSeen;
-    // Size-based full-run escalation: only reachable from this auto-computed path (never from
-    // `changed-only`/`full`/the empty short-circuit above, nor from the explicit `files:[...]`
-    // caller in resolveSelection, which never calls plan() at all). A zero/undefined denominator
-    // (no inventory yet) must never divide-by-zero into a false "full" — skip the check entirely.
+    // Size-based full-run escalation (Task 3.4, unchanged mechanism): bounds the RELATED file
+    // list itself (there is no resolved test-file count to bound anymore -- Vitest's own graph
+    // resolves that at run time, not here) against the project's known test-file inventory. A
+    // zero/undefined denominator (no inventory yet) must never divide-by-zero into a false "full".
     if (totalTestFileCount) {
-      const fraction = selected.size / totalTestFileCount;
+      const fraction = changedFiles.length / totalTestFileCount;
       if (fraction > getIncrementalFullThreshold()) {
-        // Clamped to 100 -- `selected.size` can exceed `totalTestFileCount` (a just-added test
-        // file the inventory hasn't reconciled yet is still a real, valid selection target), and
-        // an uncapped percentage would read as a nonsensical "150% of the suite." The raw
-        // numerator/denominator are still reported alongside it, so nothing is hidden.
+        // Clamped to 100 -- the related list can exceed the known test-file total (e.g. a source
+        // change alongside several just-added test files), and an uncapped percentage would read
+        // as a nonsensical "150% of the suite." The raw numerator/denominator are still reported
+        // alongside it, so nothing is hidden.
         const pct = Math.min(100, Math.round(fraction * 100));
         return {
           strategy: "full",
           // A full run IS complete regardless of why it was chosen -> high, same as any other
           // full-suite decision above.
-          reason: `incremental selection would run ${pct}% of the suite (${selected.size}/${totalTestFileCount} test files); running full for speed`,
+          reason: `incremental selection's related-file list is ${pct}% the size of the suite (${changedFiles.length}/${totalTestFileCount} known test files); running full for speed`,
           confidence: HIGH,
         };
       }
     }
+
+    // The residual blind spot (AC6): `related`'s static import graph can't see a dynamic
+    // `import()`/`require(...)` edge, so a source reached ONLY that way could be missed. This is
+    // true for a MODIFIED source exactly as for a brand-new one -- new-vs-modified doesn't change
+    // whether the dynamic edge is invisible -- so when the project has any such syntax at all
+    // (`mightMissDynamicImport`) every changed source is flagged; when it has none, the blind spot
+    // can't exist and confidence stays high (the short-circuit below).
+    const flaggedSources = mightMissDynamicImport ? changedSources : [];
+    const confidence = flaggedSources.length
+      ? degraded(
+          flaggedSources.map(
+            (s) => `changed source may be reachable only via a dynamic import the static import graph can't see: ${s}`,
+          ),
+        )
+      : HIGH;
+
     return {
       strategy: "incremental",
-      reason: !union
-        ? "coverage-map selection (all changed sources mapped and re-measured)"
-        : reasons.length
-          ? "coverage-map selection unioned with git static-graph (unmapped changes bounded by --changed)"
-          : "coverage-map selection unioned with git static-graph",
-      testFiles: [...selected].sort(),
-      union,
-      confidence: reasons.length ? degraded(reasons) : HIGH,
+      reason: "source changed; resolved via Vitest's related static import graph",
+      relatedFiles: unique(changedFiles),
+      confidence,
     };
   }
 }

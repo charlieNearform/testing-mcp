@@ -357,6 +357,14 @@ Guarantee a clean environment per test file by using Vitest's built-in isolation
 > (Coverage-to-Test Mapping Pattern). Vitest `--changed` (static import graph) is used
 > as a complementary fast pass; the two selections are unioned to avoid misses.
 
+> **Superseded 2026-07-27 (Story 3.8):** the per-test coverage attribution this note
+> describes, and the reverse map it fed, are retired entirely — a single Vitest pass can
+> report an aggregate percentage but never per-test attribution, and "exactly one Vitest
+> pass, every run" is now a hard invariant. Selection is unioned no more: an incremental
+> request's changed-file list is fed directly into Vitest's own `related` config field, which
+> resolves affected tests via the static import graph in the same pass that runs them. See
+> `docs/architecture.md`'s "Coverage Map Build" section for the current (retired) design.
+
 #### Story 3.1: Git-Aware Delta Selection
 **ID:** `coverage-000`
 
@@ -416,6 +424,13 @@ worker; setup-baseline subtraction is added by us.
 > naming specific files (AC3), which was always cheap at that scale. `testpick` is never
 > vendored. See `docs/architecture.md`'s "Coverage Map Build" section for the current design.
 
+> **Superseded again, this time fully 2026-07-27 (Story 3.8):** the map Story 3.7 left in
+> place for the incremental/selective path (AC3 above) is now deleted outright, along with
+> per-file measurement, setup-baseline subtraction, and unmeasurable-test tracking. Coverage
+> is full-suite-only; an incremental/selective request with `coverage: true` is rejected, not
+> silently downgraded. This is the third and (per this cycle's investigation) final reopening
+> of this design within Epic 3.
+
 #### Story 3.3: Smart Re-run Decisions
 **ID:** `coverage-002`
 
@@ -435,6 +450,13 @@ Decide what to re-run by unioning the coverage-map and git-delta selections.
    Then the system selects the bounded set and flags degraded confidence (full suite only for
    unbounded cases), so a potential missed failure is surfaced as low confidence rather than
    silently skipped
+
+> **Superseded 2026-07-27 (Story 3.8):** there is no more coverage-map/git-delta union — a
+> single Vitest pass now resolves affected tests directly via its own `related` config field
+> against the changed-file list. AC1/AC2 above still describe the observable behavior (only
+> test files changed → those files re-run; source files changed → dependents re-run); AC3's
+> "unknown to the map" framing no longer applies since there is no map, but the degraded-vs-full
+> outcome it describes survives via the NEW-source dynamic-import caveat (AC6 of Story 3.8).
 
 ### Epic 4: Output & Status (Phase 1)
 
@@ -585,6 +607,7 @@ Validated against current published APIs (July 2026):
 - **Incremental runs**: Fast enough for interactive development
 - **Precision**: High accuracy in selecting which test files need re-running
 - **Coverage mapping**: Reverse dependency map buildable within one full instrumented run
+  (superseded 2026-07-27, Story 3.8 — the reverse map is retired; see Epic 3's annotations above)
 - **Correctness**: No actual failures missed due to intelligent skipping (conservative full-suite fallback whenever selection is uncertain)
 - **Adoption**: Teams successfully adopt the system into their workflow
 

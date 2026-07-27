@@ -21,9 +21,13 @@ describe("IPC message validation at the process boundary", () => {
       projectId: "p1",
       files: ["a.test.ts"],
       coverage: false,
-      allTestsRun: false,
-      changed: true,
+      relatedFiles: ["src/foo.ts"],
     };
+    expect(parseToWorker(msg)).toEqual(msg);
+  });
+
+  it("accepts a run message without relatedFiles (full suite / explicit files)", () => {
+    const msg = { type: "run", runId: "r1", projectId: "p1", files: [], coverage: true };
     expect(parseToWorker(msg)).toEqual(msg);
   });
 
@@ -120,14 +124,12 @@ describe("IPC message validation at the process boundary", () => {
     ).toThrow();
   });
 
-  it("accepts a well-formed phase-progress message (Story 8.1)", () => {
-    const msg = { type: "phase-progress", runId: "r1", phase: "coverage", completed: 1, total: 3 };
-    expect(parseFromWorker(msg)).toEqual(msg);
-  });
-
-  it("rejects a phase-progress message with an unknown phase", () => {
+  // "phase-progress" no longer exists as a message type (Story 3.8: the unified single pass
+  // reports through the ordinary "progress"/case-* messages; there is no more separate blind
+  // coverage phase to heartbeat) -- a message of that shape is now simply an unknown type.
+  it("rejects a phase-progress message (removed in Story 3.8)", () => {
     expect(() =>
-      parseFromWorker({ type: "phase-progress", runId: "r1", phase: "bogus", completed: 1, total: 3 }),
+      parseFromWorker({ type: "phase-progress", runId: "r1", phase: "coverage", completed: 1, total: 3 }),
     ).toThrow();
   });
 });

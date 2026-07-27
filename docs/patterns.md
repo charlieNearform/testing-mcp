@@ -289,6 +289,21 @@ const vitest = await startVitest("test", [], {
 });
 ```
 
+> **Updated 2026-07-27 (Story 3.8), verified live:** `related: string[]` (an explicit file
+> list, not a git ref) is the field this codebase actually uses now, not `changed: true`.
+> When `related` is set, Vitest skips its OWN git-based lookup entirely and resolves
+> dependents via the static import graph against exactly the given files — confirmed live
+> with a real fixture: two files both uncommitted-changed, `related: [oneOfThem]` ran ONLY
+> that file's test, completely ignoring the other's uncommitted change. `changed: true`, by
+> contrast, was confirmed live to re-select an already-validated file the moment a second,
+> unrelated file is edited without committing either — it has no memory of what a prior
+> test-mcp run already validated. Feed `related` from the orchestrator's own since-last-run
+> snapshot delta (`src/snapshot/index.ts`, unchanged mechanism) instead of Vitest's own git
+> lookup. Also verified live: a `test.setupFiles` entry passed to `related` correctly
+> resolves as a dependency of every test using it (no custom logic needed), and a genuine
+> orphan file (nothing statically depends on it) correctly resolves to zero matches — the
+> full-suite fallback below still applies for that case.
+
 ## Coverage-to-Test Mapping Pattern
 
 The smart-rerun feature needs a reverse map of *source file → test files that exercise
@@ -318,6 +333,14 @@ Granularity is **test-file level**, not individual test case. Because the map re
 what a recorded run *executed*, it can miss a not-yet-exercised branch; the static
 graph can catch those. The two are complementary, so the safe default is to union
 both selections and err toward running more.
+
+> **Superseded 2026-07-27 (Story 3.8):** this whole pattern — the reverse map, per-file
+> runtime measurement, and the union-with-the-static-graph selection it fed — is retired.
+> The reason is structural, not a performance tweak: "exactly one Vitest pass, every run"
+> (this codebase's own hard invariant now) forbids per-test attribution outright, since that
+> requires measuring test files separately. Selection is now `related`-based only (see the
+> Git-Aware Delta Selection Pattern's update above); coverage is a full-suite-only aggregate
+> percentage from that same single pass, never per-test.
 
 ## Status & Streaming Pattern
 

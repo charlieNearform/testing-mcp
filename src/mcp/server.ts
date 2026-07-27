@@ -10,7 +10,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { toAppError, type AppError } from "../types/errors.js";
 import { ProjectLocalConfigSchema } from "../types/contracts.js";
 import { ProjectRegistry, RegistryError } from "../registry/project-registry.js";
-import { Orchestrator, PlanError } from "../orchestrator/index.js";
+import { Orchestrator, PlanError, SelectionError } from "../orchestrator/index.js";
 import { WatchManager } from "../watch/index.js";
 import { handleUiRequest } from "../ui/index.js";
 
@@ -153,27 +153,20 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
           .boolean()
           .optional()
           .describe(
-            "Measure coverage for this run (a full-suite run reports a whole-project percentage " +
-              "via one native pass; an incremental/selective run that names specific files also " +
-              "refreshes the source->test coverage map for those files -- an incremental run " +
-              "with no map yet and no specific files resolved gets the same one-native-pass, " +
-              "no-map-refresh treatment as a full-suite run). If omitted on a full-suite run, " +
-              "defaults to true once the project already has a coverage map (pass false to opt " +
-              "out), otherwise false until first enabled. If omitted on an incremental/selective " +
-              "run, always defaults to false regardless of whether a map exists -- pass true " +
-              "explicitly to measure coverage there.",
+            "Measure coverage for this run. Coverage is full-suite-only: it is always a single " +
+              "native Vitest pass reporting a whole-project percentage, never a per-test map. " +
+              "If omitted on a full-suite run, defaults to true unconditionally (one pass either " +
+              "way makes it uniformly cheap). Passing true on an incremental/selective request " +
+              "(including one that resolves to a full-suite fallback only at execution time) is " +
+              "rejected with a ValidationError naming the constraint -- it is never silently " +
+              "downgraded to no-coverage. Omit it on an incremental/selective run to get no " +
+              "coverage, which is the only value that request accepts.",
           ),
         files: z.array(z.string()).optional().describe("Specific files to run"),
         since: z
           .enum(["last-run", "head"])
           .optional()
           .describe("Incremental baseline: 'last-run' (default) diffs vs the last run, 'head' vs git HEAD"),
-        strict: z
-          .boolean()
-          .optional()
-          .describe(
-            "Force a full suite on any unmapped-source uncertainty (old behaviour) instead of a bounded run with degraded confidence",
-          ),
         suite: z.string().optional().describe("Test suite name"),
         dryRun: z.boolean().optional().describe("Compute the plan without executing"),
         planId: z.string().optional().describe("Execute a previously computed plan"),
@@ -189,7 +182,7 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
           ),
       },
     },
-    async ({ projectId, files, mode, coverage, since, strict, dryRun, planId, waitMs }, extra) => {
+    async ({ projectId, files, mode, coverage, since, dryRun, planId, waitMs }, extra) => {
       const project = registry?.get(projectId);
       if (!project) return unknownProject(projectId);
       if (!orchestrator) {
@@ -223,7 +216,10 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
       }
       try {
         if (dryRun) {
-          const plan = orchestrator.plan(project, { files, mode, since, strict });
+          // Pass `coverage` too so the dry run enforces the same full-suite-only constraint the
+          // real run does (Patch I) -- a SelectionError thrown here is mapped to a ValidationError
+          // envelope by the shared catch below, same as the run path.
+          const plan = orchestrator.plan(project, { files, mode, since, coverage });
           return { content: [{ type: "text" as const, text: JSON.stringify(plan) }] };
         }
         // Effective grace period (Story 8.6/AD-17): per-call argument -> project config ->
@@ -242,7 +238,7 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
 
         const { runId, result } = planId
           ? orchestrator.startPlanRun(project, planId, { onProgress })
-          : orchestrator.startRun(project, { files, mode, coverage, since, strict, onProgress });
+          : orchestrator.startRun(project, { files, mode, coverage, since, onProgress });
         // Never let the detached promise become an unhandled rejection once we stop awaiting it.
         result.catch(() => {});
 
@@ -275,6 +271,7 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
         };
       } catch (err) {
         if (err instanceof PlanError) return errorResult(toAppError("PlanExpired", err.message));
+        if (err instanceof SelectionError) return errorResult(toAppError("ValidationError", err.message));
         return errorResult(
           toAppError("WorkerFailure", err instanceof Error ? err.message : String(err)),
         );
@@ -329,17 +326,13 @@ export function createMcpServer(deps: McpServerDeps = {}): McpServer {
       description: "Start watch mode: re-run affected tests as files change (poll get_test_status)",
       inputSchema: {
         projectId: z.string().describe("ID of a registered project"),
-        fastMode: z
-          .boolean()
-          .optional()
-          .describe("Skip coverage for speed (default true); set false to refresh the coverage map"),
       },
     },
-    async ({ projectId, fastMode }) => {
+    async ({ projectId }) => {
       const project = registry?.get(projectId);
       if (!project) return unknownProject(projectId);
       if (!watchManager) return errorResult(toAppError("NotImplemented", "watch unavailable"));
-      const status = watchManager.start(project, { fastMode });
+      const status = watchManager.start(project);
       return { content: [{ type: "text" as const, text: JSON.stringify(status) }] };
     },
   );

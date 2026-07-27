@@ -4,14 +4,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { Orchestrator } from "../src/orchestrator/index.ts";
-import { COVERAGE_MAP_SCHEMA_VERSION } from "../src/coverage/index.ts";
 
 /**
  * Story 6.4 — the orchestrator stamps its own resolved `reason`/`strategy` onto the
- * result, overriding the worker's generic labels, except at the git `--changed`
+ * result, overriding the worker's generic labels, except at the related-selection
  * execution-time fallback. These tests drive the orchestrator with a stub worker so
- * the assertions turn purely on the stamp logic (no Vitest run), and on real git +
- * a hand-written coverage map so `resolveSelection` produces the decision we assert.
+ * the assertions turn purely on the stamp logic (no real Vitest run), and on real git
+ * state so `resolveSelection` produces the decision we assert. Rewritten for Story 3.8
+ * (the reverse coverage map / `strict` / `changed-only` split no longer exist).
  */
 
 const GIT_ENV = {
@@ -87,83 +87,48 @@ function stageWorkerResult(
   );
 }
 
-describe("orchestrator surfaces the real selection reason (Story 6.4)", () => {
-  it("reports the orchestrator's specific full-decision reason, not the worker's 'full suite' (AC3)", async () => {
+describe("orchestrator surfaces the real selection reason (Story 6.4, related-based per Story 3.8)", () => {
+  it("reports the orchestrator's specific related-based decision reason, not the worker's generic label", async () => {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-sr-")));
     proj = dir;
     fs.writeFileSync(path.join(dir, "math.ts"), `export const add = (a: number, b: number) => a + b;\n`);
-    // A coverage map that knows math.ts but not the source we are about to add.
-    fs.mkdirSync(path.join(dir, ".test-mcp"), { recursive: true });
-    const now = new Date().toISOString();
-    fs.writeFileSync(
-      path.join(dir, ".test-mcp", "coverage-map.json"),
-      JSON.stringify({
-        schemaVersion: COVERAGE_MAP_SCHEMA_VERSION,
-        projectId: "sr",
-        updatedAt: now,
-        map: { "math.ts": { tests: ["math.test.ts"], lastMeasured: now } },
-        fullSuiteTriggers: [],
-        alwaysRun: [],
-      }),
-    );
-    // A tracked source the map has never seen. As of Story 6.8 a modified-unmapped source is
-    // bounded+degraded rather than forced full, so we use `strict: true` (the 6.8 opt-out) to get
-    // a genuine full decision whose specific reason the orchestrator must stamp over the worker's.
-    fs.writeFileSync(path.join(dir, "mystery.ts"), `export const x = 1;\n`);
-    // Worker runs the full suite and labels it generically.
-    stageWorkerResult(dir, { strategy: "full", reason: "full suite", files: ["math.test.ts"] });
+    // Worker labels its own outcome generically -- the orchestrator must override it with its
+    // own specific related-based decision reason.
+    stageWorkerResult(dir, { strategy: "incremental", reason: "explicit file selection", files: ["math.test.ts"] });
     commitAll(dir);
-    // Modify the tracked, unmapped source → with strict, orchestrator decides full for a reason.
-    fs.appendFileSync(path.join(dir, "mystery.ts"), `export const y = 2;\n`);
+    fs.appendFileSync(path.join(dir, "math.ts"), `export const y = 2;\n`);
 
     const orch = new Orchestrator({ workerPath });
-    const result = await orch.runTests(
-      { projectId: "sr", path: dir },
-      { mode: "incremental", strict: true },
-    );
+    const result = await orch.runTests({ projectId: "sr", path: dir }, { mode: "incremental" });
 
-    expect(result.selection.strategy).toBe("full");
-    expect(result.selection.reason).toBe(
-      "changed source unknown to coverage map: mystery.ts (strict)",
-    );
-    expect(result.selection.reason).not.toBe("full suite");
-    // A full run is complete -> high confidence.
+    expect(result.selection.strategy).toBe("incremental");
+    expect(result.selection.reason).toBe("source changed; resolved via Vitest's related static import graph");
+    expect(result.selection.reason).not.toBe("explicit file selection");
     expect(result.confidence).toEqual({ level: "high", reasons: [] });
     // selection.files stays exactly what the worker ran — never rewritten.
     expect(result.selection.files).toEqual(["math.test.ts"]);
   }, 20_000);
 
-  it("attaches degraded confidence for a modified unmapped source, naming it (Story 6.8)", async () => {
+  it("attaches degraded confidence for a NEW source when the project has dynamic imports (AC6)", async () => {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-sr-")));
     proj = dir;
     fs.writeFileSync(path.join(dir, "math.ts"), `export const add = (a: number, b: number) => a + b;\n`);
-    fs.mkdirSync(path.join(dir, ".test-mcp"), { recursive: true });
-    const now = new Date().toISOString();
     fs.writeFileSync(
-      path.join(dir, ".test-mcp", "coverage-map.json"),
-      JSON.stringify({
-        schemaVersion: COVERAGE_MAP_SCHEMA_VERSION,
-        projectId: "sr",
-        updatedAt: now,
-        map: { "math.ts": { tests: ["math.test.ts"], lastMeasured: now } },
-        fullSuiteTriggers: [],
-        alwaysRun: [],
-      }),
+      path.join(dir, "loader.ts"),
+      `export async function load(name: string) { return import(name); }\n`,
     );
-    fs.writeFileSync(path.join(dir, "mystery.ts"), `export const x = 1;\n`);
-    // Worker runs the bounded union and labels it; the run succeeds.
     stageWorkerResult(dir, {
       strategy: "incremental",
-      reason: "coverage-map selection unioned with git static-graph",
+      reason: "related-based selection (Vitest static import graph)",
       files: ["math.test.ts"],
     });
     commitAll(dir);
-    fs.appendFileSync(path.join(dir, "mystery.ts"), `export const y = 2;\n`);
+    // A brand-new (untracked) source -- the residual AC6 blind spot, given dynamic imports exist.
+    fs.writeFileSync(path.join(dir, "mystery.ts"), `export const x = 1;\n`);
 
     const orch = new Orchestrator({ workerPath });
     const result = await orch.runTests({ projectId: "sr", path: dir }, { mode: "incremental" });
 
-    // Bounded (not full) but flagged so the agent knows to run a full pass — never a silent skip.
     expect(result.selection.strategy).toBe("incremental");
     expect(result.confidence?.level).toBe("degraded");
     expect(result.confidence?.reasons.join(" ")).toContain("mystery.ts");
@@ -185,16 +150,15 @@ describe("orchestrator surfaces the real selection reason (Story 6.4)", () => {
     expect(result.total).toBe(0);
   }, 20_000);
 
-  it("preserves the worker's fallback reason/strategy when git --changed finds no affected tests", async () => {
+  it("preserves the worker's fallback reason/strategy when related matches no affected tests", async () => {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-sr-")));
     proj = dir;
     fs.writeFileSync(path.join(dir, "math.ts"), `export const add = (a: number, b: number) => a + b;\n`);
     fs.writeFileSync(path.join(dir, "unrelated.ts"), `export const orphan = 1;\n`);
-    // Worker fell back to the full suite at execution time (its own truthful label).
-    const fallbackReason =
-      "incremental found no affected tests (unmapped change or non-git); ran full suite";
+    // Worker fell back to the full suite at execution time (its own truthful label) -- AC1's sole
+    // exception: related resolved to zero test files despite non-empty changed input.
+    const fallbackReason = "incremental selection matched no test files; ran full suite";
     stageWorkerResult(dir, { strategy: "full", reason: fallbackReason, files: ["math.test.ts"] });
-    // No coverage map -> the orchestrator's decision is changed-only (incremental).
     commitAll(dir);
     fs.appendFileSync(path.join(dir, "unrelated.ts"), `// touched\n`);
 
@@ -206,16 +170,17 @@ describe("orchestrator surfaces the real selection reason (Story 6.4)", () => {
     expect(result.selection.strategy).toBe("full");
     expect(result.selection.reason).toBe(fallbackReason);
     expect(result.selection.files).toEqual(["math.test.ts"]);
+    // A full run IS complete -> high, regardless of the plan's (now moot) verdict.
+    expect(result.confidence?.level).toBe("high");
   }, 20_000);
 
-  it("committed changed-only plan reports 'incremental', not 'full' (runPlan regression)", async () => {
+  it("committed related-based plan reports 'incremental', not 'full' (runPlan regression)", async () => {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "test-mcp-sr-")));
     proj = dir;
     fs.writeFileSync(path.join(dir, "math.ts"), `export const add = (a: number, b: number) => a + b;\n`);
-    // No coverage map → a source change resolves to changed-only (incremental, empty files).
     stageWorkerResult(dir, {
       strategy: "incremental",
-      reason: "git delta via vitest --changed (static import graph)",
+      reason: "related-based selection (Vitest static import graph)",
       files: ["math.test.ts"],
     });
     commitAll(dir);
@@ -226,7 +191,7 @@ describe("orchestrator surfaces the real selection reason (Story 6.4)", () => {
     const plan = orch.plan(project, { mode: "incremental" });
     const result = await orch.runPlan(project, plan.planId);
 
-    // Regression: a committed changed-only plan runs a bounded set and must NOT be "full".
+    // Regression: a committed related-based plan runs a bounded set and must NOT be "full".
     expect(result.selection.strategy).toBe("incremental");
     expect(result.selection.files).toEqual(["math.test.ts"]);
   }, 20_000);

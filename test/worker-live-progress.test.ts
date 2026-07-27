@@ -38,8 +38,6 @@ function runWorker(coverage: boolean): Promise<FromWorker[]> {
           projectId: "sample",
           files: [],
           coverage,
-          allTestsRun: true,
-          changed: false,
         });
       } else if (msg.type === "result" || msg.type === "error") {
         resolve(messages);
@@ -85,15 +83,25 @@ describe("worker live-progress IPC (Story 8.2, real Vitest)", () => {
     }
   }, 30_000);
 
-  it("sends phase-progress messages during a coverage-enabled run, before the final result", async () => {
+  // Story 3.8: the unified single pass gets real per-test progress from the SAME reporter a
+  // plain run uses -- there is no more separate blind coverage phase needing a synthetic
+  // heartbeat (the "phase-progress" IPC message this test used to assert on is deleted). This
+  // fixture's own node_modules has no coverage provider installed (unlike the symlinked-repo
+  // fixtures worker-native-full-coverage.test.ts uses), so the actual coverage REPORT shape is
+  // asserted there; this test only proves the coverage-enabled run still completes normally and
+  // still reports real per-test progress through the same IPC messages as any other run.
+  it("a coverage-enabled run still sends real case-start/case-result progress and a result", async () => {
     const messages = await runWorker(true);
-    const resultIndex = messages.findIndex((m) => m.type === "result");
-    const phaseProgress = messages.filter(
-      (m): m is Extract<FromWorker, { type: "phase-progress" }> => m.type === "phase-progress",
+    const starts = messages.filter((m): m is Extract<FromWorker, { type: "case-start" }> =>
+      m.type === "case-start",
     );
-    expect(phaseProgress.length).toBeGreaterThan(0);
-    expect(phaseProgress.every((m) => m.phase === "coverage")).toBe(true);
-    const lastPhaseProgressIndex = messages.lastIndexOf(phaseProgress[phaseProgress.length - 1]);
-    expect(lastPhaseProgressIndex).toBeLessThan(resultIndex);
+    const results = messages.filter((m): m is Extract<FromWorker, { type: "case-result" }> =>
+      m.type === "case-result",
+    );
+    expect(starts.length).toBeGreaterThan(0);
+    expect(results.length).toBeGreaterThan(0);
+
+    const resultMsg = messages.find((m) => m.type === "result");
+    expect(resultMsg?.type).toBe("result");
   }, 30_000);
 });

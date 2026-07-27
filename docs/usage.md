@@ -8,9 +8,11 @@ product rationale, [prd.md](prd.md).
 
 A single background **daemon** exposes an MCP server over loopback HTTP. AI agents (or CI)
 call its tools to run a project's Vitest suite intelligently — running only the tests
-affected by changed files (git delta ∪ coverage map), falling back to the full suite
-whenever selection is uncertain. Each registered project runs under **its own** Vitest in a
-dedicated worker subprocess; the daemon never imports a project's Vitest itself.
+affected by changed files (resolved via Vitest's own static import graph), falling back to
+the full suite whenever selection is uncertain. Every run, of any strategy, executes exactly
+one Vitest pass; coverage is available only on a full-suite run, where it comes from that
+SAME pass. Each registered project runs under **its own** Vitest in a dedicated worker
+subprocess; the daemon never imports a project's Vitest itself.
 
 ```
 AI agent / CI ──MCP over HTTP──▶ daemon (one per machine) ──fork──▶ worker (per project)
@@ -178,9 +180,9 @@ daemon crash). Codes: `UnknownProject`, `InvalidConfig`, `WorkerFailure`, `PlanE
 | `register_project` | `{ path }` (absolute project root) | `{ projectId, path, status }` |
 | `list_projects` | `{}` | `{ projects: [...] }` |
 | `unregister_project` | `{ projectId, purge? }` | `{ projectId, removed }` — `purge` also deletes the project's `.test-mcp/` state |
-| `run_tests` | `{ projectId, mode?, coverage?, files?, since?, strict?, suite?, dryRun?, planId? }` | `TestResult`, or a `TestPlan` when `dryRun` |
+| `run_tests` | `{ projectId, mode?, coverage?, files?, since?, suite?, dryRun?, planId? }` | `TestResult`, or a `TestPlan` when `dryRun` |
 | `get_test_status` | `{ projectId }` | `{ state, progress?, lastResult?, lastError?, watch? }` |
-| `start_watch` | `{ projectId, fastMode? }` | watch status |
+| `start_watch` | `{ projectId }` | watch status |
 | `stop_watch` | `{ projectId }` | `{ stopped }` |
 | `get_failure_details` | `{ projectId, failureId }` | `{ name, file, message, stack, assertion? }` |
 
@@ -198,25 +200,24 @@ This project's tests are run through the `test-mcp` MCP server, not by shelling 
 `vitest`/`pnpm test` directly.
 
 - For fast, in-loop iteration while developing, call `run_tests` with
-  `{ projectId: "<id>", mode: "incremental" }` and leave `coverage` unset (it defaults to
-  `false` there, even once a map exists) — this stays fast because it never measures
-  coverage. Selection is conservative: an unmapped or uncertain file triggers a full-suite
+  `{ projectId: "<id>", mode: "incremental" }` and leave `coverage` unset — it defaults to
+  `false` there (coverage is full-suite-only; see below), so this stays fast and never
+  measures coverage. Selection is conservative: an uncertain file triggers a full-suite
   fallback rather than silently skipping a test.
-- Use `mode: "full"` (with `coverage: true`) as a **gate**, not something to avoid — before
-  a release, after touching shared/setup modules, or if incremental results seem wrong. It's
-  a single native Vitest coverage pass now (roughly the cost of a plain `vitest run`), not
-  something that needs to be minimized. It reports a whole-project coverage percentage but
-  does **not** refresh the source→test map (see below).
-- To improve incremental selection precision for specific files, call `run_tests` with
-  `{ projectId: "<id>", coverage: true, files: [...] }` naming them explicitly — this is the
-  only path that builds/refreshes the source→test map (cheap at this scale). Without ever
-  doing this, incremental selection still works, just via the static import graph alone
-  (slightly less precise for dynamic imports) rather than the coverage map.
+- Use `mode: "full"` as a **gate**, not something to avoid — before a release, after
+  touching shared/setup modules, or if incremental results seem wrong. Leave `coverage`
+  unset there too: it now defaults to `true` unconditionally (one native Vitest pass either
+  way makes coverage uniformly cheap on a full run — pass `false` to opt out).
+- **Never pass `coverage: true` alongside `mode: "incremental"` or `files: [...]`** — every
+  run, of any strategy, executes exactly one Vitest pass, and a single pass can report an
+  aggregate percentage but never per-test attribution. Coverage is full-suite-only; doing so
+  is rejected with a `ValidationError` naming the constraint, not silently downgraded.
 - Before a large or full run, call with `dryRun: true` first to see which files would run
   and why (the `reasoning` field), then execute that exact selection by passing its
   `planId` back in. An expired `planId` returns `PlanExpired` — just re-run the dry-run.
 - Don't re-derive test selection yourself (e.g. `git diff` + grep for related tests) — the
-  tool already does git-delta ∪ coverage-map selection with the fallback above.
+  tool already resolves the affected tests via Vitest's own static import graph, with a
+  full-suite fallback whenever that selection can't be trusted.
 - On failures, `run_tests` returns only `{ id, name, file, message }` per failure — call
   `get_failure_details({ projectId, failureId })` to get the stack trace and assertion diff
   before proposing a fix.
@@ -231,23 +232,30 @@ This project's tests are run through the `test-mcp` MCP server, not by shelling 
 // Incremental (default intent): run only tests affected by changed files.
 { "projectId": "…", "mode": "incremental" }
 
-// Full suite.
+// Full suite. coverage defaults to true (one native Vitest pass reports a whole-project %).
 { "projectId": "…", "mode": "full" }
 
-// Full-suite coverage gate: one native Vitest pass, reports a whole-project % — does NOT
-// refresh the source→test map (that's the incremental/selective path below).
-{ "projectId": "…", "mode": "full", "coverage": true }
+// Full suite, explicitly opting out of the coverage pass.
+{ "projectId": "…", "mode": "full", "coverage": false }
 
-// Specific files, with coverage: refreshes/builds the source→test map for these files.
-{ "projectId": "…", "coverage": true, "files": ["test/foo.test.ts"] }
+// REJECTED (ValidationError) -- coverage is full-suite-only; never pass true here.
+{ "projectId": "…", "mode": "incremental", "coverage": true }
 ```
 
-**Selection is conservative.** If a changed file is unknown to the coverage map, is a
-setup-baseline module (e.g. a shared `i18n.ts`), or belongs to a test that couldn't be
-measured, the daemon runs the **full suite** rather than risk skipping a relevant test. The
-coverage map is only built/refreshed by an incremental/selective run naming files with
-`coverage: true` — a full-suite run never touches it, by design, since attribution
-precision only matters for narrowing an incremental selection, not for a whole-project gate.
+**Selection is conservative.** An incremental request resolves the changed-file delta since
+the last successful run (or git HEAD) and hands it to Vitest's `related` config field, which
+resolves affected tests via the static import graph — the SAME single Vitest pass that then
+runs them, never a second one. If that resolves to zero test files despite a real change (a
+file nothing statically depends on), the daemon falls back to the **full suite** rather than
+risk skipping a relevant test — the only case where a single request runs Vitest twice. A
+brand-new source reachable only through a dynamic `import()`/`require(...)` still flags the
+result `degraded` (rather than a false "high"), since a dynamic edge is invisible to the
+static graph either way.
+
+Coverage is **full-suite-only** — there is no more separate incremental/selective coverage
+path, and no more source→test reverse map to build or refresh. A `coverage: true` request
+that resolves to anything other than a genuine full suite is rejected with a
+`ValidationError`, never silently ignored or downgraded.
 
 `run_tests` streams per-file progress as MCP `notifications/progress` when the client
 supplies a `progressToken`. The final response is the authoritative `TestResult`.
@@ -269,15 +277,13 @@ Plans are cached briefly; an expired `planId` returns `PlanExpired` — re-run t
 ### Watch mode
 
 ```jsonc
-{ "projectId": "…" }                    // start_watch — re-runs affected tests as files change
-{ "projectId": "…", "fastMode": false } // also refresh the coverage map (slower)
+{ "projectId": "…" } // start_watch — re-runs affected tests as files change
 ```
 
-`fastMode` defaults to `true` (skips coverage for speed). With `fastMode: false`, a
-watch-triggered run that resolves to an incremental/selective selection still refreshes the
-coverage map as before; one that falls back to a full-suite selection (e.g. a setup-file
-edit) takes the cheap native full-suite pass instead and does not refresh the map for that
-run. Poll `get_test_status` for the latest watch result; call `stop_watch` to end it.
+A watch-triggered run always runs incremental and never requests coverage — there is no
+`fastMode` opt-in/opt-out anymore (coverage is full-suite-only now, so there is nothing left
+to opt into during a fast edit-test loop). Poll `get_test_status` for the latest watch
+result; call `stop_watch` to end it.
 
 ## Monitoring UI (for humans)
 
@@ -316,7 +322,7 @@ check that also needs no auth.
 | Token file | `~/.test-mcp/token` | plaintext bearer for the `headersHelper` flow, mode `0600` |
 | Project registry | `~/.test-mcp/registry.json` | central record of registered projects |
 | Per-project config | `<git-root>/.test-mcp/config.json` | `projectId`, `stateDir`; git-ignored |
-| Coverage map | `<git-root>/.test-mcp/coverage-map.json` | source→test reverse map |
+| Last-run snapshot | `<git-root>/.test-mcp/last-run-snapshot.json` | content-hash baseline for incremental selection; git-ignored |
 
 Environment overrides:
 

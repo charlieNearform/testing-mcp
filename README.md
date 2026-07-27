@@ -4,15 +4,17 @@ MCP (Model Context Protocol) daemon for intelligent **Vitest** orchestration.
 
 A single background daemon exposes an MCP server over loopback HTTP. AI agents (or CI) call
 its tools to run a project's Vitest suite intelligently — running only the tests affected by
-changed files (git delta ∪ coverage map) and falling back to the full suite whenever
-selection is uncertain. Each project runs under its **own** Vitest in a dedicated worker
-subprocess; the daemon never imports a project's Vitest itself.
+changed files (resolved via Vitest's own static import graph) and falling back to the full
+suite whenever selection is uncertain. Every run executes exactly one Vitest pass; coverage
+is available only on a full-suite run, from that same pass. Each project runs under its
+**own** Vitest in a dedicated worker subprocess; the daemon never imports a project's Vitest
+itself.
 
 ## Features
 
 - **Incremental selection** — run only tests affected by changed files, with a conservative
   full-suite fallback (never silently skips).
-- **Coverage-aware** — builds a source→test reverse map from runtime V8 coverage.
+- **Full-suite coverage** — one native Vitest coverage pass, no separate measurement step.
 - **Watch mode** — re-run affected tests as files change.
 - **Minimal output** — failures first; full stacks fetched on demand.
 - **Human monitoring UI** — a live status page at `/ui`.
