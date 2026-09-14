@@ -199,4 +199,4 @@ development_status:
   epic-8-retrospective: optional
 
   # Maintenance / Hotfixes (out-of-epic bugfixes routed through BMAD)
-  fix-frontend-registered-path-normalization: review  # patch supplied out-of-cycle, applied to working tree 2026-09-14; awaiting code-review before it lands (story-fix-frontend-registered-path-normalization.md)
+  fix-frontend-registered-path-normalization: review  # code-review clean 2026-09-14 (5 patches applied); PR #1 open against main, awaiting merge (story-fix-frontend-registered-path-normalization.md)
