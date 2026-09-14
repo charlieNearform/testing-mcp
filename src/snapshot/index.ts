@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { z } from "zod";
+import { resolveGitRoot, splitRepoPathsByProject } from "../git/paths.js";
 import { filterChangedPaths, loadIgnorePatterns } from "../selection/index.js";
 
 /**
@@ -48,8 +49,10 @@ export function snapshotPath(projectRoot: string): string {
  */
 export function listCandidateFiles(projectRoot: string): string[] | null {
   try {
+    const gitRoot = resolveGitRoot(projectRoot);
+    if (!gitRoot) return null;
     const gitOpts = {
-      cwd: projectRoot,
+      cwd: gitRoot,
       encoding: "utf8" as const,
       stdio: ["ignore", "pipe", "ignore"] as ("ignore" | "pipe")[],
     };
@@ -58,13 +61,18 @@ export function listCandidateFiles(projectRoot: string): string[] | null {
     // making its edits invisible to the delta (an under-select — the one non-safe git-parsing edge).
     const tracked = execFileSync("git", ["ls-files", "-z"], gitOpts);
     const untracked = execFileSync("git", ["ls-files", "-z", "--others", "--exclude-standard"], gitOpts);
-    const normalize = (raw: string): string[] =>
-      raw
-        .split("\0")
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((s) => s.split(path.sep).join("/"));
-    const all = [...normalize(tracked), ...normalize(untracked)];
+    // The snapshot universe is project-scoped: keep only paths inside the project, dropping any
+    // outside a subdir-registered project (they are not part of its file set).
+    const splitGitPaths = (raw: string): string[] =>
+      splitRepoPathsByProject(
+        projectRoot,
+        gitRoot,
+        raw
+          .split("\0")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ).inside;
+    const all = [...splitGitPaths(tracked), ...splitGitPaths(untracked)];
     return [...new Set(filterChangedPaths(all, loadIgnorePatterns(projectRoot)))];
   } catch {
     return null;

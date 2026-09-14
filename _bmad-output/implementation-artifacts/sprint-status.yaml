@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-13
-last_updated: 2026-07-27
+last_updated: 2026-09-14
 project: test-server-mcp
 project_key: NOKEY
 tracking_system: file-system
@@ -197,3 +197,6 @@ development_status:
   8-6-mcp-async-run-tests-get-test-status-live-payload: done    # as-built; code review: wait-forever null bug, race-timer leak, AD-21 payload-shape patches applied
   8-7-ui-live-test-list-log-tail-follow: done               # as-built; code review: SSE duplicate-line-on-new-run patch applied
   epic-8-retrospective: optional
+
+  # Maintenance / Hotfixes (out-of-epic bugfixes routed through BMAD)
+  fix-frontend-registered-path-normalization: review  # patch supplied out-of-cycle, applied to working tree 2026-09-14; awaiting code-review before it lands (story-fix-frontend-registered-path-normalization.md)

@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { resolveGitRoot, splitRepoPathsByProject } from "../git/paths.js";
 import type { Confidence } from "../types/contracts.js";
 
 export type { Confidence };
@@ -313,6 +314,13 @@ export function loadIgnorePatterns(projectRoot: string): string[] {
  * here (Story 6.5); an all-filtered set collapses to `[]`, which `plan()` treats as the
  * existing "no changes detected" incremental no-op — not a full suite.
  *
+ * For a project registered at a repo SUBDIRECTORY (e.g. `frontend/`), git emits repo-root-relative
+ * paths for the WHOLE repo; in-project paths are mapped to project-relative, and any changed path
+ * OUTSIDE the project that isn't test-irrelevant (see `DEFAULT_IGNORE_PATTERNS`, which covers
+ * `.github/**`, `docs/**`, root config, …) could be a dependency `related`'s static graph can't
+ * trace — so we escalate to the full suite (return null) rather than silently dropping it
+ * (architecture invariant 5). Root-registered projects have no outside paths and are unaffected.
+ *
  * `added` is the NEW subset — untracked files (`git ls-files --others --exclude-standard`) plus
  * staged additions (`git diff --cached --diff-filter=A`, so `git add`-ed-but-uncommitted new
  * files still count as new). Normalized and run through the SAME filter as `files`, so the
@@ -321,8 +329,10 @@ export function loadIgnorePatterns(projectRoot: string): string[] {
  */
 export function getChangedFiles(projectRoot: string): { files: string[]; added: string[] } | null {
   try {
+    const gitRoot = resolveGitRoot(projectRoot);
+    if (!gitRoot) return null;
     const gitOpts = {
-      cwd: projectRoot,
+      cwd: gitRoot,
       encoding: "utf8" as const,
       stdio: ["ignore", "pipe", "ignore"] as ("ignore" | "pipe")[],
     };
@@ -338,16 +348,31 @@ export function getChangedFiles(projectRoot: string): { files: string[]; added: 
       gitOpts,
     );
     const patterns = loadIgnorePatterns(projectRoot);
-    const normalize = (raw: string): string[] =>
-      raw
-        .split("\0")
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((s) => s.split(path.sep).join("/"));
-    const untrackedPaths = normalize(untracked);
-    const files = unique(filterChangedPaths([...normalize(tracked), ...untrackedPaths], patterns));
+    const splitGitPaths = (raw: string) =>
+      splitRepoPathsByProject(
+        projectRoot,
+        gitRoot,
+        raw
+          .split("\0")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      );
+    const trackedSplit = splitGitPaths(tracked);
+    const untrackedSplit = splitGitPaths(untracked);
+    const stagedSplit = splitGitPaths(stagedAdded);
+    // A relevant change outside the project directory (a sibling/parent path not covered by the
+    // built-in ignore set) may be a dependency `related` can't see — escalate to the full suite
+    // rather than under-select. Filtered by DEFAULT_IGNORE_PATTERNS only (project-relative
+    // `.test-mcp-ignore` semantics don't apply to repo-root-relative outside paths).
+    const outsideRelevant = filterChangedPaths(
+      unique([...trackedSplit.outside, ...untrackedSplit.outside, ...stagedSplit.outside]),
+      [...DEFAULT_IGNORE_PATTERNS],
+    );
+    if (outsideRelevant.length > 0) return null;
+    const untrackedPaths = untrackedSplit.inside;
+    const files = unique(filterChangedPaths([...trackedSplit.inside, ...untrackedPaths], patterns));
     const added = unique(
-      filterChangedPaths([...untrackedPaths, ...normalize(stagedAdded)], patterns),
+      filterChangedPaths([...untrackedPaths, ...stagedSplit.inside], patterns),
     );
     return { files, added };
   } catch {
@@ -373,6 +398,9 @@ const DYNAMIC_IMPORT_PATTERN = 'import[ \\t]*\\(|require[ \\t]*\\([ \\t]*[^\'"]'
  */
 export function hasDynamicImportSyntax(projectRoot: string): boolean {
   try {
+    // Run from the project dir, not the git root: `git grep` from a subdirectory scopes to that
+    // subtree, so a subdir-registered project (e.g. `frontend/`) is not tainted by a sibling
+    // (`backend/`) that happens to contain dynamic-import syntax.
     execFileSync(
       "git",
       ["grep", "-I", "--quiet", "--untracked", "--exclude-standard", "-E", DYNAMIC_IMPORT_PATTERN],
