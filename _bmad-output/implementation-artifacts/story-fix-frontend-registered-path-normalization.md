@@ -1,6 +1,6 @@
 # Fix: Path normalization for subdirectory-registered projects (`register --dir <subdir>`)
 
-Status: review
+Status: done
 
 > **Routed through BMAD retroactively.** A ready-to-apply patch was supplied out-of-cycle and
 > applied to the working tree on 2026-09-14 (not yet committed). Per CLAUDE.md, it is recorded
@@ -69,8 +69,8 @@ projects.
   single-resolve/single-canonicalize hot-path cleanup, and integration test coverage.
 - Verified: `pnpm run typecheck` clean, `pnpm test` 305/305 (51 files), `pnpm build` clean. Daemon
   restarted by `pnpm build` (pid → 82181) and running the reviewed code locally.
-- Review clean (0 unresolved findings). **Not yet committed or pushed** — landing (commit/push to
-  `main`) is user-gated and pending explicit go-ahead.
+- Review clean (0 unresolved findings). Shipped via PR #1
+  (branch `fix/frontend-registered-path-normalization`) against `main`.
 - Root-registered projects (projectRoot === gitRoot, incl. this repo) hit the passthrough
   short-circuit in `splitRepoPathsByProject` → zero behavioural change for them.
 
