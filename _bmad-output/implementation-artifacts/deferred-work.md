@@ -1,5 +1,15 @@
 # Deferred Work Ledger
 
+## Deferred from: code review of story-fix-frontend-registered-path-normalization (2026-09-14)
+
+- source_spec: `story-fix-frontend-registered-path-normalization.md`
+  summary: `listCandidateFiles` (`src/snapshot/index.ts`) now runs `git ls-files` from the git root (was: the project subdir) with no pathspec, so for a subdirectory-registered project it enumerates the ENTIRE repo file list and then discards everything outside the project via `normalizeRepoPathsToProject`. Correctness is fine; it is O(repo-size) work (plus ~2 `realpathSync` per path) where the old subdir-scoped `ls-files` returned only the project's files. Scope the git command with a `-- <subdir-relative-to-gitRoot>` pathspec so git filters instead of the daemon.
+  evidence: Found via adversarial code review (Blind Hunter). Confirmed empirically that `git ls-files` from a subdir returns only that subdir's files while from the git root it returns the whole tree. Entangled with the open Decision item (how out-of-project paths should be treated), so deferred until that is resolved.
+
+- source_spec: `story-fix-frontend-registered-path-normalization.md`
+  summary: Project files hosted inside a git submodule are invisible to `git ls-files` / `git diff` run at the superproject root (no `--recurse-submodules`), so their changes would never be selected (under-select). Pre-existing limitation of the git-selection design, not introduced by this patch.
+  evidence: Found via Edge Case Hunter. Pre-existing; noted for completeness. Would need `--recurse-submodules` or resolving the nearest enclosing repo of `projectRoot`.
+
 ## Deferred from: spec-ui-rerender-and-selection-threshold (2026-07-24)
 
 - source_spec: `spec-ui-rerender-and-selection-threshold.md`
